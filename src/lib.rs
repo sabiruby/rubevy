@@ -30,6 +30,10 @@
 //!   made with `Task.new`.
 //! * `puts`/`p` output is forwarded to Bevy's log.
 //!
+//! Where a game's own systems go in the frame is [`RubevySet`]: an answering
+//! system in [`RubevySet::Answer`] makes a `Rubevy.ask` round trip cost one
+//! frame.
+//!
 //! A script may `require` another, which reads from the asset directory
 //! ([`RubevyPlugin::with_asset_root`], `assets` by default): `.mrb` always,
 //! `.rb` only in a build with the `ruby-source` feature, which brings the
@@ -950,7 +954,63 @@ impl sabiruby::Host for FileHost {
     }
 }
 
-/// Adds the VM, the `.mrb` asset loader and the three systems.
+/// Where a host's systems go in the frame, so that a script's question is answered on the frame
+/// it was asked and the script wakes on the next one.
+///
+/// The three sets run in this order inside `Update`:
+///
+/// | set | what is in it | what it is for |
+/// |---|---|---|
+/// | [`RubevySet::Deliver`] | `start_scripts`, `deliver_answers`, the release sweep | what arrived between the frames reaches the VM before a script runs |
+/// | [`RubevySet::Tick`] | `tick_scripts`, `drain_commands`, `apply_component_writes` | the scripts run, and what they asked for becomes a [`Request`] |
+/// | [`RubevySet::Answer`] | rubevy's own `answer_components` — **and the host's answering systems** | the questions this frame asked are answered before the frame ends |
+///
+/// **Put the system that calls [`ScriptWorld::take_requests`] in [`RubevySet::Answer`]**:
+///
+/// ```no_run
+/// # use bevy::prelude::*;
+/// # use rubevy::{Answer, RubevyPlugin, RubevySet, ScriptWorld};
+/// # fn answer_requests(mut world: ResMut<ScriptWorld>) {
+/// #     for request in world.take_requests() { world.answer(&request, Answer::Nil); }
+/// # }
+/// # fn build(app: &mut App) {
+/// app.add_plugins(RubevyPlugin::default())
+///     .add_systems(Update, answer_requests.in_set(RubevySet::Answer));
+/// # }
+/// ```
+///
+/// **What it is worth.** A round trip then takes **one frame**: the `Rubevy.ask` happens in
+/// `Tick` and leaves a command behind, `drain_commands` (still `Tick`) turns it into a
+/// [`Request`], the host answers it in `Answer`, and the script wakes in the next frame's
+/// `Tick`. That one frame is checked in `tests/scheduling.rs`.
+///
+/// **What it costs not to use it.** A system that is in no set is ordered against nothing, so
+/// where Bevy runs it is up to the executor and the rest of the app. Almost everywhere is fine
+/// — before the sets, after them, in `PreUpdate`, in `PostUpdate` — because anything that
+/// answers before the *next* `Tick` is soon enough. The one place that is not is **between
+/// `tick_scripts` and `drain_commands`**: there the system misses the question this frame asked
+/// (it becomes a [`Request`] a moment later) and answers the previous frame's too late for this
+/// frame's scripts, so every round trip costs **two** frames. That is what rubevy_games measured
+/// with an unordered answering system: 2.0 frames for every question the game answered against
+/// 1.0 for every question rubevy answered itself
+/// (`docs/worklog/2026-09-16-showpieces-d2-d3.md` there). The cost was not a rule of the bridge,
+/// it was where the system happened to land — and the point of the set is that `Deliver` and
+/// `Answer` are outside that window by construction. (Do not put an answering system *inside*
+/// [`RubevySet::Tick`]: that is the one set that contains the window.)
+///
+/// The questions rubevy answers itself (a component by name) have always cost one frame, and
+/// still do: `answer_components` is in `Answer` with everybody else.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RubevySet {
+    /// Before the scripts run: what finished between the frames reaches the VM.
+    Deliver,
+    /// The scripts run, and their questions become [`Request`]s.
+    Tick,
+    /// The questions are answered — where a host's own answering systems go.
+    Answer,
+}
+
+/// Adds the VM, the `.mrb` asset loader and the systems, in the three sets of [`RubevySet`].
 pub struct RubevyPlugin {
     /// Where a `require` reads from (Bevy's asset directory).
     pub asset_root: String,
@@ -981,18 +1041,19 @@ impl Plugin for RubevyPlugin {
             .init_asset_loader::<MrbLoader>()
             .add_message::<ScriptEnded>()
             .insert_resource(world)
+            .configure_sets(Update, (RubevySet::Deliver, RubevySet::Tick, RubevySet::Answer).chain())
             .add_systems(
                 Update,
-                (
-                    start_scripts,
-                    deliver_answers,
-                    answer_components,
-                    tick_scripts,
-                    drain_commands,
-                    apply_component_writes,
-                )
-                    .chain(),
-            );
+                (start_scripts, deliver_answers, release_values).chain().in_set(RubevySet::Deliver),
+            )
+            .add_systems(
+                Update,
+                (tick_scripts, drain_commands, apply_component_writes).chain().in_set(RubevySet::Tick),
+            )
+            // rubevy's own answering system sits in the same set a host's does, so that a game
+            // reading `ScriptWorld` in `Answer` and rubevy reading it here are ordered against
+            // each other by Bevy rather than by luck
+            .add_systems(Update, answer_components.in_set(RubevySet::Answer));
     }
 }
 
@@ -1032,6 +1093,17 @@ fn start_scripts(
     }
 }
 
+/// Lets the collector have the values of the [`Request`]s that were dropped since the last
+/// frame ([`ScriptWorld::release_dropped_values`]).
+///
+/// It is in [`RubevySet::Deliver`], which is the last moment with the `Vm` before a script runs:
+/// a host answering in [`RubevySet::Answer`] drops its requests at the end of the frame, and the
+/// values they held stop being registered at the head of the next one, so an object can be
+/// collected on the first frame it is no longer needed.
+fn release_values(mut world: ResMut<ScriptWorld>) {
+    world.release_dropped_values();
+}
+
 /// Moves the scheduler's clock on by the frame time and runs the ready tasks
 /// for up to the frame's budget.
 fn tick_scripts(
@@ -1046,11 +1118,6 @@ fn tick_scripts(
     let elapsed = time.elapsed_secs();
     let frame_no = frame.0;
     let world = &mut *world;
-
-    // the values of requests nobody holds any more (`Arg::Value`) are let go of here, at the
-    // head of the frame: it is the last moment with the `Vm` before a script runs, so an
-    // object released now can be collected on the same frame it stopped being needed
-    world.release_dropped_values();
 
     // frame time in ticks, keeping what did not make a whole one for next frame
     let unit_ms = world.vm.task_tick_unit_ms() as f32;
@@ -1203,15 +1270,16 @@ fn entity_from_bits(bits: u64) -> Option<Entity> {
 /// `Rubevy.find`.
 const RESERVED_KINDS: [&str; 4] = ["component.get", "component.has", "components", "entities.with"];
 
-/// Answers the questions about components, at the head of the frame and before the scripts
-/// run.
+/// Answers the questions about components, in [`RubevySet::Answer`] — after the scripts have
+/// run and after the writes they made have been applied.
 ///
-/// A question asked on one frame is answered at the head of the next: the `Rubevy.ask` leaves
-/// a command behind, [`drain_commands`] turns it into a request at the end of that frame, and
-/// this system answers it before [`tick_scripts`] resumes the script. So a read costs one
-/// frame of waiting, which is the shape to write scripts in — touch components when something
-/// happens (at the start, on an event, after a `sleep`), not a dozen times a frame. The task is
-/// parked meanwhile and costs nothing; the other scripts keep running.
+/// A question asked on one frame is answered at the end of that same frame: the `Rubevy.ask`
+/// leaves a command behind, [`drain_commands`] turns it into a request, [`apply_component_writes`]
+/// makes the writes of the same frame (so a read after a write sees it), and this system answers
+/// before the frame ends. The script wakes in the next frame's [`tick_scripts`], so a read costs
+/// one frame of waiting, which is the shape to write scripts in — touch components when
+/// something happens (at the start, on an event, after a `sleep`), not a dozen times a frame.
+/// The task is parked meanwhile and costs nothing; the other scripts keep running.
 ///
 /// What is reachable here is what is registered: a type with `#[derive(Reflect)]`,
 /// `#[reflect(Component)]` and `app.register_type::<T>()`. Bevy registers its own

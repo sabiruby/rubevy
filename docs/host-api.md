@@ -52,9 +52,13 @@ found = Rubevy.ask("scan", 40.0).pop     # parked here; the other scripts keep r
 Rubevy.move_to found[0], found[1], 0.0 if found
 ```
 
-The game answers in a system of its own:
+The game answers in a system of its own, **put in `RubevySet::Answer`** (the next section says
+what that buys):
 
 ```rust
+app.add_plugins(RubevyPlugin::default())
+    .add_systems(Update, answer_requests.in_set(RubevySet::Answer));
+
 fn answer_requests(mut world: ResMut<ScriptWorld>, /* whatever the answer needs */) {
     for request in world.take_requests() {          // Request { entity, kind, args, queue }
         let answer = Answer::List(vec![3.0, 3.5]);  // Nil / Bool / Num / Text / List / Rows / Entity
@@ -86,6 +90,48 @@ actually run.
   is nil, a bool, a number, a string, an entity, a list of numbers, or a table of them
   ([`Answer::Rows`] — every robot with its team and hp, say), or anything the host builds in the
   VM itself (`answer_value`). The question's side is described below.
+
+## Where the game's systems go in the frame (`RubevySet`)
+
+`RubevyPlugin` puts its own systems into three public sets, in this order inside `Update`:
+
+| set | what is in it | what it is for |
+|---|---|---|
+| `RubevySet::Deliver` | `start_scripts`, `deliver_answers`, the release sweep | what arrived between the frames reaches the VM before a script runs |
+| `RubevySet::Tick` | `tick_scripts`, `drain_commands`, `apply_component_writes` | the scripts run, and what they asked for becomes a `Request` |
+| `RubevySet::Answer` | rubevy's own `answer_components` — **and the game's answering systems** | the questions this frame asked are answered before the frame ends |
+
+```rust
+app.add_systems(Update, answer_requests.in_set(RubevySet::Answer));
+```
+
+**What it buys: a round trip costs one frame.** The `Rubevy.ask` happens in `Tick` and leaves a
+command behind, `drain_commands` (still `Tick`) turns it into a `Request`, the game answers it in
+`Answer`, and the script wakes in the next frame's `Tick`. `tests/scheduling.rs` measures this
+from the script's own side — six `Rubevy.ask(…).pop` round trips, each one exactly one
+`$rubevy[:frame]` apart.
+
+**What it costs not to use it.** A system ordered against nothing lands wherever Bevy's executor
+puts it, which almost everywhere is fine: before the sets, after them, in `PreUpdate`, in
+`PostUpdate` — anything that answers before the *next* `Tick` is soon enough. The one window that
+is not fine is **between `tick_scripts` and `drain_commands`**: a system there misses the question
+this frame asked (it becomes a `Request` a moment later) and answers the previous frame's too late
+for this frame's scripts, so every round trip costs **two** frames. SabiRuby Battle was in exactly
+that window before the sets existed and measured 2.0 frames for every question the game answered,
+against 1.0 for every question rubevy answered itself (rubevy_games,
+`docs/worklog/2026-09-16-showpieces-d2-d3.md`). The point of the set is not that two frames was a
+rule — it is that where the system landed was luck, and now it is not.
+
+Both `Deliver` and `Answer` are outside that window by construction. `Answer` is the one to use:
+it is the only placement where a system sees the question **on the frame it was asked**, so an
+answer may depend on the rest of that frame (positions after `move_robots`, events of this frame,
+whatever the game has just worked out). A system in `Deliver` also costs one frame, but it is
+always answering the previous frame's questions. Do not put an answering system *inside*
+`RubevySet::Tick` — that is the one set that contains the window.
+
+The sets also give a game the other orderings it may want: `.before(RubevySet::Tick)` for a system
+that must have moved the world before the scripts look at it, `.after(RubevySet::Answer)` for one
+that runs on what the scripts did this frame.
 
 ## What a question may carry (`Arg`)
 
@@ -241,11 +287,13 @@ only have its fields written while it is already the current one. A field that c
 it was given is logged with its path (`translation.x: takes a number`) and skipped; the rest of
 the write still happens.
 
-**A read costs a frame.** `e[:Transform]` is `Rubevy.ask` under a nicer name: the question
-goes out with the frame's commands and rubevy answers it at the head of the next frame, before
-the scripts run. The task is parked meanwhile, so it costs nothing and the other scripts keep
-running, but this is a boundary for declaration time and for events — not for a dozen reads a
-frame. `Rubevy.find` walks every entity in the world, so it is for a lookup now and then.
+**A read costs a frame.** `e[:Transform]` is `Rubevy.ask` under a nicer name: the question goes
+out with the frame's commands and rubevy answers it at the end of the same frame, in
+`RubevySet::Answer` and after this frame's writes have been applied (so a read after a write sees
+it); the script has the answer in the next frame's `Tick`. The task is parked meanwhile, so it
+costs nothing and the other scripts keep running, but this is a boundary for declaration time and
+for events — not for a dozen reads a frame. `Rubevy.find` walks every entity in the world, so it
+is for a lookup now and then.
 
 The four kinds rubevy answers itself — `component.get`, `component.has`, `components`,
 `entities.with` — never reach `ScriptWorld::take_requests`: they are sorted out where the
