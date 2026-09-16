@@ -88,6 +88,16 @@ rubevy_games の `docs/worklog/2026-09-16-reflex.md`（この橋の上に reflex
 | 続 1 | `funcall` で代用していた 3 か所を VM の入り口へ（`hash_keys`、`task_queue_len`、`task_queue_try_pop`）。`make_room` は publish のたびに回るので、毎回の Ruby 呼び出しが 2 本消える | **済み**（2026-09-16、`83cd763`。VM は `11bcaa0` で main `1ae258f` に） |
 | 続 2 | `Task.new` で作ったタスクが、作った側のエンティティを引き継ぐ（`Rubevy.ask`／`subscribe`／`entity` がその中で使える） | **済み**（2026-09-16、`bf83076`）。VM に親を持たせず、`src/prelude.rb` の `Task.new` で写す |
 | 続 3 | 購読解除でキューを `close` し、待っている `pop` に `Rubevy::Unsubscribed` を上げる（待っていたタスクの `ensure` が走り、タスクが終わる） | **済み**（2026-09-16、`9030fae`） |
+| 続 4 | 公開の `RubevySet::{Deliver, Tick, Answer}`。ゲームの答えるシステムを `Answer` に置くと往復が 1 フレーム。`answer_components` も `Answer` へ | **済み**（2026-09-17、`b2cd03d`）。`tests/scheduling.rs` |
+| 続 5 | `budget == 0`（一時停止）の間はスケジューラの時計を進めない。寝ているタスクが再開の瞬間にまとめて起きない | **済み**（2026-09-17、`cdf412c`）。`tests/pause.rs` |
+| 続 6 | ホストが `Startup` で VM に足す道（`ScriptWorld::vm` は元から `pub`。`install_json`、`define_fn`）。足したのは rustdoc の警告と文書とテスト | **済み**（2026-09-17、`3621fe8`）。`tests/vm_setup.rs` |
+| 続 7 | `answer_value` の閉包で `#[derive(RubyClass)]` の Data オブジェクトを返す（元からできた。`HostStore` は `set_host_state`/`set_on_free` と別の場所） | **済み**（2026-09-17、`68c7216`）。`tests/host_data.rs` |
+
+続 4 から 続 7 は 2026-09-17 の著者判断で、ブランチ `scheduling-and-vm-access`。
+続 4 と 続 5 は rubevy_games の `docs/worklog/2026-09-16-showpieces-d2-d3.md` が
+「直すなら rubevy 側」と書いて残していったもの（D3 の往復フレーム数の測定と、`P` の一時停止）。
+続 6 と 続 7 は次のゲームが要るもので、**どちらも調べたら既にできていた**ので、
+足したのは文書とテストと rustdoc の警告だけである。
 
 続 2 と続 3 は、reflex の worklog が「ゲーム側で手で回避した」と書いていたもの
 （`@rubevy_entity` を手で写す、倒れた機体の `Scout-hit` が `WAITING` のまま残る）で、
@@ -96,5 +106,6 @@ rubevy が引き受けたので rubevy_games 側の回避は外せる。
 ## 記録
 
 * 過程は `docs/worklog/2026-09-15-ecs-bridge.md`（A）と `2026-09-15-events.md`（B）、
-  続きは `docs/worklog/2026-09-16-bridge-followups.md`。
+  続きは `docs/worklog/2026-09-16-bridge-followups.md`（続 1〜3）と
+  `docs/worklog/2026-09-17-scheduling-and-vm-access.md`（続 4〜7）。
 * 終わったらこの文書の「状況」を本体が更新する。

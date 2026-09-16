@@ -6,7 +6,7 @@ This repository is small, so its documents sit flat here; the worklog has its ow
 
 | file | language | what it is |
 |---|---|---|
-| [host-api.md](host-api.md) | English | what a script can say to the game and the game to a script: `Rubevy.ask`, what a question may carry (`Arg`, including a Hash or an Array), answers, entities, components by name, events, `Rubevy::Proxy`, time limits, replacing a script |
+| [host-api.md](host-api.md) | English | what a script can say to the game and the game to a script: `Rubevy.ask`, where the game's systems go in the frame (`RubevySet`), what a question may carry (`Arg`, including a Hash or an Array), answers (including an object of the game's own), entities, components by name, events, `Rubevy::Proxy`, adding to the VM at `Startup`, time limits and pausing, replacing a script |
 | [rust-bridge.ja.md](rust-bridge.ja.md) | Japanese | how a robot's question travels through rubevy and the game and back, point by point against embedding the C mruby |
 | [outlook.md](outlook.md) | English | what rubevy builds on SabiRuby, in order, with the status of each item; the honest comparison with Lua; the possibilities |
 | [outlook.ja.md](outlook.ja.md) | Japanese | the possibilities and the status, in plain Japanese |
@@ -26,3 +26,4 @@ The worklog, newest last:
 | [worklog/2026-09-15-entity-index.md](worklog/2026-09-15-entity-index.md) | `e[:Transform]` once the VM stopped putting a boundary around `OP_GETIDX`: what changed in sabiruby, and why `get` stayed |
 | [worklog/2026-09-16-arg-value.md](worklog/2026-09-16-arg-value.md) | a Hash or an Array as an argument of `Rubevy.ask`: why the value travels rather than a copy of it, and the two-step release that a `Drop` without a `Vm` needs |
 | [worklog/2026-09-16-bridge-followups.md](worklog/2026-09-16-bridge-followups.md) | the three the bridge left behind: `funcall` replaced by the VM's own entry points, a `Task.new` task carrying the script's entity, and the closed queue that ends a waiting task |
+| [worklog/2026-09-17-scheduling-and-vm-access.md](worklog/2026-09-17-scheduling-and-vm-access.md) | `RubevySet` (where a game's answering system goes, and why two frames was luck rather than a rule), a pause that does not spend a `sleep`, and the two things the next game needed that turned out to be there already |

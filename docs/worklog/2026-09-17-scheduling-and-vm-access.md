@@ -9,7 +9,7 @@ rubevy main `9104f7c` から。
 このあとのコミットが「rubevy で何が変わったか」だけを読める差分であってほしいから。
 更新した時点で `cargo test --workspace` は 41 件すべて通っている（10 ファイル）。
 
-## 1. `RubevySet` — ゲームのシステムがフレームのどこに入るか（`c1e2…`）
+## 1. `RubevySet` — ゲームのシステムがフレームのどこに入るか（`b2cd03d`）
 
 ### 今どうなっていたか
 
@@ -112,7 +112,7 @@ test a_host_answering_in_the_deliver_set_sees_the_previous_frame ... ok
 `examples/sensor.rs` と `examples/async.rs` の `answer_requests` を `.in_set(RubevySet::Answer)` にした。
 `sensor.rs` はわざと 2 フレーム遅らせて答える例なので、数字は変わらない（遅らせているのは例の方）。
 
-## 2. 止まった VM はスケジューラの時計を進めない
+## 2. 止まった VM はスケジューラの時計を進めない（`cdf412c`）
 
 ### 今どうなっていたか
 
@@ -170,7 +170,7 @@ test a_pause_does_not_spend_a_sleep ... ok
 対照のテスト（止めない場合に 0.1 秒くらい寝る）を足したのは、
 「再開後に 0.05 秒以上たってから起きた」という主張が、測っている量として正しいことを言うため。
 
-## 3. 起動時にホストが VM に触る道
+## 3. 起動時にホストが VM に触る道（`3621fe8`）
 
 ### 調べたら、もうあった
 
@@ -230,7 +230,7 @@ test the_vm_is_reachable_while_the_app_is_still_being_built ... ok
 SabiRuby の `inspect` は `=>` の前後に空白を入れる（`{"x" => 1.5}`）。CRuby 3.4 の書式である。
 2 本目は「`run()` の前にリソースを触る」道で、システムを 1 本も書かずに同じことができることの確認。
 
-## 4. `Answer` にホストの Data オブジェクトを載せる
+## 4. `Answer` にホストの Data オブジェクトを載せる（`68c7216`）
 
 ### 調べたら、これももうできた
 
@@ -270,3 +270,31 @@ test the_value_is_dropped_when_the_object_is_collected ... ok
 `#[ruby_methods]` の `register` は `Startup` で 1 回呼ぶ。クラスと置き場は最初の `into_ruby` で
 勝手にできるので、`register` が足すのは**メソッドだけ**である。これは
 sabiruby の `macros/src/expand.rs:184` を読んで確かめた（`register_class` → `tag` → メソッド群）。
+
+## 全体の確認
+
+```
+cargo test --workspace     14 ファイル / 全部 ok（新しいのは scheduling 3、pause 2、vm_setup 2、host_data 2、doctest 8）
+cargo build --examples     ok
+cargo doc --no-deps        warning 0
+```
+
+ベンチは取っていない（指示どおり）。`RubevySet` の変更はシステムの並べ方であって
+1 フレームあたりの仕事は増えていない（`release_dropped_values` が `tick_scripts` の中の
+1 行からシステム 1 本になったぶん、システムの数が 6 から 7 になった）。
+
+## rubevy_games に何を伝えるか
+
+* **`answer_requests`**: `.in_set(RubevySet::Answer)` を付ける。`use rubevy::RubevySet;` が要る。
+  13 本の `.chain()` の中にいるので、鎖ごと `Answer` に入れるか、`answer_requests` だけ鎖から出して
+  `Answer` に入れるかはゲーム側の判断（鎖の他の 12 本は `ScriptWorld` を触らないので、
+  どちらでも質問の往復は 1 フレームになる）。D3 の測定を同じスクリプトで取り直せば、
+  `ask status` が 2.0 → 1.0 になるはず。
+* **`P` の一時停止**: **何も変えなくてよい。** `budget = 0` がそのまま「時計も止まる」になった。
+  selftest に「止めている間に寝ていたタスクが起きないこと」を足せるならそれが確認になる。
+* **庭（次のゲーム）の `install_json`**: `Startup` のシステムで `ResMut<ScriptWorld>` を取り、
+  `sabiruby_serde::install_json(&mut world.vm)`。ゲーム側の `Cargo.toml` に
+  `sabiruby-serde` を足す（rubevy は持っていない）。
+* **Data オブジェクトの答え**: `world.answer_value(&request, |vm| Genome { … }.into_ruby(vm))`。
+  クラスのメソッドは `Startup` で `Genome::register(&mut world.vm)`。
+  ゲーム側の `Cargo.toml` の sabiruby に `features = ["macros"]` が要る。
