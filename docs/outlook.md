@@ -12,7 +12,7 @@ Bevy's `Time`, a budget of instructions and time limits per frame, `Rubevy.ask` 
 ask the game something and wait, `ScriptStats` for what a script spends and where it stands,
 the task terminated when its `ScriptTask` is removed or the entity despawned, `puts` to the log
 and a `ScriptEnded` message. The game that uses all of it is SabiRuby Battle
-(`sabiruby/rubevy_games`), which also runs in the browser: https://sabiruby.github.io/rubevy_games/
+(`sabiruby/rubevy_games`), which also runs in the browser: https://sabiruby.github.io/rubevy_games/sabibots/ (the second game, Garden, at `…/garden/`; the entry page lists both)
 
 ## Status at a glance (2026-09-15)
 

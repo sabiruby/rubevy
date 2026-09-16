@@ -78,7 +78,7 @@ Ruby で書いたゲームを、机の上でも、リンクを送った先でも
 Ruby のファンタジーコンソールです。
 
 **いまできること**: SabiRuby Battle は、同じコードから PC 版とブラウザ版をビルドし分け、ブラウザ版を
-https://sabiruby.github.io/rubevy_games/ で公開しています（差は `sabibots/src/platform.rs` に集め、ビルドの対象で切り替え）。
+https://sabiruby.github.io/rubevy_games/sabibots/ で公開しています（2 本目の箱庭は `…/garden/`、入口は `…/rubevy_games/`）（差は `sabibots/src/platform.rs` に集め、ビルドの対象で切り替え）。
 ブラウザ版では、ゲームの中の VM（Rust）とは別に、Playground のコンパイラ（本家の C を wasm にしたもの）を読み込み、
 ロボットの `.rb` をその場でコンパイルしています。VM 自体は C を必要としないので、あらかじめコンパイルした `.mrb` だけで遊ぶなら
 モジュールは 1 つで済みます（`rubevy_games/docs/web.md`）。
