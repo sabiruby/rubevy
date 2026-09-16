@@ -198,6 +198,54 @@ inside a method (so the script itself holds nothing), a `GC.start` in the script
 of the structure once the request is dropped. Without the registration the same test says
 `access to freed object`.
 
+## Answering with an object of the game's own (`answer_value` + `RubyClass`)
+
+`Answer` is flat — numbers, a string, a list, a table — and `ScriptWorld::answer_value(request,
+|vm| …)` is the way past it: the host is handed the `&mut Vm` and builds whatever it likes. That
+includes a **`Data` object over a Rust value**, which is what sabiruby's `#[derive(RubyClass)]` /
+`#[ruby_methods]` make:
+
+```rust
+#[derive(RubyClass)]
+struct Genome { speed: f64, colour: String }
+
+#[ruby_methods]
+impl Genome {
+    fn speed(&self) -> f64 { self.speed }
+    fn colour(&self) -> String { self.colour.clone() }
+    fn mutate(&mut self, by: f64) { self.speed += by; }
+}
+
+// once, at Startup: the class and its methods
+fn install(mut world: ResMut<ScriptWorld>) { Genome::register(&mut world.vm).unwrap(); }
+
+// and then any answer may be one
+world.answer_value(&request, |vm| Genome { speed: 2.5, colour: "blue".into() }.into_ruby(vm));
+```
+
+```ruby
+g = Rubevy.ask("genome").pop
+g.colour            # "blue"
+g.mutate(0.5)       # changes the Rust value in place
+g.speed             # 3.0
+```
+
+Nothing had to be added to rubevy for this, and nothing is added by it: the value lives in a
+`HostStore` the **VM** carries, found by its Rust `TypeId`, and the VM drops it when the Ruby
+object naming it is collected. That is a different place from the two host mechanisms rubevy
+itself uses — `Vm::set_host_state` (one value, rubevy's command queue) and `Vm::set_on_free`
+(rubevy's own hook, counting `Rubevy::Entity`s) — so a game's classes and rubevy's do not
+compete for either. `tests/host_data.rs` checks exactly that: the answer arrives as the game's
+class with the game's methods, rubevy's free hook does not fire for it, and a `gc_collect` after
+the script has ended takes the `Genome` out of the store.
+
+`sabiruby = { features = ["macros"] }` is what brings the two macros in. It is a dev-dependency
+here, for that test: rubevy defines no Ruby class of its own beyond `Rubevy::Entity`, which is
+`Vm::data_new` by hand.
+
+**The rules of `answer_value` still hold.** The closure runs inside the call, answer each request
+once, and nothing in the closure may park a task — it is host code, not a script.
+
 ## Making the answer later (`answer_with`)
 
 Where the answer is work rather than a lookup — a path search, a file, a query, anything that

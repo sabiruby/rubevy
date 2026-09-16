@@ -229,3 +229,44 @@ test the_vm_is_reachable_while_the_app_is_still_being_built ... ok
 `JSON.parse(...).inspect` の期待値を `{"x"=>1.5, ...}` と書いて 1 回落ちた。
 SabiRuby の `inspect` は `=>` の前後に空白を入れる（`{"x" => 1.5}`）。CRuby 3.4 の書式である。
 2 本目は「`run()` の前にリソースを触る」道で、システムを 1 本も書かずに同じことができることの確認。
+
+## 4. `Answer` にホストの Data オブジェクトを載せる
+
+### 調べたら、これももうできた
+
+次のゲームは `Rubevy.ask("genome")` の答えを `#[derive(RubyClass)]` のオブジェクトで返したい。
+指示は「`answer_value(request, |vm| …)` で既にできるなら文書とテスト、
+足りないもの（`HostStore` がプラグインの持つ VM 経由で設定できない、など）があれば最小限を足す」。
+
+`answer_value` の閉包は `&mut Vm` を受け取る。`RubyClass::into_handle` は
+`register_class` → `install_host_store` → `data_new` を全部その `&mut Vm` の上でやる。
+つまり**閉包の中で `Genome { … }.into_ruby(vm)` と書けば終わり**で、足すものは無い。
+
+心配していたのは衝突である。rubevy は VM のホスト機構を 2 つ使っている——
+`Vm::set_host_state`（**1 つしか持てない**。rubevy はコマンドキューを入れている）と
+`Vm::set_on_free`（**1 本しか持てない**。rubevy は `Rubevy::Entity` を数えている）。
+`RubyClass` がこのどちらかを要求するなら、ゲームは自分の型を入れられない。
+
+要求しない。`HostStore` は `TypeId` で引く**型ごとの**置き場で、`Vm::install_host_store` が
+VM の中に作る（`src/host_store.rs` の冒頭がまさにこの設計判断を書いている——
+「`set_host_state` は 1 つしか持てないので、複数種類のホストオブジェクトが分け合わねばならない」）。
+解放も VM 自身がやり、`set_on_free` はそのあとに呼ばれる。**別の場所**である。
+
+### 確認
+
+`tests/host_data.rs` の 2 本。1 回で通った。
+
+```
+test a_game_answers_with_an_object_of_its_own ... ok
+test the_value_is_dropped_when_the_object_is_collected ... ok
+```
+
+衝突しないことを主張で終わらせないために、1 本目で `world.freed_entities()` が 0 のままであること
+（rubevy のフックが `Genome` に対して鳴っていない）と、`Genome::store(vm).len() == 1` を両方見ている。
+2 本目はスクリプトが終わったあとに `gc_collect` して `len() == 0` を見る。
+ここが 0 にならなければ、ゲームが答えを返すたびに Rust の値が漏れることになるので、
+「できる」と書く前に測っておきたかったところ。
+
+`#[ruby_methods]` の `register` は `Startup` で 1 回呼ぶ。クラスと置き場は最初の `into_ruby` で
+勝手にできるので、`register` が足すのは**メソッドだけ**である。これは
+sabiruby の `macros/src/expand.rs:184` を読んで確かめた（`register_class` → `tag` → メソッド群）。
