@@ -15,7 +15,7 @@ use bevy::diagnostic::FrameCount;
 use bevy::log::LogPlugin;
 use bevy::prelude::*;
 use bevy::tasks::futures_lite::future;
-use rubevy::{Answer, MrbAsset, RubevyPlugin, Script, ScriptEnded, ScriptWorld};
+use rubevy::{Answer, MrbAsset, RubevyPlugin, RubevySet, Script, ScriptEnded, ScriptWorld};
 
 #[derive(Resource, Default)]
 struct Ended(usize);
@@ -30,7 +30,8 @@ fn main() {
         ))
         .init_resource::<Ended>()
         .add_systems(Startup, spawn_scripts)
-        .add_systems(Update, (answer_requests, report_ended).chain())
+        // the game's answering system goes in `RubevySet::Answer` (`docs/host-api.md`)
+        .add_systems(Update, (answer_requests, report_ended).chain().in_set(RubevySet::Answer))
         .run();
 }
 

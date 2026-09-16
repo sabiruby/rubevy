@@ -11,7 +11,7 @@ use bevy::asset::AssetPlugin;
 use bevy::diagnostic::FrameCount;
 use bevy::log::LogPlugin;
 use bevy::prelude::*;
-use rubevy::{Answer, MrbAsset, Request, RubevyPlugin, Script, ScriptEnded, ScriptWorld};
+use rubevy::{Answer, MrbAsset, Request, RubevyPlugin, RubevySet, Script, ScriptEnded, ScriptWorld};
 
 /// Requests the game has taken but not answered yet, with the frame they may be answered on.
 #[derive(Resource, Default)]
@@ -31,7 +31,9 @@ fn main() {
         .init_resource::<Pending>()
         .init_resource::<Ended>()
         .add_systems(Startup, spawn_scripts)
-        .add_systems(Update, (answer_requests, report_ended).chain())
+        // `RubevySet::Answer` is where the game's answering system goes: the questions this
+        // frame asked are answered before it ends, so a round trip costs one frame and not two
+        .add_systems(Update, (answer_requests, report_ended).chain().in_set(RubevySet::Answer))
         .run();
 }
 

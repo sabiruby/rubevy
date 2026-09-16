@@ -52,9 +52,13 @@ found = Rubevy.ask("scan", 40.0).pop     # parked here; the other scripts keep r
 Rubevy.move_to found[0], found[1], 0.0 if found
 ```
 
-The game answers in a system of its own:
+The game answers in a system of its own, **put in `RubevySet::Answer`** (the next section says
+what that buys):
 
 ```rust
+app.add_plugins(RubevyPlugin::default())
+    .add_systems(Update, answer_requests.in_set(RubevySet::Answer));
+
 fn answer_requests(mut world: ResMut<ScriptWorld>, /* whatever the answer needs */) {
     for request in world.take_requests() {          // Request { entity, kind, args, queue }
         let answer = Answer::List(vec![3.0, 3.5]);  // Nil / Bool / Num / Text / List / Rows / Entity
@@ -86,6 +90,48 @@ actually run.
   is nil, a bool, a number, a string, an entity, a list of numbers, or a table of them
   ([`Answer::Rows`] — every robot with its team and hp, say), or anything the host builds in the
   VM itself (`answer_value`). The question's side is described below.
+
+## Where the game's systems go in the frame (`RubevySet`)
+
+`RubevyPlugin` puts its own systems into three public sets, in this order inside `Update`:
+
+| set | what is in it | what it is for |
+|---|---|---|
+| `RubevySet::Deliver` | `start_scripts`, `deliver_answers`, the release sweep | what arrived between the frames reaches the VM before a script runs |
+| `RubevySet::Tick` | `tick_scripts`, `drain_commands`, `apply_component_writes` | the scripts run, and what they asked for becomes a `Request` |
+| `RubevySet::Answer` | rubevy's own `answer_components` — **and the game's answering systems** | the questions this frame asked are answered before the frame ends |
+
+```rust
+app.add_systems(Update, answer_requests.in_set(RubevySet::Answer));
+```
+
+**What it buys: a round trip costs one frame.** The `Rubevy.ask` happens in `Tick` and leaves a
+command behind, `drain_commands` (still `Tick`) turns it into a `Request`, the game answers it in
+`Answer`, and the script wakes in the next frame's `Tick`. `tests/scheduling.rs` measures this
+from the script's own side — six `Rubevy.ask(…).pop` round trips, each one exactly one
+`$rubevy[:frame]` apart.
+
+**What it costs not to use it.** A system ordered against nothing lands wherever Bevy's executor
+puts it, which almost everywhere is fine: before the sets, after them, in `PreUpdate`, in
+`PostUpdate` — anything that answers before the *next* `Tick` is soon enough. The one window that
+is not fine is **between `tick_scripts` and `drain_commands`**: a system there misses the question
+this frame asked (it becomes a `Request` a moment later) and answers the previous frame's too late
+for this frame's scripts, so every round trip costs **two** frames. SabiRuby Battle was in exactly
+that window before the sets existed and measured 2.0 frames for every question the game answered,
+against 1.0 for every question rubevy answered itself (rubevy_games,
+`docs/worklog/2026-09-16-showpieces-d2-d3.md`). The point of the set is not that two frames was a
+rule — it is that where the system landed was luck, and now it is not.
+
+Both `Deliver` and `Answer` are outside that window by construction. `Answer` is the one to use:
+it is the only placement where a system sees the question **on the frame it was asked**, so an
+answer may depend on the rest of that frame (positions after `move_robots`, events of this frame,
+whatever the game has just worked out). A system in `Deliver` also costs one frame, but it is
+always answering the previous frame's questions. Do not put an answering system *inside*
+`RubevySet::Tick` — that is the one set that contains the window.
+
+The sets also give a game the other orderings it may want: `.before(RubevySet::Tick)` for a system
+that must have moved the world before the scripts look at it, `.after(RubevySet::Answer)` for one
+that runs on what the scripts did this frame.
 
 ## What a question may carry (`Arg`)
 
@@ -151,6 +197,54 @@ inside a method (so the script itself holds nothing), a `GC.start` in the script
 `Vm::gc_collect` between `take_requests` and the answer, and the live count falling by the size
 of the structure once the request is dropped. Without the registration the same test says
 `access to freed object`.
+
+## Answering with an object of the game's own (`answer_value` + `RubyClass`)
+
+`Answer` is flat — numbers, a string, a list, a table — and `ScriptWorld::answer_value(request,
+|vm| …)` is the way past it: the host is handed the `&mut Vm` and builds whatever it likes. That
+includes a **`Data` object over a Rust value**, which is what sabiruby's `#[derive(RubyClass)]` /
+`#[ruby_methods]` make:
+
+```rust
+#[derive(RubyClass)]
+struct Genome { speed: f64, colour: String }
+
+#[ruby_methods]
+impl Genome {
+    fn speed(&self) -> f64 { self.speed }
+    fn colour(&self) -> String { self.colour.clone() }
+    fn mutate(&mut self, by: f64) { self.speed += by; }
+}
+
+// once, at Startup: the class and its methods
+fn install(mut world: ResMut<ScriptWorld>) { Genome::register(&mut world.vm).unwrap(); }
+
+// and then any answer may be one
+world.answer_value(&request, |vm| Genome { speed: 2.5, colour: "blue".into() }.into_ruby(vm));
+```
+
+```ruby
+g = Rubevy.ask("genome").pop
+g.colour            # "blue"
+g.mutate(0.5)       # changes the Rust value in place
+g.speed             # 3.0
+```
+
+Nothing had to be added to rubevy for this, and nothing is added by it: the value lives in a
+`HostStore` the **VM** carries, found by its Rust `TypeId`, and the VM drops it when the Ruby
+object naming it is collected. That is a different place from the two host mechanisms rubevy
+itself uses — `Vm::set_host_state` (one value, rubevy's command queue) and `Vm::set_on_free`
+(rubevy's own hook, counting `Rubevy::Entity`s) — so a game's classes and rubevy's do not
+compete for either. `tests/host_data.rs` checks exactly that: the answer arrives as the game's
+class with the game's methods, rubevy's free hook does not fire for it, and a `gc_collect` after
+the script has ended takes the `Genome` out of the store.
+
+`sabiruby = { features = ["macros"] }` is what brings the two macros in. It is a dev-dependency
+here, for that test: rubevy defines no Ruby class of its own beyond `Rubevy::Entity`, which is
+`Vm::data_new` by hand.
+
+**The rules of `answer_value` still hold.** The closure runs inside the call, answer each request
+once, and nothing in the closure may park a task — it is host code, not a script.
 
 ## Making the answer later (`answer_with`)
 
@@ -241,11 +335,13 @@ only have its fields written while it is already the current one. A field that c
 it was given is logged with its path (`translation.x: takes a number`) and skipped; the rest of
 the write still happens.
 
-**A read costs a frame.** `e[:Transform]` is `Rubevy.ask` under a nicer name: the question
-goes out with the frame's commands and rubevy answers it at the head of the next frame, before
-the scripts run. The task is parked meanwhile, so it costs nothing and the other scripts keep
-running, but this is a boundary for declaration time and for events — not for a dozen reads a
-frame. `Rubevy.find` walks every entity in the world, so it is for a lookup now and then.
+**A read costs a frame.** `e[:Transform]` is `Rubevy.ask` under a nicer name: the question goes
+out with the frame's commands and rubevy answers it at the end of the same frame, in
+`RubevySet::Answer` and after this frame's writes have been applied (so a read after a write sees
+it); the script has the answer in the next frame's `Tick`. The task is parked meanwhile, so it
+costs nothing and the other scripts keep running, but this is a boundary for declaration time and
+for events — not for a dozen reads a frame. `Rubevy.find` walks every entity in the world, so it
+is for a lookup now and then.
 
 The four kinds rubevy answers itself — `component.get`, `component.has`, `components`,
 `entities.with` — never reach `ScriptWorld::take_requests`: they are sorted out where the
@@ -400,9 +496,26 @@ has too):
 
 | `ScriptWorld` field | default | what it does |
 |---|---|---|
-| `budget` | 200,000 instructions | checked between timeslices, as before |
+| `budget` | 200,000 instructions | checked between timeslices, as before; **zero pauses the scripts** |
 | `frame_time` | 8 ms | the running timeslice is cut short once the frame's scripts have taken this long |
 | `overrun` | 50 ms | a script that cannot be switched out — inside a native waiting for a block, `sort { }` or `Array.new(1) { loop { } }` — gets `Task::Overrun` past this, and the frame comes back |
+
+**Pausing.** `world.budget = 0` is the pause: the VM checks the budget at the head of its own
+loop, so not one instruction runs. While it is zero the plugin also stops moving mruby-task's
+clock on, so **a pause is time the scripts did not live through** — a script that had 0.07 s of a
+`sleep 0.1` left when the pause began has 0.07 s left when the budget comes back. Before this,
+the clock ran while nothing did: a hundred paused frames made every sleeping script due at once,
+and the frame after the resume woke the lot of them (SabiRuby Battle's `P` key, rubevy_games
+`docs/worklog/2026-09-16-showpieces-d2-d3.md`). `tests/pause.rs` pauses for a hundred frames and
+checks that the sleeper does not wake on the frame after the resume.
+
+It is a budget of zero and not a `pause(bool)` because a flag would be a second way to say the
+same thing, and two of them can disagree. The game keeps its own old budget to put back.
+
+Everything else in the frame goes on while paused: `$rubevy` is still refreshed (so a HUD or a VM
+inspector panel sees a live frame count), and questions are still taken and answered — they simply
+reach a script that is not running. Bevy's own `Time` is the game's to pause (`Time<Virtual>`);
+this is about the VM's scheduler only, so `$rubevy[:time]` keeps growing.
 
 `Task::Overrun` is an `Exception`, not a `StandardError`, so a script's `rescue => e` does not
 keep it going; the script ends with it (`ScriptEnded { status: Failed }`). Timeslices themselves
@@ -428,6 +541,49 @@ settles. To work against a checkout of the VM next to this one, redirect it in a
 sabiruby = { path = "../sabiruby" }
 sabiruby-compiler = { path = "../sabiruby/compiler" }
 ```
+
+## Adding to the VM (`ScriptWorld::vm`, at `Startup`)
+
+A game usually wants more in the VM than rubevy puts there: a JSON class, a module of its own, a
+native or two. `ScriptWorld::vm` is public and the resource exists as soon as `RubevyPlugin` is
+added, while the first script does not start until the first `Update` — so a `Startup` system is
+the place, and rubevy needs no entry point for it.
+
+```rust
+app.add_plugins(RubevyPlugin::default())
+    .add_systems(Startup, install_host_api);
+
+fn install_host_api(mut world: ResMut<ScriptWorld>) {
+    let vm = &mut world.vm;
+    sabiruby_serde::install_json(vm);                 // JSON.parse / JSON.generate / #to_json
+    let object = vm.core.object;
+    vm.define_fn(object, "arena_size", |_vm: &mut Vm| -> f64 { 240.0 });
+}
+```
+
+`sabiruby-serde` is the crate beside the VM in the same repository (`sabiruby/serde`, feature
+`json` on by default). **rubevy does not depend on it** — it is a dev-dependency here, for the
+test and for this example. A game that wants `JSON` names it itself, which is also what says who
+owns the decision: the `JSON` class is the game's, not the engine's.
+
+`tests/vm_setup.rs` checks both the `Startup` system and the other way of saying it (reaching the
+resource while the `App` is still being built, before `run()`), and that a script's very first
+line already sees what was installed.
+
+**What not to do with it.** It is the VM the scheduler is running, not one of your own.
+
+* Do not run tasks through it — no `task_run_limits`, `task_run_once`, `Task.run`. `tick_scripts`
+  is what gives the scheduler its frame. (`Vm::load_and_run` at `Startup` is fine: that is running
+  a program, not the scheduler.)
+* Do not keep a `Value` or an `ObjId` past the call unless you `gc_register` it. `Request` and
+  `ScriptTask` are the two things rubevy keeps that way, and both are registered.
+* Do not try to touch Bevy's `World` from a native: a native gets `&mut Vm` and nothing else.
+  Leave something behind for a system to pick up — which is what `Rubevy.ask` and
+  `ScriptWorld::take_requests` already are.
+
+Adding to the VM after `Startup` is not forbidden, and is sometimes what a game means (a class
+that exists only once a level is loaded). What it costs is that a script which has already run may
+have seen the VM without it.
 
 ## What a HUD can show of a script
 

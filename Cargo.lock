@@ -1870,6 +1870,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "itoa"
+version = "1.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+
+[[package]]
 name = "jni"
 version = "0.22.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2785,6 +2791,7 @@ dependencies = [
  "bevy",
  "sabiruby",
  "sabiruby-compiler",
+ "sabiruby-serde",
  "thiserror 2.0.20",
 ]
 
@@ -2837,21 +2844,42 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "sabiruby"
-version = "0.4.0"
-source = "git+https://github.com/sabiruby/sabiruby#1ae258f3d17ffb660b498dd8161b8bb4b36e3319"
+version = "0.5.0"
+source = "git+https://github.com/sabiruby/sabiruby#9c8ebf2dabf61585d6099fed1e4efa0869f936fe"
 dependencies = [
  "hashbrown 0.15.5",
  "libm",
  "regex-automata",
+ "sabiruby-macros",
 ]
 
 [[package]]
 name = "sabiruby-compiler"
-version = "0.2.1"
-source = "git+https://github.com/sabiruby/sabiruby#1ae258f3d17ffb660b498dd8161b8bb4b36e3319"
+version = "0.2.2"
+source = "git+https://github.com/sabiruby/sabiruby#9c8ebf2dabf61585d6099fed1e4efa0869f936fe"
 dependencies = [
  "cc",
  "sabiruby",
+]
+
+[[package]]
+name = "sabiruby-macros"
+version = "0.1.0"
+source = "git+https://github.com/sabiruby/sabiruby#9c8ebf2dabf61585d6099fed1e4efa0869f936fe"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "sabiruby-serde"
+version = "0.1.0"
+source = "git+https://github.com/sabiruby/sabiruby#9c8ebf2dabf61585d6099fed1e4efa0869f936fe"
+dependencies = [
+ "sabiruby",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2909,6 +2937,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.5",
+]
+
+[[package]]
+name = "serde_json"
+version = "1.0.151"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
+dependencies = [
+ "indexmap",
+ "itoa",
+ "memchr",
+ "serde",
+ "serde_core",
+ "zmij",
 ]
 
 [[package]]
@@ -3869,3 +3911,9 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "zmij"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
