@@ -11,6 +11,7 @@ This repository is small, so its documents sit flat here; the worklog has its ow
 | [outlook.md](outlook.md) | English | what rubevy builds on SabiRuby, in order, with the status of each item; the honest comparison with Lua; the possibilities |
 | [outlook.ja.md](outlook.ja.md) | Japanese | the possibilities and the status, in plain Japanese |
 | [plans/ecs-bridge-plan.md](plans/ecs-bridge-plan.md) | Japanese | the instructions for the ECS bridge (components by name through reflection) and the event queue; status inside |
+| [plans/multi-vm-plan.md](plans/multi-vm-plan.md) | (Japanese) more than one VM in one app: what is already per-VM, the six places that assume one, three designs (type marker recommended), the stages, what the author decides first |
 | [worklog/](worklog/) | Japanese | dated records of work: what was read, tried, decided |
 
 The worklog, newest last:
