@@ -32,3 +32,12 @@ sabiruby-compiler = { git = "https://github.com/sabiruby/sabiruby", features = [
 bevy = { version = "0.19.1", default-features = false, features = ["bevy_asset", "bevy_log", "bevy_window", "bevy_winit", "x11", "multi_threaded"] }
 # the tests compile their Ruby in process
 sabiruby-compiler = { git = "https://github.com/sabiruby/sabiruby", features = ["host"] }
+# `macros` is the proc macro behind `#[derive(RubyClass)]` / `#[ruby_methods]`, which
+# `tests/host_data.rs` uses to show that a game answers a question with an object of its own.
+# The library does not want it: a proc macro is a compiler plugin, and rubevy defines no Ruby
+# class of its own beyond `Rubevy::Entity` (which is `Vm::data_new` by hand).
+sabiruby = { git = "https://github.com/sabiruby/sabiruby", features = ["macros"] }
+# JSON and serde on top of the VM, for `tests/vm_setup.rs` and the example in
+# `docs/host-api.md`. **rubevy does not depend on this** — a game that wants `JSON` installs it
+# into the VM itself, which is the whole point of the test.
+sabiruby-serde = { git = "https://github.com/sabiruby/sabiruby" }

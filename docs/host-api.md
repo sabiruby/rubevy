@@ -494,6 +494,49 @@ sabiruby = { path = "../sabiruby" }
 sabiruby-compiler = { path = "../sabiruby/compiler" }
 ```
 
+## Adding to the VM (`ScriptWorld::vm`, at `Startup`)
+
+A game usually wants more in the VM than rubevy puts there: a JSON class, a module of its own, a
+native or two. `ScriptWorld::vm` is public and the resource exists as soon as `RubevyPlugin` is
+added, while the first script does not start until the first `Update` — so a `Startup` system is
+the place, and rubevy needs no entry point for it.
+
+```rust
+app.add_plugins(RubevyPlugin::default())
+    .add_systems(Startup, install_host_api);
+
+fn install_host_api(mut world: ResMut<ScriptWorld>) {
+    let vm = &mut world.vm;
+    sabiruby_serde::install_json(vm);                 // JSON.parse / JSON.generate / #to_json
+    let object = vm.core.object;
+    vm.define_fn(object, "arena_size", |_vm: &mut Vm| -> f64 { 240.0 });
+}
+```
+
+`sabiruby-serde` is the crate beside the VM in the same repository (`sabiruby/serde`, feature
+`json` on by default). **rubevy does not depend on it** — it is a dev-dependency here, for the
+test and for this example. A game that wants `JSON` names it itself, which is also what says who
+owns the decision: the `JSON` class is the game's, not the engine's.
+
+`tests/vm_setup.rs` checks both the `Startup` system and the other way of saying it (reaching the
+resource while the `App` is still being built, before `run()`), and that a script's very first
+line already sees what was installed.
+
+**What not to do with it.** It is the VM the scheduler is running, not one of your own.
+
+* Do not run tasks through it — no `task_run_limits`, `task_run_once`, `Task.run`. `tick_scripts`
+  is what gives the scheduler its frame. (`Vm::load_and_run` at `Startup` is fine: that is running
+  a program, not the scheduler.)
+* Do not keep a `Value` or an `ObjId` past the call unless you `gc_register` it. `Request` and
+  `ScriptTask` are the two things rubevy keeps that way, and both are registered.
+* Do not try to touch Bevy's `World` from a native: a native gets `&mut Vm` and nothing else.
+  Leave something behind for a system to pick up — which is what `Rubevy.ask` and
+  `ScriptWorld::take_requests` already are.
+
+Adding to the VM after `Startup` is not forbidden, and is sometimes what a game means (a class
+that exists only once a level is loaded). What it costs is that a script which has already run may
+have seen the VM without it.
+
 ## What a HUD can show of a script
 
 `ScriptWorld::stats(&ScriptTask)` answers a [`ScriptStats`]: the instructions the script has run

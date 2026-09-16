@@ -169,3 +169,63 @@ test a_pause_does_not_spend_a_sleep ... ok
 
 対照のテスト（止めない場合に 0.1 秒くらい寝る）を足したのは、
 「再開後に 0.05 秒以上たってから起きた」という主張が、測っている量として正しいことを言うため。
+
+## 3. 起動時にホストが VM に触る道
+
+### 調べたら、もうあった
+
+次のゲームは `sabiruby_serde::install_json(&mut vm)` と、自前の `define_fn` を
+スクリプトが走り出す前に入れたい。指示は「`with_vm` / `vm_mut` があるか調べ、
+無ければ最小の入り口を足す」だった。
+
+**足すものは無かった。** `ScriptWorld` の `vm` は最初から `pub vm: Vm` である
+（`src/lib.rs`、`ScriptWorld` の定義の 1 行目）。そして `RubevyPlugin::build` が
+`insert_resource(world)` を呼ぶのは `App` を組んでいる最中なので、
+リソースは `Startup` より前に存在する。最初のスクリプトが走るのは最初の `Update` の
+`start_scripts` → `tick_scripts` なので、**`Startup` のシステムがちょうど間に入る**。
+
+```rust
+fn install_host_api(mut world: ResMut<ScriptWorld>) {
+    let vm = &mut world.vm;
+    sabiruby_serde::install_json(vm);
+    let object = vm.core.object;
+    vm.define_fn(object, "arena_size", |_vm: &mut Vm| -> f64 { 240.0 });
+}
+```
+
+`vm_mut()` を足すことも考えたが、**やめた**。フィールドが `pub` なのだから
+`vm_mut()` は同じものを指す 2 本目の綴りで、増えるのは名前だけである。
+指示が `vm_mut` に期待していたのは入り口そのものではなく、
+**そこに書かれるはずだった警告**（タスクを走らせるな、参照を持ち越すな）だと読んだので、
+警告はフィールドの rustdoc に書いた。`pub` なフィールドの doc は rustdoc に出るので、
+入り口を探した人が必ず通る場所ではある。
+
+### 書いた警告
+
+3 つ。どれも「これは自分の VM ではなく、スケジューラが回している VM だ」の言い換えである。
+
+* **タスクを走らせない**（`task_run_limits` / `task_run_once` / `Task.run`）。
+  フレームを与えるのは `tick_scripts` の仕事で、システムの中でもう一度回すと
+  誰も設定していない予算を使い、他人のフレームの途中でスクリプトを再開させることになる。
+  ただし `Startup` での `Vm::load_and_run` は別で、これはプログラムを走らせているのであって
+  スケジューラを回しているのではない。
+* **`Value` / `ObjId` を持ち越さない**（`gc_register` するなら別）。
+  rubevy 自身が持ち越しているのは `Request` と `ScriptTask` の 2 つだけで、どちらも登録済み。
+* **ネイティブから Bevy の `World` に触らない**。ネイティブが受け取るのは `&mut Vm` だけである。
+
+### 確認
+
+`tests/vm_setup.rs` の 2 本。`sabiruby-serde` と sabiruby の `macros` は
+**dev-dependency にだけ**足した（`Cargo.toml` にその旨を書いた）。
+rubevy 本体が JSON を知らないことは、テストがゲーム側で入れていること自体が示している。
+
+```
+test a_game_installs_json_and_a_native_of_its_own_at_startup ... ok
+test the_vm_is_reachable_while_the_app_is_still_being_built ... ok
+```
+
+1 本目はスクリプトの**1 行目**で `JSON.generate` を呼ぶ。`defined?` で守る必要がない、
+というのが `Startup` で入れることの意味なので、そこを測っている。
+`JSON.parse(...).inspect` の期待値を `{"x"=>1.5, ...}` と書いて 1 回落ちた。
+SabiRuby の `inspect` は `=>` の前後に空白を入れる（`{"x" => 1.5}`）。CRuby 3.4 の書式である。
+2 本目は「`run()` の前にリソースを触る」道で、システムを 1 本も書かずに同じことができることの確認。

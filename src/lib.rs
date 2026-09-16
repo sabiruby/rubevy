@@ -466,6 +466,46 @@ pub struct SpawnedByScript {
 /// The one VM the scripts share, and the queue between them and the world.
 #[derive(Resource)]
 pub struct ScriptWorld {
+    /// The VM itself, for a host that wants to add to it — **at `Startup`**, before any script
+    /// has run.
+    ///
+    /// The resource exists as soon as [`RubevyPlugin`] is added, and the first script does not
+    /// start until the first `Update`, so a `Startup` system is the place to install a class,
+    /// a module or a native of the game's own:
+    ///
+    /// ```no_run
+    /// # use bevy::prelude::*;
+    /// # use rubevy::ScriptWorld;
+    /// # use sabiruby::{Value, Vm};
+    /// fn install_host_api(mut world: ResMut<ScriptWorld>) {
+    ///     let vm = &mut world.vm;
+    ///     sabiruby_serde::install_json(vm);          // `JSON.parse` / `JSON.generate`
+    ///     let object = vm.core.object;
+    ///     vm.define_fn(object, "arena_size", |_vm: &mut Vm| -> f64 { 240.0 });
+    /// }
+    /// # fn build(app: &mut App) {
+    /// app.add_systems(Startup, install_host_api);
+    /// # }
+    /// ```
+    ///
+    /// **What not to do with it.** It is the VM the scheduler is running, not a VM of your own.
+    ///
+    /// * Do not run tasks through it — no `task_run_limits`, `task_run_once` or `Task.run`.
+    ///   `tick_scripts` is what gives the scheduler its frame, and a second run inside a system
+    ///   would spend a budget nobody set and resume scripts in the middle of somebody else's
+    ///   frame.
+    ///   `Vm::load_and_run` at `Startup` is fine — that is running a program, not the scheduler.
+    /// * Do not keep anything from it. A `Value` or an `ObjId` held past the call is a reference
+    ///   the collector does not know about: register it (`Vm::gc_register`) or let it go before
+    ///   the system returns. [`Request`] and [`ScriptTask`] are the two things rubevy keeps this
+    ///   way, and both are registered.
+    /// * Do not touch the Bevy world from a native. A native is handed `&mut Vm` and nothing
+    ///   else; what it can do is leave something behind for a system to pick up, which is what
+    ///   `Rubevy.ask` and [`ScriptWorld::take_requests`] already are.
+    ///
+    /// Adding to the VM *after* `Startup` is not forbidden and is sometimes what a game means (a
+    /// class that only exists once a level is loaded); what it costs is that a script which had
+    /// already run may have seen the VM without it.
     pub vm: Vm,
     /// Instructions the scheduler may spend per frame, over all tasks.
     ///
