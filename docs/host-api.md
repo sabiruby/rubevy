@@ -448,9 +448,26 @@ has too):
 
 | `ScriptWorld` field | default | what it does |
 |---|---|---|
-| `budget` | 200,000 instructions | checked between timeslices, as before |
+| `budget` | 200,000 instructions | checked between timeslices, as before; **zero pauses the scripts** |
 | `frame_time` | 8 ms | the running timeslice is cut short once the frame's scripts have taken this long |
 | `overrun` | 50 ms | a script that cannot be switched out — inside a native waiting for a block, `sort { }` or `Array.new(1) { loop { } }` — gets `Task::Overrun` past this, and the frame comes back |
+
+**Pausing.** `world.budget = 0` is the pause: the VM checks the budget at the head of its own
+loop, so not one instruction runs. While it is zero the plugin also stops moving mruby-task's
+clock on, so **a pause is time the scripts did not live through** — a script that had 0.07 s of a
+`sleep 0.1` left when the pause began has 0.07 s left when the budget comes back. Before this,
+the clock ran while nothing did: a hundred paused frames made every sleeping script due at once,
+and the frame after the resume woke the lot of them (SabiRuby Battle's `P` key, rubevy_games
+`docs/worklog/2026-09-16-showpieces-d2-d3.md`). `tests/pause.rs` pauses for a hundred frames and
+checks that the sleeper does not wake on the frame after the resume.
+
+It is a budget of zero and not a `pause(bool)` because a flag would be a second way to say the
+same thing, and two of them can disagree. The game keeps its own old budget to put back.
+
+Everything else in the frame goes on while paused: `$rubevy` is still refreshed (so a HUD or a VM
+inspector panel sees a live frame count), and questions are still taken and answered — they simply
+reach a script that is not running. Bevy's own `Time` is the game's to pause (`Time<Virtual>`);
+this is about the VM's scheduler only, so `$rubevy[:time]` keeps growing.
 
 `Task::Overrun` is an `Exception`, not a `StandardError`, so a script's `rescue => e` does not
 keep it going; the script ends with it (`ScriptEnded { status: Failed }`). Timeslices themselves

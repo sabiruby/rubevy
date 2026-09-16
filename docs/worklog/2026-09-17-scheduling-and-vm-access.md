@@ -111,3 +111,61 @@ test a_host_answering_in_the_deliver_set_sees_the_previous_frame ... ok
 
 `examples/sensor.rs` と `examples/async.rs` の `answer_requests` を `.in_set(RubevySet::Answer)` にした。
 `sensor.rs` はわざと 2 フレーム遅らせて答える例なので、数字は変わらない（遅らせているのは例の方）。
+
+## 2. 止まった VM はスケジューラの時計を進めない
+
+### 今どうなっていたか
+
+`tick_scripts` は毎フレーム `task_advance_ticks` を呼ぶ。`budget` が 0 でも呼ぶ。
+sabiruby の `task_run_limited` はループの頭で `if budget.is_some_and(|b| spent >= b) { return }`
+を見る（`src/vm.rs:773`）ので、0 なら 1 命令も走らない——**走らないのに時計だけ進む**。
+rubevy_games の `P`（`ScriptWorld::budget = 0`）はこの形で止めていて、
+向こうの worklog が「再開した瞬間に寝ていたタスクが全部起きる。直すなら rubevy の `tick_scripts`」
+と書いて残していた。
+
+### 規則をどちらにするか
+
+指示は「`budget` が 0 のときは進めない」か「`ScriptWorld::pause(bool)` を足す」の二択だった。
+**前者にした。**
+
+* `budget` は `pub` のフィールドで、止めるゲームは**もう `budget = 0` と書いている**。
+  この規則なら向こうは 1 行も変えずに直る。
+* `pause` フラグを足すと「同じことを言う道が 2 本」になり、食い違える
+  （`paused == false` なのに `budget == 0`、その逆）。どちらが本当かを決める規則が要り、
+  それは結局「budget が 0 なら走らない」という今の事実の言い直しになる。
+* 0 という値に他の用途がない。0 は「このフレームはスクリプトにとって起こらなかった」以外の
+  意味を持ちようがない（1 命令も走らないので）。
+
+### どこまで止めるか
+
+`tick_scripts` ごと `return` してしまう案も考えたが、**やめた**。止めたのは
+ティックの加算と `task_advance_ticks` だけで、`set_frame_state`（`$rubevy` の更新）、
+`task_run_limits`（0 なので即戻る）、出力の掃き出し、終わったタスクの回収はそのまま残した。
+理由は rubevy_games の D2 で入った**窓の中の VM インスペクタ**で、あれは止めている間に
+VM を覗くためのものである。`$rubevy` が凍ると、パネルが見せるフレーム数が止まった瞬間の値のまま
+固まる。走っていないのはスクリプトであって、VM を見る側ではない。
+`tick_remainder`（1 ティックに満たない端数）も止めている間は溜めない。溜めて再開時に吐くと、
+結局まとめて起こすことになって同じ穴になる。
+
+### 確認
+
+`tests/pause.rs`。`sleep 0.1` を挟んで「始めた」「起きた」を**待たない質問**でゲームに送り、
+ゲームが受け取ったフレームと `Time::elapsed_secs` を書き留める。
+4 フレーム走らせて `sleep` に入らせ、`budget = 0` で 100 フレーム（1 フレーム 2 ms なので実時間 0.2 秒、
+sleep の 2 倍）、そこで `budget` を戻す。
+
+直す前の挙動も測ってある。`if world.budget > 0` を `if true` に書き換えて同じテストを回すと:
+
+```
+woke on frame 104, one after the resume at 104 — the clock ran on while it was paused
+```
+
+**再開したフレームそのもので起きている**。直したあとは 2 本とも通る。
+
+```
+test without_a_pause_it_sleeps_the_time_it_asked_for ... ok
+test a_pause_does_not_spend_a_sleep ... ok
+```
+
+対照のテスト（止めない場合に 0.1 秒くらい寝る）を足したのは、
+「再開後に 0.05 秒以上たってから起きた」という主張が、測っている量として正しいことを言うため。

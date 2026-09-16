@@ -5,6 +5,8 @@
 //! every frame the plugin gives the scheduler a budget of instructions. A task
 //! that calls `sleep` costs nothing until its time comes, so hundreds of
 //! scripts can sit on entities and wake only when they have something to do.
+//! A budget of zero pauses them all, and a paused VM does not age
+//! ([`ScriptWorld::budget`]).
 //!
 //! What a script sees of the host:
 //! * `$rubevy` — a Hash refreshed at the head of every frame (`:frame`,
@@ -466,6 +468,25 @@ pub struct SpawnedByScript {
 pub struct ScriptWorld {
     pub vm: Vm,
     /// Instructions the scheduler may spend per frame, over all tasks.
+    ///
+    /// **Zero pauses the scripts.** The VM checks the budget at the head of its own loop, so a
+    /// budget of zero runs not one instruction; and a frame in which no script can run is not
+    /// a frame the scripts age by, so the plugin does not move mruby-task's clock on either
+    /// (`task_advance_ticks`). Without that, every `sleep` in the VM came due while nothing was
+    /// running, and giving the budget back woke the lot of them at once — a hundred paused
+    /// frames and a script that asked for `sleep 0.1` was two seconds late, all in one frame.
+    /// Now a pause is time the scripts did not live through: a script that had 0.07 s of its
+    /// `sleep` left when the pause began has 0.07 s left when it ends.
+    ///
+    /// It is spelled as a budget of zero rather than as a `pause` flag on purpose. A flag would
+    /// be a second way to say the same thing, and two of them can disagree (paused with a budget,
+    /// running with none); the games that pause already write `world.budget = 0`. What the game
+    /// keeps is its own old budget, to put back.
+    ///
+    /// The rest of the frame is untouched while paused: `$rubevy` is still refreshed, so a HUD or
+    /// a debugger panel reading the VM sees a live frame count, and the host's questions are
+    /// still taken and answered — they simply reach a script that is not running. Bevy's own
+    /// `Time` is the game's to pause (`Time<Virtual>`); this is about the VM's scheduler.
     pub budget: u64,
     /// Time the scripts may take per frame, on the VM's clock (Bevy's `Instant`). The running
     /// timeslice is cut short when it is up. `None`: instructions only.
@@ -1119,13 +1140,17 @@ fn tick_scripts(
     let frame_no = frame.0;
     let world = &mut *world;
 
-    // frame time in ticks, keeping what did not make a whole one for next frame
-    let unit_ms = world.vm.task_tick_unit_ms() as f32;
-    world.tick_remainder += delta * 1000.0 / unit_ms;
-    let whole = world.tick_remainder.floor().max(0.0);
-    world.tick_remainder -= whole;
-    if whole >= 1.0 {
-        world.vm.task_advance_ticks(whole as u32);
+    // frame time in ticks, keeping what did not make a whole one for next frame — unless the
+    // scripts are paused, in which case this frame does not count as time for them (see the
+    // rustdoc of `ScriptWorld::budget`)
+    if world.budget > 0 {
+        let unit_ms = world.vm.task_tick_unit_ms() as f32;
+        world.tick_remainder += delta * 1000.0 / unit_ms;
+        let whole = world.tick_remainder.floor().max(0.0);
+        world.tick_remainder -= whole;
+        if whole >= 1.0 {
+            world.vm.task_advance_ticks(whole as u32);
+        }
     }
 
     set_frame_state(&mut world.vm, frame_no, delta, elapsed);
