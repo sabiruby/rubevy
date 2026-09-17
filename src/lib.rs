@@ -1283,7 +1283,8 @@ fn take_commands(vm: &mut Vm) -> Vec<HostCommand> {
 
 /// Where the VM reads a `require` from: the asset directory, `scripts` under
 /// it first. A file the OS cannot see is not visible to a script either — a
-/// packed or remote asset source is not served here.
+/// packed or remote asset source is not served here, and a browser, which has
+/// no filesystem at all, is served nothing (`tests/no_wasm_unsupported.rs`).
 struct FileHost;
 
 impl sabiruby::Host for FileHost {
@@ -1304,7 +1305,7 @@ impl sabiruby::Host for FileHost {
         Err(String::from("rubevy was built without the `ruby-source` feature: require a .mrb, or `eval` is unavailable"))
     }
     fn read_file(&mut self, path: &str) -> Option<Vec<u8>> {
-        std::fs::read(path).ok()
+        std::fs::read(path).ok() // wasm: native-only — a browser has no filesystem to read from
     }
     fn file_exists(&mut self, path: &str) -> bool {
         std::path::Path::new(path).is_file()
