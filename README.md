@@ -27,6 +27,12 @@ Run mruby bytecode inside [Bevy](https://bevy.org/) (0.19), using the
   a `Future` instead: it goes to Bevy's task pool and the plugin answers the script on the
   frame it finishes. Bevy's pools are threads only with bevy's own `multi_threaded` feature —
   this crate does not ask for it, the app does (`docs/host-api.md`).
+* **A question answered in no frame at all**: `ScriptWorld::answer_in_tick("nearest", …)` gives a
+  kind of `Rubevy.ask` to a closure that the tick calls between two runs of the VM, with the world
+  as it stands in `RubevySet::Tick` — the road a component read already takes. It is for the
+  spatial questions a script asks every frame ("who is nearest", "what is within 4 m"), which a
+  system answers a frame late and Ruby cannot afford to walk itself (`cargo run --example
+  nearest`, `docs/host-api.md`).
 * **A question written as a call**: `require "proxy"` gives a script `Rubevy::Proxy`, whose
   `robot.move_to(1, 2)` is `Rubevy.ask("robot.move_to", 1, 2).pop`. Registering a real method
   is the plain way; a proxy is for objects the game did not register (`docs/host-api.md`).
@@ -96,6 +102,8 @@ cargo run --example sensor        # Rubevy.ask, answered by a system two frames 
 cargo run --example async         # Rubevy.ask, answered from a future on the task pool,
                                   # then the same question written as a call on a proxy
 cargo run --example components    # a script reads its own Transform, moves it, writes it back
+cargo run --example nearest       # a question the game answers inside the tick: 0 frames, beside
+                                  # the same question answered by a system: 1 frame
 cargo run --example events        # an observer publishes to a queue; a reflex task waits on it
 cargo run --example two_vms       # a second VM for mods: the three things it cannot reach
 ```

@@ -91,6 +91,10 @@ actually run.
   is nil, a bool, a number, a string, an entity, a list of numbers, or a table of them
   ([`Answer::Rows`] — every robot with its team and hp, say), or anything the host builds in the
   VM itself (`answer_value`). The question's side is described below.
+* A system is one of three places an answer can come from, and the usual one. The other two are
+  a future (`answer_with`, for work that does not fit in a frame) and a closure called inside the
+  tick (`answer_in_tick`, for a question asked every frame that the script cannot go on without
+  — it costs no frame at all). Both have a section of their own below.
 
 ## Where the game's systems go in the frame (`RubevySet`)
 
@@ -99,7 +103,7 @@ actually run.
 | set | what is in it | what it is for |
 |---|---|---|
 | `RubevySet::Deliver` | `start_scripts`, `deliver_answers`, the release sweep | what arrived between the frames reaches the VM before a script runs |
-| `RubevySet::Tick` | `tick_scripts` (exclusive), `drain_commands`, `apply_component_writes` | the scripts run — and the component reads they make are answered while they are still running — and what they asked the *game* for becomes a `Request` |
+| `RubevySet::Tick` | `tick_scripts` (exclusive), `drain_commands`, `apply_component_writes` | the scripts run — and the component reads they make, with the kinds the game registered with `answer_in_tick`, are answered while they are still running — and what they asked the *game* for otherwise becomes a `Request` |
 | `RubevySet::Answer` | **the game's answering systems** | the questions this frame asked are answered before the frame ends |
 
 ```rust
@@ -139,7 +143,16 @@ always answering the previous frame's questions. Do not put an answering system 
 
 The sets also give a game the other orderings it may want: `.before(RubevySet::Tick)` for a system
 that must have moved the world before the scripts look at it, `.after(RubevySet::Answer)` for one
-that runs on what the scripts did this frame.
+that runs on what the scripts did this frame. `.before(RubevySet::Tick)` is the one that has
+grown teeth: the world it leaves behind is the world a component read sees and the world an
+`answer_in_tick` closure is handed ("Answering inside the tick").
+
+**A question the game answers in no frame at all.** A kind registered with
+`ScriptWorld::answer_in_tick` is not answered in `Answer` but inside `Tick`, by a closure the
+loop calls between two runs of the VM. It is the road for the questions asked every frame by
+every script — a spatial lookup — and the trade is that such a closure sees the world as it
+stands in `Tick` rather than the finished frame. The section "Answering inside the tick" says
+when it is worth it and when a system is still the right place.
 
 ## What a question may carry (`Arg`)
 
@@ -293,6 +306,85 @@ thread puts `multi_threaded` in the features of its own `bevy` dependency; this 
 `dev-dependencies` do that for the example and the tests. Either way the app needs Bevy's
 `TaskPoolPlugin`, which `MinimalPlugins` and `DefaultPlugins` both add — `answer_with` panics
 without it, because the pool it spawns on does not exist.
+
+## Answering inside the tick (`answer_in_tick`)
+
+A component read costs no frame because the tick answers it while the scripts are still running
+("A read costs no frame", below). `ScriptWorld::answer_in_tick` is the game's way into that same
+loop: a kind of `Rubevy.ask` answered by a closure rather than by a system, called between two
+runs of the VM with the world as it stands in `RubevySet::Tick`.
+
+```rust
+fn install_answers(mut scripts: ResMut<ScriptWorld>) {          // a Startup system
+    scripts.answer_in_tick("nearest", Box::new(|world: &World, request: &Request| {
+        let Some(from) = request.entity_arg(0).and_then(|e| world.get::<Transform>(e))
+        else { return Answer::Nil };
+        let mut best: Option<(Entity, f32)> = None;
+        for entity in world.iter_entities() {
+            let (Some(_), Some(at)) = (entity.get::<Plant>(), entity.get::<Transform>())
+            else { continue };
+            let d = at.translation.distance(from.translation);
+            if best.is_none_or(|(_, so_far)| d < so_far) { best = Some((entity.id(), d)); }
+        }
+        best.map_or(Answer::Nil, |(entity, _)| Answer::Entity(entity))
+    }));
+}
+```
+
+```ruby
+plant = Rubevy.ask("nearest", Rubevy.entity).pop   # back in this line, on this frame
+at    = plant[:Transform][:translation]            # and so is the read that follows it
+```
+
+`examples/nearest.rs` runs exactly that, with an ordinary answering system beside it for the
+contrast — the script prints how long it waited for each, and it is `0` for `nearest` and `1` for
+the question the system answers.
+
+**When it is worth it.** When the question is asked every frame, for every creature, and the
+script cannot go on without the answer. The world script a garden of creatures wants asks "what
+is within four metres" and "who is nearest" once per creature per frame; answered by a system
+that is one frame of lag per decision, and answered from Ruby with `Rubevy.find` plus a read per
+candidate it is the frame's whole instruction budget (a read is ~75 instructions, and 24
+creatures against 90 plants is 2,160 of them). A closure that walks the same world in Rust
+answers all of it inside the tick.
+
+**When not to.** Two cases, and both of them are the other two roads:
+
+* **The answer depends on the rest of the frame** — what the physics worked out, what another
+  system decided, an event of this frame. The closure runs in the middle of `Tick`, so it cannot
+  see any of that; a system in `RubevySet::Answer` can, and costs one frame.
+* **The answer is work rather than a lookup** — a path search, a file, anything that does not fit
+  in the frame. That is `answer_with` and a future.
+
+And never for changing the world: the closure is handed `&World`, so the compiler says so. What a
+game means by it is `Rubevy.spawn` and `e[:Hp] =`, which land at the end of the frame as they
+always did.
+
+**What the closure is handed, and what it is not.** `&World` and the `Request`. Ordinary Bevy
+reads work on that world — `world.get::<T>(entity)`, `world.iter_entities()`, a resource of the
+game's own, `AppTypeRegistry` — and the game's own types need no reflection here, because the
+game knows them. What is *not* in that world is `ScriptWorld<M>` itself: the tick has taken it
+out for the length of its loop, so `world.get_resource::<ScriptWorld<M>>()` is `None` and there
+is no `Vm` to reach. That is why the answer is the flat `Answer` (`Nil` / `Bool` / `Num` /
+`Text` / `List` / `Rows` / `Entity`) and there is no `answer_value` here: building a value inside
+the VM while the VM is being run around you is a different thing, and it can be added the day
+something needs it. An argument that is a Hash or an Array can be seen for what it is
+(`Arg::Value`, `request.value(0)`) but not read into, for the same reason — reading one needs the
+`Vm`.
+
+**The rules.**
+
+* A registered kind never reaches `take_requests`, exactly as rubevy's own four do not. A game's
+  answering system sees only what is left for it.
+* The four rubevy answers itself (`component.get`, `component.has`, `components`,
+  `entities.with`) cannot be taken over this way: they are taken off the queue first.
+* Registering the same kind twice keeps the later closure and warns.
+* The questions are answered in the order they were asked in, and the loop ends the way it always
+  did — when a round answers nobody, or when the frame's budget or its `frame_time` is spent. A
+  question left over from a spent frame is answered first on the next one.
+* `Rubevy::Proxy` is sugar for `Rubevy.ask`, so `garden.nearest(:Plant)` becomes synchronous by
+  registering `"garden.nearest"`; the Ruby side does not change.
+* What the closure costs comes out of the scripts' own frame, since it runs in the middle of it.
 
 ## Components by name
 
