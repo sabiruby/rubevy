@@ -40,7 +40,7 @@ fn my_system(w: ResMut<ScriptWorld>) { … }
 
 // ── 2 本目が欲しいアプリだけ、これを足す
 struct Mods;                                            // ただの名札。中身は空でいい
-RubevyPlugin::<Mods>::with_asset_root("assets/mods")    // 2 本目の VM が立つ
+RubevyPlugin::<Mods>::for_vm("assets/mods")             // 2 本目の VM が立つ
 fn mod_system(w: ResMut<ScriptWorld<Mods>>) { … }
 ```
 
@@ -143,7 +143,16 @@ pub enum   RubevySet { … }             pub enum   RubevySet<M = ()> { Deliver,
 pub struct RubevyPlugin { … }          pub struct RubevyPlugin<M = ()> { …, _m: PhantomData<fn() -> M> }
 ```
 
-`Request` / `Answer` / `Arg` / `RootedValue` / `MrbAsset` / `ScriptStats` / `ScriptStatus` / `ScriptDone` / `SpawnedByScript` は**そのまま**。
+`Request` / `Answer` / `Arg` / `RootedValue` / `MrbAsset` / `ScriptStats` / `ScriptStatus` / `SpawnedByScript` は**そのまま**。
+`ScriptDone` は段階 1 で `ScriptDone<M = ()>` にする（下の「段階 0 で分かったこと」4）。
+
+**段階 0 で分かったこと（2026-09-17、`286d181`）— 既定型引数は「型の位置」でしか効かない。** `Script::new(h)` や `RubevySet::Answer` のような**式の位置**では Rust は既定値に落ちない（`default_type_parameter_fallback` は unstable）。それで上の表から次の 4 点がずれる。既存の綴りはすべてそのまま通る:
+
+1. `RubevySet` は enum ではなく **struct + 関連定数**。`RubevySet::Deliver` / `Tick` / `Answer` は `impl RubevySet<()>` の定数（綴りは不変）。名札つきは `RubevySet::<Mods>::deliver()` / `tick()` / `answer()`。
+2. `Script::new(h)` は `impl Script<()>`。名札つきは **`Script::<Mods>::for_vm(h)`**。
+3. `RubevyPlugin::default()` と `RubevyPlugin::with_asset_root(root)` は `impl RubevyPlugin<()>`（README の綴りを守る）。名札つきは **`RubevyPlugin::<Mods>::for_vm(root)`**（`Script::for_vm` と対）。段階 0 のコミットでは `with_asset_root` を総称にしたため 1 本目が `RubevyPlugin::<()>::with_asset_root` になっていた。段階 1 の最初のコミットで直す。
+4. `ScriptDone` に名札が無いと、1 エンティティに `Script<A>` と `Script<B>` を付けたとき（§3 既定 6）片方の終了で両方が「終わった」ことになる（`tick_scripts` の `Without<ScriptDone>` と `stop_removed_task` の判定）。段階 1 で `ScriptDone<M = ()>` にする。ゲーム側は `.remove::<ScriptDone>()` の型の位置でしか使っていないので壊れない。
+5. `ScriptWorld::QUEUE_LIMIT` はモジュール定数に移し `impl ScriptWorld<()>` から同名で公開（値は VM で変わらない）。
 `Request` に VM の識別は要らない（`take_requests` を呼ぶのが `ScriptWorld<M>` 自身だから、答え手はもう自分がどの VM か知っている）。
 
 ### 4.2 `PhantomData<fn() -> M>` を使うこと（`PhantomData<M>` ではなく）
@@ -156,7 +165,7 @@ pub struct RubevyPlugin { … }          pub struct RubevyPlugin<M = ()> { …, 
 ```rust
 App::new()
     .add_plugins(RubevyPlugin::default())                             // 本体の VM
-    .add_plugins(RubevyPlugin::<Mods>::with_asset_root("assets/mods")) // mod の VM
+    .add_plugins(RubevyPlugin::<Mods>::for_vm("assets/mods"))         // mod の VM
     .add_systems(Startup, |mut w: ResMut<ScriptWorld<Mods>>| {
         w.budget = 20_000;                    // 本体の 1/10 しか回らない
         w.frame_time = Some(Duration::from_millis(1));
@@ -186,13 +195,17 @@ App::new()
 
 コミット例: `rubevy: a type marker on the VM — the plumbing, with nothing yet behind it`
 
+**済み（2026-09-17、`286d181`）。** tests 45 件 + doctest 9、examples 5 本、サンプルゲーム 2 本（sabibots selftest ×2、garden selftest ×3）が無変更で通った。clippy 増減なし。§6.2 のフックは `on_remove = stop_removed_task::<M>` でそのまま通り、observer の代案は不要だった。境界は `M: 'static` だけ（`Send` を要求するとフックが通らない）。記録は `docs/worklog/2026-09-17-multi-vm.md`。
+
 ### 段階 1 — 2 本目が実際に立つ
 
 やること:
 
-1. **プラグインの二重登録を避ける**（§6.3）。`init_asset` / `init_asset_loader` は共有資源。
-2. `RubevySet<M>` の `configure_sets` が名札ごとに独立していること。
-3. 新テスト `tests/two_vms.rs`:
+0. **段階 0 の直し**（別コミット）: `with_asset_root` を `impl RubevyPlugin<()>` に戻し、名札つきの入口 `RubevyPlugin::<Mods>::for_vm(root)` を足す。crate doc の例（`src/lib.rs` の `RubevyPlugin` の rustdoc）も直す。
+1. **`ScriptDone<M = ()>`**（§4.1 の 4）。`tick_scripts` / `stop_removed_task` の判定が自分の名札だけを見ること。
+2. **プラグインの二重登録を避ける**（§6.3）。`init_asset` / `init_asset_loader` は共有資源。
+3. `RubevySet<M>` の `configure_sets` が名札ごとに独立していること。
+4. 新テスト `tests/two_vms.rs`:
    * 片方の `$x` / `class Foo` / `CONST` が他方から見えない
    * 片方で例外が上がっても他方は動き続ける
    * 片方の予算を 0 にしても他方は走る（一時停止の独立）
@@ -333,7 +346,7 @@ rubevy_games 側: `ScriptWorld` 39 行、`ScriptTask` 29 行、`.vm` 直接参�
 
 | 段階 | 内容 | 状態 |
 |---|---|---|
-| 0 | 型引数を通す（機能変更なし） | 未着手 |
+| 0 | 型引数を通す（機能変更なし） | **済み** `286d181`（2026-09-17） |
 | 1 | 2 本目が実際に立つ＋独立のテスト | 未着手 |
 | 2 | フック・排他システム 2 本・`publish` を VM ごとに | 未着手 |
 | 3 | `examples/two_vms.rs` と docs、worklog | 未着手 |
