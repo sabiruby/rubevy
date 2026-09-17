@@ -54,6 +54,8 @@ use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use bevy::tasks::{block_on, poll_once, AsyncComputeTaskPool, Task};
 
+use std::marker::PhantomData;
+
 use sabiruby::convert::{DataRef, FromRuby, This};
 use sabiruby::value::ObjId;
 use sabiruby::{Value, Vm, VmError};
@@ -101,18 +103,42 @@ impl AssetLoader for MrbLoader {
 }
 
 /// Attach to an entity to run a script as a task.
-#[derive(Component, Debug, Clone)]
-pub struct Script {
+///
+/// `M` is the name tag of the VM the script belongs to. Left out — `Script`, which is
+/// `Script<()>` — it is the app's first VM, which is what an app with one VM ever writes. An app
+/// that started a second one with `RubevyPlugin::<Mods>` gives that VM's scripts `Script<Mods>`,
+/// and the two are different components: a system of one VM never sees the other's.
+///
+/// `Debug` and `Clone` are written out below rather than derived, because a derive would ask the
+/// name tag itself to be `Debug` and `Clone` — and a name tag is usually an empty `struct Mods;`
+/// that implements nothing at all.
+#[derive(Component)]
+pub struct Script<M = ()> {
     pub source: Handle<MrbAsset>,
     /// 0-255, 0 first (mruby-task's priority).
     pub priority: u8,
     /// Shown in logs and answered by `Task#name`.
     pub name: Option<String>,
+    /// The name tag, which is a type and never a value. `fn() -> M` rather than `M` so that the
+    /// component is `Send + Sync` whatever the tag is (see the crate's `docs/plans`).
+    _m: PhantomData<fn() -> M>,
 }
 
-impl Script {
-    pub fn new(source: Handle<MrbAsset>) -> Self {
-        Script { source, priority: 128, name: None }
+impl Script<()> {
+    /// A script of the app's first VM.
+    ///
+    /// It is spelled without a name tag because Rust does not fall back to a type parameter's
+    /// default in an expression: `Script::new(handle)` with a generic `new` would be a type it
+    /// cannot infer. The VM with a tag has [`Script::for_vm`].
+    pub fn new(source: Handle<MrbAsset>) -> Script<()> {
+        Script::for_vm(source)
+    }
+}
+
+impl<M: 'static> Script<M> {
+    /// A script of the VM named `M`: `Script::<Mods>::for_vm(handle)`.
+    pub fn for_vm(source: Handle<MrbAsset>) -> Script<M> {
+        Script { source, priority: 128, name: None, _m: PhantomData }
     }
     pub fn with_priority(mut self, priority: u8) -> Self {
         self.priority = priority;
@@ -124,28 +150,74 @@ impl Script {
     }
 }
 
+impl<M> std::fmt::Debug for Script<M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Script")
+            .field("source", &self.source)
+            .field("priority", &self.priority)
+            .field("name", &self.name)
+            .finish()
+    }
+}
+
+impl<M> Clone for Script<M> {
+    fn clone(&self) -> Self {
+        Script {
+            source: self.source.clone(),
+            priority: self.priority,
+            name: self.name.clone(),
+            _m: PhantomData,
+        }
+    }
+}
+
 /// The task a [`Script`] became. Added by the plugin once the asset arrives.
 ///
 /// Removing it (or despawning the entity) stops the task: it is terminated in the VM, so a script
 /// replaced by a new [`Script`] — a reload, a restart — does not keep running beside the new one.
-#[derive(Component, Debug, Clone, Copy)]
-#[component(on_remove = stop_removed_task)]
-pub struct ScriptTask {
+///
+/// The name tag `M` says which VM the task belongs to. It is what keeps an [`ObjId`] of one VM
+/// from being handed to another: an `ObjId` is an index into a VM's own heap, so the same number
+/// names a different object in the VM next door, and a mistake there would be quiet. With the
+/// tag it is a compile error instead.
+#[derive(Component)]
+#[component(on_remove = stop_removed_task::<M>)]
+pub struct ScriptTask<M = ()> {
     task: ObjId,
+    _m: PhantomData<fn() -> M>,
 }
 
-impl ScriptTask {
-    /// The scheduler's id for this script, for the `Vm::task_*` entry points.
+impl<M> ScriptTask<M> {
+    /// The scheduler's id for this script, for the `Vm::task_*` entry points — of **this**
+    /// script's VM, which is the one named `M`.
     pub fn task(&self) -> ObjId {
         self.task
     }
 }
 
-fn stop_removed_task(mut world: bevy::ecs::world::DeferredWorld, context: bevy::ecs::lifecycle::HookContext) {
-    let Some(task) = world.get::<ScriptTask>(context.entity).map(|t| t.task) else { return };
+// as on `Script`: derived, these would ask the name tag to be `Debug` / `Clone` / `Copy` itself
+impl<M> std::fmt::Debug for ScriptTask<M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScriptTask").field("task", &self.task).finish()
+    }
+}
+
+impl<M> Clone for ScriptTask<M> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<M> Copy for ScriptTask<M> {}
+
+fn stop_removed_task<M: 'static>(
+    mut world: bevy::ecs::world::DeferredWorld,
+    context: bevy::ecs::lifecycle::HookContext,
+) {
+    let Some(task) = world.get::<ScriptTask<M>>(context.entity).map(|t| t.task) else { return };
     // a script that ended has been let go of already (`ScriptDone`)
     let ended = world.get::<ScriptDone>(context.entity).is_some();
-    let Some(mut scripts) = world.get_resource_mut::<ScriptWorld>() else { return };
+    let Some(mut scripts) = world.get_resource_mut::<ScriptWorld<M>>() else { return };
     scripts.stop_task(task, !ended);
     // and anything it was listening for: a queue nobody will read is one the game would keep
     // filling (`Rubevy.subscribe`)
@@ -183,11 +255,36 @@ pub enum ScriptStatus {
 
 /// Emitted when a script's task runs to its end, with the value it answered
 /// (or the exception it did not handle, which mruby-task makes the result).
-#[derive(Message, Debug, Clone)]
-pub struct ScriptEnded {
+///
+/// One message type per VM (`ScriptEnded<Mods>`), so a reader of the first VM's endings is not
+/// woken by the second's.
+#[derive(Message)]
+pub struct ScriptEnded<M = ()> {
     pub entity: Entity,
     pub status: ScriptStatus,
     pub value: String,
+    _m: PhantomData<fn() -> M>,
+}
+
+impl<M> std::fmt::Debug for ScriptEnded<M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScriptEnded")
+            .field("entity", &self.entity)
+            .field("status", &self.status)
+            .field("value", &self.value)
+            .finish()
+    }
+}
+
+impl<M> Clone for ScriptEnded<M> {
+    fn clone(&self) -> Self {
+        ScriptEnded {
+            entity: self.entity,
+            status: self.status,
+            value: self.value.clone(),
+            _m: PhantomData,
+        }
+    }
 }
 
 /// What a script asked the host to do. A native cannot touch the Bevy world,
@@ -463,9 +560,14 @@ pub struct SpawnedByScript {
     pub name: String,
 }
 
-/// The one VM the scripts share, and the queue between them and the world.
+/// The VM the scripts of one name tag share, and the queue between them and the world.
+///
+/// `ScriptWorld` — that is, `ScriptWorld<()>` — is the app's first VM, and is what an app with
+/// one VM writes. `ScriptWorld<Mods>` is the VM `RubevyPlugin::<Mods>` started: another
+/// resource, so another heap, another set of globals, constants and classes, another scheduler
+/// and another budget.
 #[derive(Resource)]
-pub struct ScriptWorld {
+pub struct ScriptWorld<M = ()> {
     /// The VM itself, for a host that wants to add to it — **at `Startup`**, before any script
     /// has run.
     ///
@@ -558,10 +660,13 @@ pub struct ScriptWorld {
     /// The objects of dropped [`Arg::Value`]s, waiting for a sweep with the `Vm`
     /// ([`ScriptWorld::release_dropped_values`]). The `Rubevy.ask` native holds the other end.
     release: ReleaseQueue,
+    /// Which VM this is, as a type. Nothing reads it; what it does is keep the resources of two
+    /// VMs apart, and with them their tasks, requests and components.
+    _m: PhantomData<fn() -> M>,
 }
 
-impl ScriptWorld {
-    fn new() -> Result<ScriptWorld, String> {
+impl<M: 'static> ScriptWorld<M> {
+    fn new() -> Result<ScriptWorld<M>, String> {
         let mut vm = Vm::with_mrblib().map_err(|e| format!("mrblib: {e:?}"))?;
         // the clock is Bevy's, not the instruction count; what the instruction count still does
         // is end a timeslice, which is what keeps one script from eating a frame
@@ -611,12 +716,13 @@ impl ScriptWorld {
             entity_class,
             freed_entities,
             release,
+            _m: PhantomData,
         })
     }
 
     /// What a script has spent and where it is, for a HUD or a debugger panel. The task comes
     /// from the entity's [`ScriptTask`].
-    pub fn stats(&self, script: &ScriptTask) -> ScriptStats {
+    pub fn stats(&self, script: &ScriptTask<M>) -> ScriptStats {
         ScriptStats {
             instructions: self.vm.task_instructions(script.task),
             location: self.vm.task_location(script.task),
@@ -829,14 +935,6 @@ impl ScriptWorld {
         }
     }
 
-    /// How many messages a subscriber's queue holds before the oldest is dropped.
-    ///
-    /// A queue with no limit is a leak with a slow fuse: a script that subscribes and then
-    /// waits on something else would hold every message the game ever sent. 64 is enough for a
-    /// script that reads its queue every few frames, and small enough that a script that never
-    /// reads costs nothing to speak of.
-    pub const QUEUE_LIMIT: usize = 64;
-
     /// Drops the oldest messages until there is room for one more.
     ///
     /// This runs on every published message, so it asks the VM rather than the script's Ruby:
@@ -848,7 +946,7 @@ impl ScriptWorld {
                 Ok(n) => n,
                 Err(_) => return,
             };
-            if n < Self::QUEUE_LIMIT {
+            if n < QUEUE_LIMIT {
                 return;
             }
             // `None` is an empty queue, which cannot happen while `n >= QUEUE_LIMIT`; stopping
@@ -904,6 +1002,24 @@ impl ScriptWorld {
             self.vm.gc_unregister(queue);
         }
     }
+}
+
+/// How many messages a subscriber's queue holds before the oldest is dropped.
+///
+/// A queue with no limit is a leak with a slow fuse: a script that subscribes and then waits on
+/// something else would hold every message the game ever sent. 64 is enough for a script that
+/// reads its queue every few frames, and small enough that a script that never reads costs
+/// nothing to speak of.
+///
+/// The same number for every VM, so it is one constant and not one per name tag.
+const QUEUE_LIMIT: usize = 64;
+
+impl ScriptWorld<()> {
+    /// The queue limit above, under the name a host reads it by. It is on
+    /// the first VM's type rather than on every one of them because a constant of a tagged type
+    /// would have to be written `ScriptWorld::<()>::QUEUE_LIMIT` by the apps that have one VM —
+    /// and the number is the same for all of them anyway.
+    pub const QUEUE_LIMIT: usize = QUEUE_LIMIT;
 }
 
 /// The Ruby value for an [`Answer`], which is what both [`ScriptWorld::answer`] and
@@ -1061,37 +1177,136 @@ impl sabiruby::Host for FileHost {
 ///
 /// The questions rubevy answers itself (a component by name) have always cost one frame, and
 /// still do: `answer_components` is in `Answer` with everybody else.
-#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RubevySet {
-    /// Before the scripts run: what finished between the frames reaches the VM.
+///
+/// **One set of three per VM.** `RubevySet::Deliver` is the first VM's, `RubevySet::<Mods>` the
+/// sets of the VM `RubevyPlugin::<Mods>` started; they are different sets, so the two VMs' frames
+/// are ordered against each other only where an app says so.
+///
+/// It is a struct with three constants rather than an enum with three variants, which is what it
+/// was while there was one VM. The reason is Rust's and not Bevy's: a name tag with a default
+/// (`RubevySet<M = ()>`) is filled in where a *type* is written, and not where a *value* is — so
+/// `RubevySet::Answer` as an enum variant would have been a type the compiler could not infer,
+/// and every app with one VM would have had to write `RubevySet::<()>::Answer`. As a constant of
+/// `impl RubevySet<()>` it is found the way `Script::new` is, and the tagged VM's sets are
+/// [`RubevySet::deliver`], [`RubevySet::tick`] and [`RubevySet::answer`].
+#[derive(SystemSet)]
+pub struct RubevySet<M = ()> {
+    which: SetKind,
+    _m: PhantomData<fn() -> M>,
+}
+
+/// Which of the three [`RubevySet`]s this is. Private: what a host names is the constant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum SetKind {
     Deliver,
-    /// The scripts run, and their questions become [`Request`]s.
     Tick,
-    /// The questions are answered — where a host's own answering systems go.
     Answer,
 }
 
+// The names an app with one VM writes. `non_upper_case_globals` is allowed because these stand
+// where the enum's variants stood: `RubevySet::Deliver` is what every app already says.
+#[allow(non_upper_case_globals)]
+impl RubevySet<()> {
+    /// Before the scripts run: what finished between the frames reaches the VM.
+    pub const Deliver: RubevySet<()> = RubevySet::deliver();
+    /// The scripts run, and their questions become [`Request`]s.
+    pub const Tick: RubevySet<()> = RubevySet::tick();
+    /// The questions are answered — where a host's own answering systems go.
+    pub const Answer: RubevySet<()> = RubevySet::answer();
+}
+
+impl<M: 'static> RubevySet<M> {
+    /// [`RubevySet::Deliver`] of the VM named `M`: `RubevySet::<Mods>::deliver()`.
+    pub const fn deliver() -> RubevySet<M> {
+        RubevySet { which: SetKind::Deliver, _m: PhantomData }
+    }
+    /// [`RubevySet::Tick`] of the VM named `M`.
+    pub const fn tick() -> RubevySet<M> {
+        RubevySet { which: SetKind::Tick, _m: PhantomData }
+    }
+    /// [`RubevySet::Answer`] of the VM named `M`.
+    pub const fn answer() -> RubevySet<M> {
+        RubevySet { which: SetKind::Answer, _m: PhantomData }
+    }
+}
+
+// `SystemSet` asks for these six, and a derive would ask the name tag for them in turn (§6.1 of
+// `docs/plans/multi-vm-plan.md`): written out, a tag is an empty struct that implements nothing.
+// Two sets are the same set when they are the same one of the three *and* carry the same tag —
+// the tag is in the type, so it is Rust that keeps `RubevySet<Mods>::Tick` apart from
+// `RubevySet::Tick`, not this `eq`.
+impl<M> std::fmt::Debug for RubevySet<M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RubevySet::{:?}", self.which)
+    }
+}
+
+impl<M> Clone for RubevySet<M> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<M> Copy for RubevySet<M> {}
+
+impl<M> PartialEq for RubevySet<M> {
+    fn eq(&self, other: &Self) -> bool {
+        self.which == other.which
+    }
+}
+
+impl<M> Eq for RubevySet<M> {}
+
+impl<M> std::hash::Hash for RubevySet<M> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.which.hash(state);
+    }
+}
+
 /// Adds the VM, the `.mrb` asset loader and the systems, in the three sets of [`RubevySet`].
-pub struct RubevyPlugin {
+///
+/// `RubevyPlugin::default()` is the app's first VM. A second one is the same plugin under
+/// another name tag, with its own asset root:
+///
+/// ```no_run
+/// # use bevy::prelude::*;
+/// # use rubevy::RubevyPlugin;
+/// struct Mods;
+/// # fn build(app: &mut App) {
+/// app.add_plugins(RubevyPlugin::default())
+///     .add_plugins(RubevyPlugin::<Mods>::with_asset_root("assets/mods"));
+/// # }
+/// ```
+pub struct RubevyPlugin<M = ()> {
     /// Where a `require` reads from (Bevy's asset directory).
     pub asset_root: String,
+    _m: PhantomData<fn() -> M>,
 }
 
-impl Default for RubevyPlugin {
+/// The first VM. It is `RubevyPlugin<()>` and not a plugin of every name tag, because
+/// `RubevyPlugin::default()` — which every app that has one VM writes — has nothing to infer a
+/// tag from.
+impl Default for RubevyPlugin<()> {
     fn default() -> Self {
-        RubevyPlugin { asset_root: String::from("assets") }
+        RubevyPlugin { asset_root: String::from("assets"), _m: PhantomData }
     }
 }
 
-impl RubevyPlugin {
+impl<M: 'static> RubevyPlugin<M> {
+    /// The VM named `M`, reading its `require`s from `root`:
+    /// `RubevyPlugin::<Mods>::with_asset_root("assets/mods")`.
+    ///
+    /// Without a tag the VM is the first one, and the tag has to be written out —
+    /// `RubevyPlugin::<()>::with_asset_root("assets")` — because a default is filled in where a
+    /// type is written and not where a value is.
     pub fn with_asset_root(root: impl Into<String>) -> Self {
-        RubevyPlugin { asset_root: root.into() }
+        RubevyPlugin { asset_root: root.into(), _m: PhantomData }
     }
 }
 
-impl Plugin for RubevyPlugin {
+impl<M: 'static> Plugin for RubevyPlugin<M> {
     fn build(&self, app: &mut App) {
-        let mut world = match ScriptWorld::new() {
+        let mut world = match ScriptWorld::<M>::new() {
             Ok(w) => w,
             Err(e) => panic!("rubevy: could not start the VM: {e}"),
         };
@@ -1100,21 +1315,29 @@ impl Plugin for RubevyPlugin {
         world.vm.set_load_path(&[&format!("{root}/scripts"), root]);
         app.init_asset::<MrbAsset>()
             .init_asset_loader::<MrbLoader>()
-            .add_message::<ScriptEnded>()
+            .add_message::<ScriptEnded<M>>()
             .insert_resource(world)
-            .configure_sets(Update, (RubevySet::Deliver, RubevySet::Tick, RubevySet::Answer).chain())
-            .add_systems(
+            .configure_sets(
                 Update,
-                (start_scripts, deliver_answers, release_values).chain().in_set(RubevySet::Deliver),
+                (RubevySet::<M>::deliver(), RubevySet::<M>::tick(), RubevySet::<M>::answer())
+                    .chain(),
             )
             .add_systems(
                 Update,
-                (tick_scripts, drain_commands, apply_component_writes).chain().in_set(RubevySet::Tick),
+                (start_scripts::<M>, deliver_answers::<M>, release_values::<M>)
+                    .chain()
+                    .in_set(RubevySet::<M>::deliver()),
+            )
+            .add_systems(
+                Update,
+                (tick_scripts::<M>, drain_commands::<M>, apply_component_writes::<M>)
+                    .chain()
+                    .in_set(RubevySet::<M>::tick()),
             )
             // rubevy's own answering system sits in the same set a host's does, so that a game
             // reading `ScriptWorld` in `Answer` and rubevy reading it here are ordered against
             // each other by Bevy rather than by luck
-            .add_systems(Update, answer_components.in_set(RubevySet::Answer));
+            .add_systems(Update, answer_components::<M>.in_set(RubevySet::<M>::answer()));
     }
 }
 
@@ -1124,11 +1347,11 @@ impl Plugin for RubevyPlugin {
 const ENTITY_IVAR: &str = "@rubevy_entity";
 
 /// Turns every [`Script`] whose asset has arrived into a task.
-fn start_scripts(
+fn start_scripts<M: 'static>(
     mut commands: Commands,
     assets: Res<Assets<MrbAsset>>,
-    mut world: ResMut<ScriptWorld>,
-    pending: Query<(Entity, &Script), Without<ScriptTask>>,
+    mut world: ResMut<ScriptWorld<M>>,
+    pending: Query<(Entity, &Script<M>), Without<ScriptTask<M>>>,
 ) {
     for (entity, script) in &pending {
         let Some(asset) = assets.get(&script.source) else { continue };
@@ -1147,7 +1370,7 @@ fn start_scripts(
                 vm.gc_register(task);
                 // the task carries its entity, which is what `Rubevy.entity` answers
                 vm.ivar_set(task, ENTITY_IVAR, Value::Int(entity.to_bits() as i64));
-                commands.entity(entity).insert(ScriptTask { task });
+                commands.entity(entity).insert(ScriptTask::<M> { task, _m: PhantomData });
             }
             Err(e) => error!("rubevy: {name} failed to start: {}", vm.describe_error(&e)),
         }
@@ -1161,18 +1384,18 @@ fn start_scripts(
 /// a host answering in [`RubevySet::Answer`] drops its requests at the end of the frame, and the
 /// values they held stop being registered at the head of the next one, so an object can be
 /// collected on the first frame it is no longer needed.
-fn release_values(mut world: ResMut<ScriptWorld>) {
+fn release_values<M: 'static>(mut world: ResMut<ScriptWorld<M>>) {
     world.release_dropped_values();
 }
 
 /// Moves the scheduler's clock on by the frame time and runs the ready tasks
 /// for up to the frame's budget.
-fn tick_scripts(
+fn tick_scripts<M: 'static>(
     time: Res<Time>,
     frame: Res<FrameCount>,
-    mut world: ResMut<ScriptWorld>,
-    tasks: Query<(Entity, &ScriptTask), Without<ScriptDone>>,
-    mut ended: MessageWriter<ScriptEnded>,
+    mut world: ResMut<ScriptWorld<M>>,
+    tasks: Query<(Entity, &ScriptTask<M>), Without<ScriptDone>>,
+    mut ended: MessageWriter<ScriptEnded<M>>,
     mut commands: Commands,
 ) {
     let delta = time.delta_secs();
@@ -1214,7 +1437,7 @@ fn tick_scripts(
         let value = world.vm.task_value(st.task);
         let status = if world.vm.is_exception(value) { ScriptStatus::Failed } else { ScriptStatus::Finished };
         let text = world.vm.inspect_str(value).unwrap_or_else(|_| String::from("?"));
-        ended.write(ScriptEnded { entity, status, value: text });
+        ended.write(ScriptEnded { entity, status, value: text, _m: PhantomData });
         world.vm.gc_unregister(st.task);
         // A script that runs to its end keeps its `ScriptTask` — that is what stops it starting
         // again — so the `on_remove` hook is not reached here. What it subscribed to is let go
@@ -1257,7 +1480,7 @@ fn flush_output(vm: &mut Vm) {
 /// asked wakes on this frame instead of the next one. Nothing is lost the other way: a future
 /// that finishes later in this frame is picked up at the head of the next, which is where the
 /// script would have woken anyway.
-fn deliver_answers(mut world: ResMut<ScriptWorld>) {
+fn deliver_answers<M: 'static>(mut world: ResMut<ScriptWorld<M>>) {
     if world.answering.is_empty() {
         return;
     }
@@ -1277,10 +1500,10 @@ fn deliver_answers(mut world: ResMut<ScriptWorld>) {
 }
 
 /// Carries out what the scripts asked for this frame.
-fn drain_commands(
+fn drain_commands<M: 'static>(
     mut commands: Commands,
     mut transforms: Query<&mut Transform>,
-    mut world: ResMut<ScriptWorld>,
+    mut world: ResMut<ScriptWorld<M>>,
 ) {
     for c in take_commands(&mut world.vm) {
         match c {
@@ -1351,20 +1574,20 @@ const RESERVED_KINDS: [&str; 4] = ["component.get", "component.has", "components
 /// (`Transform`, `Visibility`, `Name`, …) in the plugins that own them — `TransformPlugin` for
 /// `Transform`, which `MinimalPlugins` does not add. An unregistered type is not an error: the
 /// component reads as `nil`, `has?` as `false`, and it is not in `components`.
-fn answer_components(world: &mut World) {
-    if world.resource::<ScriptWorld>().reflect_requests.is_empty() {
+fn answer_components<M: 'static>(world: &mut World) {
+    if world.resource::<ScriptWorld<M>>().reflect_requests.is_empty() {
         return;
     }
     let Some(registry) = world.get_resource::<AppTypeRegistry>().cloned() else {
         warn!("rubevy: no AppTypeRegistry, so no component is reachable by name");
-        let mut scripts = world.resource_mut::<ScriptWorld>();
+        let mut scripts = world.resource_mut::<ScriptWorld<M>>();
         for request in std::mem::take(&mut scripts.reflect_requests) {
             scripts.answer(&request, Answer::Nil);
         }
         return;
     };
     let registry = registry.read();
-    world.resource_scope(|world: &mut World, mut scripts: Mut<ScriptWorld>| {
+    world.resource_scope(|world: &mut World, mut scripts: Mut<ScriptWorld<M>>| {
         let world = &*world;
         let entity_class = scripts.entity_class;
         for request in std::mem::take(&mut scripts.reflect_requests) {
@@ -1459,11 +1682,11 @@ fn answer_components(world: &mut World) {
 /// It runs after [`drain_commands`], at the end of the frame, which is the promise `Commands`
 /// makes and the one `Rubevy.spawn` already made: a script's write is seen by the next frame,
 /// not in the middle of this one.
-fn apply_component_writes(world: &mut World) {
-    if world.resource::<ScriptWorld>().component_writes.is_empty() {
+fn apply_component_writes<M: 'static>(world: &mut World) {
+    if world.resource::<ScriptWorld<M>>().component_writes.is_empty() {
         return;
     }
-    let writes = std::mem::take(&mut world.resource_mut::<ScriptWorld>().component_writes);
+    let writes = std::mem::take(&mut world.resource_mut::<ScriptWorld<M>>().component_writes);
     let Some(registry) = world.get_resource::<AppTypeRegistry>().cloned() else { return };
     let registry = registry.read();
     for write in writes {
@@ -1749,6 +1972,6 @@ pub fn entity_of(bits: u64) -> Option<Entity> {
 /// What a script asked for this frame and has not had carried out yet, for tests: the queue is
 /// drained by [`drain_commands`], so this is only useful before that system runs.
 #[doc(hidden)]
-pub fn pending_command_count(world: &ScriptWorld) -> usize {
+pub fn pending_command_count<M: 'static>(world: &ScriptWorld<M>) -> usize {
     world.vm.host_state::<HostState>().map(|s| s.commands.len()).unwrap_or(0)
 }
