@@ -217,7 +217,11 @@ App::new()
 
 コミット例: `rubevy: a second VM in one app — the plugin twice, the tests that prove they do not mix`
 
+**済み（2026-09-17、`4d32569` + `51fb27b`）。** `tests/two_vms.rs` は 6 本 + 二重登録のガードが効いていることを示す 7 本目（プラグインとプラグインの間に足したアセットが消えないこと。ガード無しで落ちるのを確認済み）。名札は `struct A; struct B;` で、どちらも `()` ではない。`ScriptDone<M = ()>` は `ScriptDone::new()` / `ScriptDone::<Mods>::for_vm()`。項目 3 はコード不要（Bevy の `DynEq` は downcast してから比べ、`DynHash` は `TypeId` を混ぜるので、名札は同一性に効いている。`bevy_ecs/src/label.rs`）。tests 52 件 + doctest 9、ゲーム 2 本無変更で通過、clippy 増減なし。
+
 ### 段階 2 — 1 本前提の残りを潰す
+
+**段階 1 の時点で 1 と 2 は済んでいる**（`stop_removed_task::<M>` はフックのまま型付け、排他システム 2 本も `M` ごとに登録。§7.2 の despawn テストがフックの経路を通る）。残るのは 3 の `publish` のテストだけ。`tests/two_vms.rs` に 8 本目として足し、1 と 2 は「済んでいることを worklog に 1 段落で書く」に読み替える。
 
 やること（§2.2 の 2・5 の排他システム・`publish`）:
 
@@ -238,6 +242,7 @@ App::new()
    スクリプトは `assets/scripts/` と `assets/mods/` に置く。
 2. **docs** — 「2 本目の VM はまだ作っていない」と書いてある 4 か所を書き換える:
    `README.md:50` / `src/lib.rs:46`（crate doc）/ `docs/host-api.md:3` / `docs/outlook.md:9,100`。
+   README の `::with_asset_root("assets")` の綴りはそのまま通る（段階 1 で戻した）。
    `docs/host-api.md` に「VM を 2 本立てるには」の節を足し、**予算が VM ごとであること（N 本なら最悪 N×`frame_time`）** と **irep が VM ごとに複製されること**を明記する。
 3. **worklog** `docs/worklog/2026-09-17-multi-vm.md` を仕上げる。
 4. この指示書の段階表を「済み」にし、ハッシュを入れる。
@@ -347,7 +352,7 @@ rubevy_games 側: `ScriptWorld` 39 行、`ScriptTask` 29 行、`.vm` 直接参�
 | 段階 | 内容 | 状態 |
 |---|---|---|
 | 0 | 型引数を通す（機能変更なし） | **済み** `286d181`（2026-09-17） |
-| 1 | 2 本目が実際に立つ＋独立のテスト | 未着手 |
+| 1 | 2 本目が実際に立つ＋独立のテスト | **済み** `4d32569` `51fb27b`（2026-09-17） |
 | 2 | フック・排他システム 2 本・`publish` を VM ごとに | 未着手 |
 | 3 | `examples/two_vms.rs` と docs、worklog | 未着手 |
 | 4 | 実行時生成 | **やらない**（用途が出てから別の指示書で） |
