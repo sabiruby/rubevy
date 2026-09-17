@@ -233,6 +233,8 @@ App::new()
 
 コミット例: `rubevy: the hook, the two exclusive systems and publish, once per VM`
 
+**済み（2026-09-17、`3fea9f0`）。** コード変更なし。`publish` の双方向テスト（8 本目）と、1・2 が済んでいる根拠の記録（`tests/two_vms.rs` のアプリには `ScriptWorld<()>` が存在しないので、名札なしの経路が 1 つでも残っていれば 8 本とも落ちる）。
+
 ### 段階 3 — 使い方を見せて、書き残す
 
 1. **`examples/two_vms.rs`** — ゲーム本体の VM と mod 用 VM。示すのは 3 つ:
@@ -248,6 +250,12 @@ App::new()
 4. この指示書の段階表を「済み」にし、ハッシュを入れる。
 
 コミット例: `docs: more than one VM in one app — the example, the host API, the outlook`
+
+**済み（2026-09-17、`a0daaa5`）。** `examples/two_vms.rs`（3 秒で自己終了、3 点を標準出力に出す）、`assets/scripts/game.rb` と `assets/mods/{mod,mod_helper}.rb`、README・crate doc・host-api（節「Two VMs in one app」）・outlook（英日）。tests 53 件 + doctest 10、examples 6 本、ゲーム 2 本無変更で通過、clippy 増減なし。
+
+**段階 3 で分かったこと（著者判断待ち）**:
+- **ロードパスの隔離は名前で分かれているだけで、檻ではない。** SabiRuby の `require` は `/`・`./`・`../` で始まる名前を `$LOAD_PATH` を通さずに開き、rubevy の `FileHost::read_file` は `std::fs::read`（cwd 基準）なので、mod の VM から `require "./assets/scripts/helper"` は読めてしまう（`require "helper"` と `require "assets/scripts/helper"` は LoadError）。docs には「sandbox ではない」と明記した。塞ぐなら `Host` トレイト側（root の外を拒む `FileHost` の差し替え、十数行）。§8 に無い挙動変更なので、コードでは塞いでいない。
+- 2 本の VM から同時にコンポーネントを読み書きするテストは無い（排他システムが `M` ごとに登録されていることまでは示した。`tests/components.rs` は 1 本目の VM だけ）。必要なら example に mod 側のコンポーネント操作を足す。
 
 ### 段階 4 — **やらない**
 
@@ -353,6 +361,6 @@ rubevy_games 側: `ScriptWorld` 39 行、`ScriptTask` 29 行、`.vm` 直接参�
 |---|---|---|
 | 0 | 型引数を通す（機能変更なし） | **済み** `286d181`（2026-09-17） |
 | 1 | 2 本目が実際に立つ＋独立のテスト | **済み** `4d32569` `51fb27b`（2026-09-17） |
-| 2 | フック・排他システム 2 本・`publish` を VM ごとに | 未着手 |
-| 3 | `examples/two_vms.rs` と docs、worklog | 未着手 |
+| 2 | フック・排他システム 2 本・`publish` を VM ごとに | **済み** `3fea9f0`（2026-09-17。1・2 は段階 1 で済、`publish` のテストのみ） |
+| 3 | `examples/two_vms.rs` と docs、worklog | **済み** `a0daaa5`（2026-09-17） |
 | 4 | 実行時生成 | **やらない**（用途が出てから別の指示書で） |

@@ -754,17 +754,6 @@ the frame it is in and no more: `tests/restart_burst.rs` replaces ten such scrip
 and checks that an eleventh, untouched, keeps running on every frame after it. Against a VM
 without the fix that test fails, which is what it is there for.
 
-**Several at once is a frame like any other.** Removing a `ScriptTask` also closes what that
-entity subscribed to, so every task parked on one of its queues wakes with
-`Rubevy::Unsubscribed` and ends. Ten scripts with six such tasks each is sixty tasks ending in
-the same frame, and that used to cost sixty frames in which *nothing in the VM ran at all* — the
-scripts nobody had touched included — because a task ending with a nil result looked to the VM's
-frame loop exactly like an empty scheduler (SabiRuby `docs/design/gems.md`, mruby-task; the
-report is rubevy_games' garden). With a VM that has the 2026-09-17 scheduler fix, a burst costs
-the frame it is in and no more: `tests/restart_burst.rs` replaces ten such scripts in one frame
-and checks that an eleventh, untouched, keeps running on every frame after it. Against a VM
-without the fix that test fails, which is what it is there for.
-
 ## Further reading
 
 `rust-bridge.ja.md` walks through one question from a robot in SabiRuby Battle to the system that
