@@ -215,8 +215,9 @@ fn stop_removed_task<M: 'static>(
     context: bevy::ecs::lifecycle::HookContext,
 ) {
     let Some(task) = world.get::<ScriptTask<M>>(context.entity).map(|t| t.task) else { return };
-    // a script that ended has been let go of already (`ScriptDone`)
-    let ended = world.get::<ScriptDone>(context.entity).is_some();
+    // a script that ended has been let go of already (`ScriptDone`) — this VM's marker, not the
+    // one of another VM that shares the entity
+    let ended = world.get::<ScriptDone<M>>(context.entity).is_some();
     let Some(mut scripts) = world.get_resource_mut::<ScriptWorld<M>>() else { return };
     scripts.stop_task(task, !ended);
     // and anything it was listening for: a queue nobody will read is one the game would keep
@@ -244,8 +245,52 @@ pub struct ScriptStats {
 /// Marks an entity whose script has ended, so that [`ScriptEnded`] is sent once and the task
 /// is let go of once. The [`ScriptTask`] stays, which is what keeps the script from starting
 /// again.
-#[derive(Component, Debug, Clone, Copy)]
-pub struct ScriptDone;
+///
+/// It carries the name tag of its VM for the same reason [`ScriptTask`] does. One entity may
+/// hold a `Script<A>` and a `Script<B>` at once — two scripts of two VMs on one thing — and an
+/// untagged marker would let either of them ending say that *both* had ended: `tick_scripts`
+/// would stop looking at the other's task, and `stop_removed_task` would believe its object had
+/// been let go of when it had not.
+#[derive(Component)]
+pub struct ScriptDone<M = ()> {
+    _m: PhantomData<fn() -> M>,
+}
+
+impl ScriptDone<()> {
+    /// The marker of the app's first VM. It was a unit struct before the VMs had name tags, so
+    /// a host that used to write `ScriptDone` writes `ScriptDone::new()`.
+    pub fn new() -> Self {
+        ScriptDone::for_vm()
+    }
+}
+
+impl Default for ScriptDone<()> {
+    fn default() -> Self {
+        ScriptDone::new()
+    }
+}
+
+impl<M: 'static> ScriptDone<M> {
+    /// The marker of the VM named `M`: `ScriptDone::<Mods>::for_vm()`.
+    pub fn for_vm() -> Self {
+        ScriptDone { _m: PhantomData }
+    }
+}
+
+// as on `Script`: derived, these would ask the name tag to be `Debug` / `Clone` / `Copy` itself
+impl<M> std::fmt::Debug for ScriptDone<M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ScriptDone")
+    }
+}
+
+impl<M> Clone for ScriptDone<M> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<M> Copy for ScriptDone<M> {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScriptStatus {
@@ -1234,7 +1279,9 @@ impl<M: 'static> RubevySet<M> {
 // `docs/plans/multi-vm-plan.md`): written out, a tag is an empty struct that implements nothing.
 // Two sets are the same set when they are the same one of the three *and* carry the same tag —
 // the tag is in the type, so it is Rust that keeps `RubevySet<Mods>::Tick` apart from
-// `RubevySet::Tick`, not this `eq`.
+// `RubevySet::Tick`, not this `eq`. Bevy asks through `DynEq` / `DynHash`, which downcast to
+// `Self` before comparing and mix the `TypeId` into the hash (`bevy_ecs/src/label.rs:29,51`), so
+// ignoring the tag here costs nothing: the two VMs' chains are configured independently.
 impl<M> std::fmt::Debug for RubevySet<M> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "RubevySet::{:?}", self.which)
@@ -1326,9 +1373,18 @@ impl<M: 'static> Plugin for RubevyPlugin<M> {
         world.vm.set_host(Box::new(FileHost));
         let root = &self.asset_root;
         world.vm.set_load_path(&[&format!("{root}/scripts"), root]);
-        app.init_asset::<MrbAsset>()
-            .init_asset_loader::<MrbLoader>()
-            .add_message::<ScriptEnded<M>>()
+        // `MrbAsset` and its loader belong to no VM in particular, so the second plugin must
+        // not register them again: `init_asset` builds a *fresh* `Assets<MrbAsset>` and inserts
+        // it, which would drop the handles the first VM's scripts are already holding, and
+        // `init_asset_loader` would leave two loaders claiming `.mrb`.
+        // `app.is_plugin_added::<RubevyPlugin<M>>()` cannot see this — `RubevyPlugin<Mods>` is a
+        // different type from `RubevyPlugin<()>` — so the test is on the thing itself.
+        if !app.world().contains_resource::<Assets<MrbAsset>>() {
+            app.init_asset::<MrbAsset>().init_asset_loader::<MrbLoader>();
+        }
+        // `ScriptEnded<M>` is per-VM, on the other hand: another name tag is another message
+        // type, and it does want its own.
+        app.add_message::<ScriptEnded<M>>()
             .insert_resource(world)
             .configure_sets(
                 Update,
@@ -1407,7 +1463,7 @@ fn tick_scripts<M: 'static>(
     time: Res<Time>,
     frame: Res<FrameCount>,
     mut world: ResMut<ScriptWorld<M>>,
-    tasks: Query<(Entity, &ScriptTask<M>), Without<ScriptDone>>,
+    tasks: Query<(Entity, &ScriptTask<M>), Without<ScriptDone<M>>>,
     mut ended: MessageWriter<ScriptEnded<M>>,
     mut commands: Commands,
 ) {
@@ -1456,7 +1512,7 @@ fn tick_scripts<M: 'static>(
         // again — so the `on_remove` hook is not reached here. What it subscribed to is let go
         // of all the same: the script will never read those queues.
         world.unsubscribe(entity);
-        commands.entity(entity).insert(ScriptDone);
+        commands.entity(entity).insert(ScriptDone::<M>::for_vm());
     }
 }
 
