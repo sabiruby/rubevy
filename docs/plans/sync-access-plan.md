@@ -150,7 +150,7 @@ loop {
 | 段階 | 状態 |
 |---|---|
 | S1 | **済み** `d0e9b85`（2026-09-17）。tests 66 件（新 3 本 + 計測 2 本 `#[ignore]`）、examples 3 本同じ結果、clippy 増減なし、unsafe 0。**実測**: 読み 1 回（= 答えループ 1 周）2.2 µs。読みしかしないタスク 1 本は 1 フレームに 2,667 回読め、止めたのは `frame_time` でなく命令数の予算（1 読み ≈ 75 命令、6 ms しか使っていない）。24 タスク × 4 読み/フレームで 96 読みがフレームを 0.3 ms 伸ばす（前は 24 読みしかできない）。記録 `docs/worklog/2026-09-17-sync-reads.md` |
-| S2 | 未着手 |
+| S2 | **済み** `95328d6` + `129fb77`（2026-09-17）。host-api「A read costs no frame」、rust-bridge.ja、outlook 英日、README、`prelude.rb` の嘘 2 か所。副産物: `tools/compile_scripts.sh` は `-g` 無しなので `.mrb` にデバッグ情報が無い（`ScriptStats::location` がこれらの `.mrb` には効かない可能性、未確認） |
 | S3 | 未着手 |
 | S4 | 後で判断 |
 | S5 | 後で判断 |
