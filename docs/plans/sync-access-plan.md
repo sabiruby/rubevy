@@ -114,6 +114,30 @@ loop {
 * **selftest**: 両ゲーム ×3 で通ること。落ちたら閾値を動かさず報告（既定 10）。
 * `docs/garden.md` の「The questions」「The components」、`docs/sabiruby-battle.md` の該当、`docs/plans/garden-plan.md` の状況表に 1 行。
 
+### 3.6 ゲームが tick の中で答える口（S4）
+
+世界の脚本（`rubevy_games/docs/plans/garden-world-plan.md` の書き直し版）は毎フレーム「この生き物から半径 r 以内の草」「一番近い個体」を訊く。`Rubevy.find` + `Transform` の同期読みで Ruby 側に総当たりさせると 24 × 90 = 2,160 読み × 2.2 µs ≈ 4.8 ms に加えて Ruby の命令が 1 読み ≈ 75 で 16 万命令になり、予算を食い潰す（S1 の実測から）。空間の問いは Rust が答え、しかも同じ tick の中で答える必要がある。
+
+* **API**（`ScriptWorld<M>`）:
+  ```rust
+  pub type InTickAnswerer = Box<dyn Fn(&World, &Request) -> Answer + Send + Sync + 'static>;
+  impl<M: 'static> ScriptWorld<M> {
+      /// Registers `f` as the answerer of every `Rubevy.ask(kind, …)`: it is called inside the
+      /// tick, between two runs of the VM, with the World as it stands at `RubevySet::Tick`.
+      pub fn answer_in_tick(&mut self, kind: impl Into<String>, f: InTickAnswerer);
+  }
+  ```
+  閉包は `&World` を**引数で**受けるだけなので unsafe は要らない（S1 の答えループと同じ形）。`'static` なのは登録が `ScriptWorld` の中に住むから。
+* **答えループ**（S1 の `answer_reflect_requests` の隣）: `take_reflect_asks` と同じ要領で、登録された kind の `Ask` を VM のコマンドキューから抜き、閉包を呼んで `push_answer`。答えた数を reflect の分と合わせて「0 なら tick を終える」。**順序**は積まれた順。
+* **答えの形**は `Answer` の平たい形だけ（`Nil` / `Bool` / `Num` / `Text` / `List` / `Rows` / `Entity`）。`answer_value`（`&mut Vm` で任意のオブジェクトを作る）は S4 では**作らない**（閉包に `&mut Vm` も渡すと `Fn(&World, &mut Vm, &Request)` になり、`Vm` を貸している最中に閉包が VM を触る形になる。要るときに別段階で）。
+* **登録済みの kind は `take_requests` に出ない**（`RESERVED_KINDS` と同じ扱い）。未登録の kind は今までどおり Answer の段のシステムへ。同じ kind を 2 度登録したら後勝ち（`warn!`）。
+* **`ScriptWorld` が World に無い間に呼ばれる**ので、閉包の中で `world.resource::<ScriptWorld<M>>()` は `None`。rustdoc に明記（閉包に要るものは `AppTypeRegistry` や自分のリソース／コンポーネント）。
+* **`Rubevy::Proxy`** は `Rubevy.ask` の糖衣なので、`garden.nearest(:Plant)` はそのまま同期になる（Ruby 側は無変更）。
+* テスト（`tests/in_tick.rs` 新規）: 登録した kind が同じ tick で返る（`$rubevy[:frame]` の差が 0）、未登録の kind は 1 フレーム（今までどおり）、登録した kind は `take_requests` に出ない、閉包が「このフレームの Tick 時点」の世界を見る（`.before(RubevySet::Tick)` のシステムが書いたコンポーネントが読める）、名札つき VM（`ScriptWorld<Mods>`）でも登録できる、`Request` の `Arg::Value` を閉包が読めて解放は次の Deliver。
+* example: `examples/sensor.rs` か `components.rs` に 1 つ、`nearest` 相当の閉包（`world.iter_entities()` + `ReflectComponent` で距離を測る）を載せ、出力で 0 フレームを示す。
+* docs（S4 の中で）: `docs/host-api.md` に節「Answering inside the tick」（いつ使うか: 空間の問いのように毎フレーム・0 フレームで要るもの。使わないとき: 答えに他のシステムの結果が要るもの、Future で答えるもの）、RubevySet の表、`README.md` 1 行、`docs/README.md`。
+* サンプルゲームは触らない（`garden.nearest` を同期にするのは世界の脚本の計画で）。
+
 ### 3.5 書きの同期（S5、**後で判断**）
 
 `&mut World` を貸す形。順序の意味論（フレーム内のタスク実行順で勝敗が決まる）とコンポーネントフック（`resource_scope` の間 `ScriptTask` の `on_remove` が空振りする。調査「引っかかりそうな点」3）を先に解く必要がある。S3 でゲームが動いてから、世界の脚本（`garden-world-plan.md` の書き直し）に本当に要るかで決める。
