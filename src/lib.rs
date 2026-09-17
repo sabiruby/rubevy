@@ -558,6 +558,15 @@ pub enum Answer {
     Entity(Entity),
 }
 
+/// What answers one kind of `Rubevy.ask` **inside the tick**, registered with
+/// [`ScriptWorld::answer_in_tick`].
+///
+/// It is handed the world as it stands in [`RubevySet::Tick`] and the [`Request`], and answers
+/// with the flat [`Answer`] — which is all it can answer with, because the `Vm` is being run
+/// around it and is not the closure's to touch (`ScriptWorld::answer_value`'s way of building a
+/// value has no counterpart here).
+pub type InTickAnswerer = Box<dyn Fn(&World, &Request) -> Answer + Send + Sync + 'static>;
+
 impl Request {
     /// The `i`th argument as a number, where it is one.
     pub fn num(&self, i: usize) -> Option<f64> {
@@ -725,6 +734,17 @@ pub struct ScriptWorld<M = ()> {
     /// of budget or of time with questions still on the queue — [`drain_commands`] sorts those
     /// out as it always did, and the next frame's tick answers them first.
     reflect_requests: Vec<Request>,
+    /// The kinds the game answers inside the tick ([`ScriptWorld::answer_in_tick`]), by kind.
+    ///
+    /// They are the game's side of the same loop the component reads are answered in: a kind in
+    /// here is taken off the VM's command queue by [`answer_in_tick_requests`] between two runs
+    /// of the VM, never becomes a [`Request`] in [`ScriptWorld::requests`], and so is never seen
+    /// by [`ScriptWorld::take_requests`].
+    in_tick_answerers: std::collections::HashMap<String, InTickAnswerer>,
+    /// Questions for [`ScriptWorld::in_tick_answerers`] left over from a frame that ran out of
+    /// budget or of time, the way [`ScriptWorld::reflect_requests`] is for rubevy's own kinds.
+    /// The next frame's answer loop takes them first.
+    in_tick_requests: Vec<Request>,
     /// The name a script wrote (`"Transform"`, `"my_game::Hp"`) to the `ReflectComponent` it
     /// stands for, kept from one read to the next.
     ///
@@ -801,6 +821,8 @@ impl<M: 'static> ScriptWorld<M> {
             tick_remainder: 0.0,
             requests: Vec::new(),
             reflect_requests: Vec::new(),
+            in_tick_answerers: std::collections::HashMap::new(),
+            in_tick_requests: Vec::new(),
             reflect_cache: std::collections::HashMap::new(),
             component_writes: Vec::new(),
             answering: Vec::new(),
@@ -839,8 +861,75 @@ impl<M: 'static> ScriptWorld<M> {
     /// The requests scripts made since the last call (`Rubevy.ask`), for a system of the game to
     /// answer. A request stays valid until it is answered: keep the ones you cannot answer yet
     /// and hand them back to [`ScriptWorld::answer`] on a later frame.
+    ///
+    /// Two sorts of question are never in here: the four rubevy answers itself
+    /// ([`RESERVED_KINDS`]) and the kinds the game registered with
+    /// [`ScriptWorld::answer_in_tick`]. Both are answered inside the tick, and both are sorted
+    /// out where the question is made, so a system that answers here sees only what is left for
+    /// it.
     pub fn take_requests(&mut self) -> Vec<Request> {
         std::mem::take(&mut self.requests)
+    }
+
+    /// Makes `f` the answer to every `Rubevy.ask(kind, …)`, **inside the tick**.
+    ///
+    /// It is the game's way into the loop that already answers `e[:Transform]` in the line that
+    /// asked for it: `tick_scripts` runs the ready tasks, answers what they parked on, and runs
+    /// them again. So the script waits no frame at all, which is what a question asked of the
+    /// world every frame for every creature needs — "the nearest plant", "what is within 4
+    /// metres" — where a `Rubevy.find` and a read per candidate would spend the frame's budget
+    /// on the walking.
+    ///
+    /// ```no_run
+    /// # use bevy::prelude::*;
+    /// # use rubevy::{Answer, ScriptWorld};
+    /// # #[derive(Component)] struct Plant;
+    /// fn install_answers(mut scripts: ResMut<ScriptWorld>) {
+    ///     scripts.answer_in_tick("nearest", Box::new(|world: &World, request| {
+    ///         let Some(from) = request.entity_arg(0).and_then(|e| world.get::<Transform>(e))
+    ///         else { return Answer::Nil };
+    ///         let mut best: Option<(Entity, f32)> = None;
+    ///         for e in world.iter_entities() {
+    ///             let (Some(_), Some(t)) = (e.get::<Plant>(), e.get::<Transform>()) else { continue };
+    ///             let d = t.translation.distance(from.translation);
+    ///             if best.is_none_or(|(_, b)| d < b) { best = Some((e.id(), d)); }
+    ///         }
+    ///         best.map_or(Answer::Nil, |(e, _)| Answer::Entity(e))
+    ///     }));
+    /// }
+    /// # fn build(app: &mut App) { app.add_systems(Startup, install_answers); }
+    /// ```
+    ///
+    /// **What the closure is handed.** The world as it stands in [`RubevySet::Tick`] — the same
+    /// world a component read sees, so a system of the game that must have moved things first
+    /// belongs in `.before(RubevySet::Tick)` — and the [`Request`]. Ordinary Bevy reads work on
+    /// it (`world.get::<T>`, `world.iter_entities`, a resource of the game's own,
+    /// `AppTypeRegistry`); what is **not** in that world is [`ScriptWorld<M>`] itself. The tick
+    /// has taken it out for the length of the loop, so `world.get_resource::<ScriptWorld<M>>()`
+    /// is `None` inside the closure, and with it the `Vm` — which is why the answer is the flat
+    /// [`Answer`] and not a value built in the VM. An [`Arg::Value`] argument can be seen for
+    /// what it is ([`Request::value`]) but not read into: reading one needs the `Vm`.
+    ///
+    /// **Do not change the world in it.** The closure is handed `&World` and not `&mut World`,
+    /// so this is the compiler's rule and not a request; what a game means by it — spawning,
+    /// despawning, writing a component — is what `Rubevy.spawn` and `e[:Hp] =` already do at the
+    /// end of the frame.
+    ///
+    /// **When not to use it.** An answer that depends on what the *rest* of the frame works out
+    /// belongs in a system in [`RubevySet::Answer`] (one frame, and it sees everything);
+    /// an answer that is work rather than a lookup belongs in [`ScriptWorld::answer_with`] (a
+    /// future, answered on the frame it finishes). This one runs in the middle of the scripts'
+    /// own time, so what it costs comes out of their frame.
+    ///
+    /// A kind registered here never reaches [`ScriptWorld::take_requests`]. Registering the same
+    /// kind twice keeps the later closure and warns; the four kinds rubevy answers itself
+    /// ([`RESERVED_KINDS`]) cannot be taken over this way, because they are taken off the queue
+    /// first.
+    pub fn answer_in_tick(&mut self, kind: impl Into<String>, f: InTickAnswerer) {
+        let kind = kind.into();
+        if self.in_tick_answerers.insert(kind.clone(), f).is_some() {
+            warn!("rubevy: {kind} had an in-tick answerer already; the later one answers it now");
+        }
     }
 
     /// Lets the collector have the values of [`Request`]s that have been dropped
@@ -1230,7 +1319,7 @@ impl sabiruby::Host for FileHost {
 /// | set | what is in it | what it is for |
 /// |---|---|---|
 /// | [`RubevySet::Deliver`] | `start_scripts`, `deliver_answers`, the release sweep | what arrived between the frames reaches the VM before a script runs |
-/// | [`RubevySet::Tick`] | `tick_scripts` (exclusive), `drain_commands`, `apply_component_writes` | the scripts run — and the reads they make are answered while they run — and what they asked the *host* for becomes a [`Request`] |
+/// | [`RubevySet::Tick`] | `tick_scripts` (exclusive), `drain_commands`, `apply_component_writes` | the scripts run — and the reads they make, with the kinds the host answers through [`ScriptWorld::answer_in_tick`], are answered while they run — and what they asked the *host* for otherwise becomes a [`Request`] |
 /// | [`RubevySet::Answer`] | **the host's answering systems** | the questions this frame asked are answered before the frame ends |
 ///
 /// **Put the system that calls [`ScriptWorld::take_requests`] in [`RubevySet::Answer`]**:
@@ -1268,7 +1357,10 @@ impl sabiruby::Host for FileHost {
 ///
 /// The questions rubevy answers itself (a component by name) are not in this at all any more.
 /// They cost no frame: [`tick_scripts`] answers them between two runs of the VM, so the script
-/// has the value in the line it asked for it, and `Answer` is the host's set alone.
+/// has the value in the line it asked for it, and `Answer` is the host's set alone. A host that
+/// wants a question of its own answered there too — a spatial one, asked every frame — registers
+/// it with [`ScriptWorld::answer_in_tick`] instead of answering it in a system; the trade is
+/// that the closure sees the world as it stands in `Tick` and not the finished frame.
 ///
 /// **One set of three per VM.** `RubevySet::Deliver` is the first VM's, `RubevySet::<Mods>` the
 /// sets of the VM `RubevyPlugin::<Mods>` started; they are different sets, so the two VMs' frames
@@ -1608,9 +1700,12 @@ fn tick_scripts<M: 'static>(world: &mut World, tasks: &mut RunningTasks<M>) {
                 }
             }
             // the tasks have stopped: either every one of them is waiting for something, or the
-            // frame is spent. Answer what this system can answer, and if that woke anybody, give
-            // them what is left of the frame.
-            if answer_reflect_requests(&*world, scripts) == 0 {
+            // frame is spent. Answer what this system can answer — rubevy's own kinds first,
+            // then the game's in-tick answerers — and if that woke anybody, give them what is
+            // left of the frame.
+            let answered = answer_reflect_requests(&*world, scripts)
+                + answer_in_tick_requests(&*world, scripts);
+            if answered == 0 {
                 break;
             }
         }
@@ -1712,12 +1807,17 @@ fn drain_commands<M: 'static>(
         match c {
             HostCommand::Ask { entity, kind, args, queue } => {
                 // parked scripts wait here until a system of the game answers
-                // (`ScriptWorld::take_requests` / `answer`) — except the handful of kinds
-                // rubevy answers itself, which are sorted out here rather than left for a
-                // game's system to skip over
+                // (`ScriptWorld::take_requests` / `answer`) — except the kinds that are
+                // answered inside the tick, which are sorted out here rather than left for a
+                // game's system to skip over: the handful rubevy answers itself, and the ones
+                // the game registered with `answer_in_tick`. What lands in either of those two
+                // is the leftovers of a frame that ran out of budget or of time; the next
+                // frame's answer loop takes them first.
                 let request = Request { entity: entity_from_bits(entity), kind, args, queue };
                 if RESERVED_KINDS.contains(&request.kind.as_str()) {
                     world.reflect_requests.push(request);
+                } else if world.in_tick_answerers.contains_key(&request.kind) {
+                    world.in_tick_requests.push(request);
                 } else {
                     world.requests.push(request);
                 }
@@ -1755,7 +1855,8 @@ fn entity_from_bits(bits: u64) -> Option<Entity> {
 
 /// The `Rubevy.ask` kinds rubevy answers itself, in [`answer_reflect_requests`]. A game never sees
 /// them in [`ScriptWorld::take_requests`], and a game that wants these names for itself has to
-/// pick others.
+/// pick others — [`ScriptWorld::answer_in_tick`] included, since these four are taken off the
+/// queue before the game's own in-tick answerers are.
 ///
 /// They are what `src/prelude.rb` sends: `Rubevy::Entity#[]`, `#has?`, `#components`, and
 /// `Rubevy.find`.
@@ -1771,15 +1872,25 @@ const RESERVED_KINDS: [&str; 4] = ["component.get", "component.has", "components
 /// in, and the commands that need a `Commands` or a `Query` (`Rubevy.spawn`, `Rubevy.despawn`,
 /// `Rubevy.log`, `Rubevy.move_to`) are still carried out where they always were.
 fn take_reflect_asks(vm: &mut Vm) -> Vec<Request> {
+    take_asks(vm, |kind| RESERVED_KINDS.contains(&kind))
+}
+
+/// The `Rubevy.ask`s whose kind `wanted` says yes to, taken off the VM's command queue in the
+/// order they were asked in, with every other command left where it is.
+///
+/// Two callers, and both of them are the answer loop: [`take_reflect_asks`] for the kinds rubevy
+/// answers itself and [`answer_in_tick_requests`] for the kinds the game registered with
+/// [`ScriptWorld::answer_in_tick`].
+fn take_asks(vm: &mut Vm, wanted: impl Fn(&str) -> bool) -> Vec<Request> {
     let Some(state) = vm.host_state_mut::<HostState>() else { return Vec::new() };
     let mut taken = Vec::new();
     let mut i = 0;
     while i < state.commands.len() {
-        let reserved = match &state.commands[i] {
-            HostCommand::Ask { kind, .. } => RESERVED_KINDS.contains(&kind.as_str()),
+        let take = match &state.commands[i] {
+            HostCommand::Ask { kind, .. } => wanted(kind.as_str()),
             _ => false,
         };
-        if !reserved {
+        if !take {
             i += 1;
             continue;
         }
@@ -1937,6 +2048,42 @@ fn answer_reflect_requests<M: 'static>(world: &World, scripts: &mut ScriptWorld<
             }
         }
     }
+    answered
+}
+
+/// Answers the questions the game registered an in-tick answerer for
+/// ([`ScriptWorld::answer_in_tick`]), and says how many it answered. Called by [`tick_scripts`]
+/// right after [`answer_reflect_requests`], in the same gap between two runs of the VM.
+///
+/// It looks in the same two places and in the same order as that one: the leftovers of the
+/// previous frame ([`ScriptWorld::in_tick_requests`]) first, then what this round of the VM put
+/// on the command queue, each in the order it was asked in.
+///
+/// The map of answerers is moved out of `scripts` for the length of the call. That is not a
+/// trick, it is the borrow: a closure is called with the world while the `Vm` beside it is being
+/// answered into, and both live in `ScriptWorld`. Nothing can register an answerer meanwhile —
+/// the closures are handed `&World` and a [`Request`], and `ScriptWorld<M>` is not in that world
+/// while the tick holds it — so the map that goes back is the map that came out.
+fn answer_in_tick_requests<M: 'static>(world: &World, scripts: &mut ScriptWorld<M>) -> usize {
+    if scripts.in_tick_answerers.is_empty() {
+        // nothing was registered, so nothing was sorted into `in_tick_requests` either
+        return 0;
+    }
+    let answerers = std::mem::take(&mut scripts.in_tick_answerers);
+    let mut asked = std::mem::take(&mut scripts.in_tick_requests);
+    asked.append(&mut take_asks(&mut scripts.vm, |kind| answerers.contains_key(kind)));
+    let answered = asked.len();
+    for request in asked {
+        // a question is only ever sorted into this road while its kind has an answerer, and an
+        // answerer is never taken away, so the `None` arm is unreachable; it answers rather than
+        // leaving a task parked for ever, which is what a lost answer would be
+        let answer = match answerers.get(&request.kind) {
+            Some(answerer) => answerer(world, &request),
+            None => Answer::Nil,
+        };
+        scripts.answer(&request, answer);
+    }
+    scripts.in_tick_answerers = answerers;
     answered
 }
 
