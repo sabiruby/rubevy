@@ -3,10 +3,11 @@
 Run mruby bytecode inside [Bevy](https://bevy.org/) (0.19), using the
 [SabiRuby](https://crates.io/crates/sabiruby) VM.
 
-## What works (2026-09-15, v1: tasks)
+## What works (2026-09-17, v1: tasks)
 
 * `.mrb` files (compiled with mruby 4.1's `mrbc`) load as `MrbAsset` through Bevy's asset server.
-* **One VM for the app, one task per script.** A `Script` component becomes a task of
+* **One VM for the app by default, one task per script** — and a second VM under a name
+  tag where a game wants isolation (below). A `Script` component becomes a task of
   mruby-task's scheduler; every frame the plugin moves the scheduler's clock on by the
   frame time and lets the ready tasks run for a budget of instructions. A task that
   calls `sleep` costs nothing until its time comes, and one that never yields is
@@ -47,7 +48,22 @@ Run mruby bytecode inside [Bevy](https://bevy.org/) (0.19), using the
 * The collector runs at the scheduler's idle points (`GC.scheduler_driven`).
 
 Scripts share the VM, so they share globals and constants. That is the design; a use
-that needs isolation wants a second VM, which this plugin does not build yet.
+that needs isolation — mods, a player's own script — gives that side **a second VM**.
+A name tag is all it takes, and the app's own VM is spelled the way it always was:
+
+```rust
+struct Mods;                                          // the name tag; an empty struct
+app.add_plugins(RubevyPlugin::default())              // the game's VM, unchanged
+   .add_plugins(RubevyPlugin::<Mods>::for_vm("assets/mods"));   // and one for mods
+// in a system: ResMut<ScriptWorld<Mods>>, and Script::<Mods>::for_vm(handle) on an entity
+```
+
+Heap, globals, constants, classes, symbols, GC, the scheduler, subscriptions, the frame
+budget and `require`'s load path are then that VM's own, and handing one VM's `ScriptTask`
+to the other is a compile error. What it costs is memory (~0.5 MB and one copy of every
+`.mrb` per VM) and frame time (the budget is per VM, so the worst case is the sum). It is
+isolation, not a sandbox — there is no heap cap yet, and the load path separates by name:
+`docs/host-api.md`, "Two VMs in one app".
 
 Not yet: building a component from Ruby to spawn with, queries as blocks
 (`each(:Enemy, :Transform) { }`), hot reload that keeps a script's state, a heap
@@ -77,6 +93,7 @@ cargo run --example async         # Rubevy.ask, answered from a future on the ta
                                   # then the same question written as a call on a proxy
 cargo run --example components    # a script reads its own Transform, moves it, writes it back
 cargo run --example events        # an observer publishes to a queue; a reflex task waits on it
+cargo run --example two_vms       # a second VM for mods: the three things it cannot reach
 ```
 
 ```rust

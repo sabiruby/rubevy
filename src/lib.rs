@@ -43,7 +43,31 @@
 //!
 //! Scripts share one VM, so they share globals and constants. That is the
 //! design, not an oversight: a game's scripts are written together. A use that
-//! needs isolation wants a second VM, which this plugin does not build yet.
+//! needs isolation — mods, a player's own script — gives that side a **second
+//! VM**, which is the plugin added a second time under a name tag:
+//!
+//! ```no_run
+//! # use bevy::prelude::*;
+//! # use rubevy::RubevyPlugin;
+//! struct Mods;
+//! # fn build(app: &mut App) {
+//! app.add_plugins(RubevyPlugin::default())                        // the game's VM
+//!     .add_plugins(RubevyPlugin::<Mods>::for_vm("assets/mods"));  // the mods' VM
+//! # }
+//! ```
+//!
+//! Everything the plugin owns then exists twice: [`ScriptWorld<Mods>`] is that
+//! VM ([`ScriptWorld`] is still the first one), [`Script<Mods>`] is a script of
+//! it ([`Script::for_vm`]), its systems are ordered by
+//! `RubevySet::<Mods>::deliver()` / `tick()` / `answer()`, and its scripts'
+//! ends arrive as [`ScriptEnded<Mods>`]. Heap, globals, constants, classes,
+//! symbols, GC, the scheduler, subscriptions, the frame budget and `require`'s
+//! load path are that VM's own, and handing one VM's [`ScriptTask`] to another
+//! is a compile error rather than a quiet mistake. The costs are memory (a VM
+//! is about half a megabyte, and a `.mrb` loaded into two VMs is two copies of
+//! its irep) and frame time: the budget is per VM, so a frame's worst case is
+//! the sum of the VMs' [`ScriptWorld::frame_time`]s. `docs/host-api.md` has
+//! the section, and `examples/two_vms.rs` the working app.
 
 mod reflect;
 

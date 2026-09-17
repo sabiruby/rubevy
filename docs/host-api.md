@@ -1,8 +1,9 @@
 # What a script can say to the game, and the game to a script
 
-The Ruby side of rubevy is small on purpose: a script is a task in one VM (`docs/outlook.ja.md`),
-and everything it does to the world goes through `Rubevy`. This file is the current surface and
-the rules behind it.
+The Ruby side of rubevy is small on purpose: a script is a task in a VM (`docs/outlook.ja.md`) —
+one VM for the whole app unless the app asks for more ("Two VMs in one app", below) — and
+everything it does to the world goes through `Rubevy`. This file is the current surface and the
+rules behind it.
 
 ## From the script to the world (one way)
 
@@ -500,6 +501,9 @@ has too):
 | `frame_time` | 8 ms | the running timeslice is cut short once the frame's scripts have taken this long |
 | `overrun` | 50 ms | a script that cannot be switched out — inside a native waiting for a block, `sort { }` or `Array.new(1) { loop { } }` — gets `Task::Overrun` past this, and the frame comes back |
 
+All three are fields of `ScriptWorld<M>`, so an app with a second VM has a second set of them and
+nothing adds the two together: the worst case per frame is the sum ("Two VMs in one app").
+
 **Pausing.** `world.budget = 0` is the pause: the VM checks the budget at the head of its own
 loop, so not one instruction runs. While it is zero the plugin also stops moving mruby-task's
 clock on, so **a pause is time the scripts did not live through** — a script that had 0.07 s of a
@@ -584,6 +588,140 @@ line already sees what was installed.
 Adding to the VM after `Startup` is not forbidden, and is sometimes what a game means (a class
 that exists only once a level is loaded). What it costs is that a script which has already run may
 have seen the VM without it.
+
+## Two VMs in one app
+
+`RubevyPlugin::default()` is the app's first VM, and that is all most games ever want: their
+scripts are written together, so sharing globals and constants is a feature. A game that runs
+somebody else's code — mods, a player's own script, a lesson in a teaching app — wants that side
+kept out of its own. rubevy's answer is a **second VM**, which is the same plugin added again
+under a **name tag**:
+
+```rust
+use rubevy::RubevyPlugin;
+
+struct Mods;                                              // the name tag: an empty struct
+
+app.add_plugins(RubevyPlugin::default())                  // the game's VM, spelled as always
+   .add_plugins(RubevyPlugin::<Mods>::for_vm("assets/mods"));   // and the mods'
+```
+
+The tag is a type and nothing else — it implements nothing, holds nothing, and costs nothing at
+run time. What it does is give every one of the plugin's types a second copy:
+
+| the first VM | the VM named `Mods` |
+|---|---|
+| `RubevyPlugin::default()`, `RubevyPlugin::with_asset_root(root)` | `RubevyPlugin::<Mods>::for_vm(root)` |
+| `Script::new(handle)` | `Script::<Mods>::for_vm(handle)` |
+| `ScriptWorld` (a `Resource`) | `ScriptWorld<Mods>` |
+| `ScriptTask` (a `Component`) | `ScriptTask<Mods>` |
+| `ScriptDone::new()` | `ScriptDone::<Mods>::for_vm()` |
+| `ScriptEnded` (a message) | `ScriptEnded<Mods>` |
+| `RubevySet::Deliver` / `Tick` / `Answer` | `RubevySet::<Mods>::deliver()` / `tick()` / `answer()` |
+
+The plain spellings are the first VM's, so **an app that has one VM writes exactly what it wrote
+before**. The reason they are `new` / `Answer` on one side and `for_vm` / `answer()` on the other
+is Rust's and not Bevy's: a default type parameter (`ScriptWorld<M = ()>`) is filled in where a
+*type* is written, but not where a value is, so `Script::new(h)` cannot be generic and stay
+spellable without a turbofish.
+
+An answering system of the second VM goes in that VM's set:
+
+```rust
+use rubevy::{Answer, RubevySet, ScriptWorld};
+
+fn answer_mods(mut world: ResMut<ScriptWorld<Mods>>) {
+    for request in world.take_requests() {
+        world.answer(&request, Answer::Nil);
+    }
+}
+app.add_systems(Update, answer_mods.in_set(RubevySet::<Mods>::answer()));
+```
+
+### What the two VMs do not share
+
+Heap, globals, constants, classes, symbols, the symbol table, GC, mruby-task's scheduler and its
+queues, the host state (the command queue **and the subscription list**), the frame budget and
+`require`'s load path. A script of one VM has no way to name anything in the other: they are two
+`Vm` values in two Bevy resources, and SabiRuby keeps no global state at all — no `static mut`,
+no `thread_local!`, no lazily built table — so two VMs in one process are as separate as two
+processes would be.
+
+Three of those are worth spelling out.
+
+**`publish` goes to that VM's subscribers.** `ScriptWorld::publish` walks the subscription list,
+and the list lives inside the VM (`Vm::set_host_state`). So a message published on `ScriptWorld`
+never reaches a script that subscribed in `ScriptWorld<Mods>`, and a game that wants both to hear
+something publishes twice — once per VM, which is also where it gets to decide that the mods hear
+less than the game does. There is no all-VMs spelling on purpose: it would need a second
+subscription index outside the VMs, which is a new concept for a case that a two-line loop covers.
+`tests/two_vms.rs` checks both directions.
+
+**The budget is per VM.** `budget`, `frame_time` and `overrun` are fields of `ScriptWorld<M>`, so
+each VM gets its own share and **nothing caps them together**: with N VMs a frame's worst case is
+N × `frame_time` (8 ms each by default, so two VMs is 16 ms). A game that adds a VM should lower
+the new one's numbers rather than leave two default budgets running:
+
+```rust
+fn give_the_mods_less(mut mods: ResMut<ScriptWorld<Mods>>) {
+    mods.budget = 20_000;                                  // the default is 200_000
+    mods.frame_time = Some(Duration::from_millis(1));       // the default is 8 ms
+}
+```
+
+A whole-frame budget shared between the VMs is deliberately **not** in rubevy: it would change
+what `frame_time` means for the app that has one VM, and it would make one VM's runaway script
+able to starve another's — which is the thing a second VM was for.
+
+**A `.mrb` loaded into two VMs is two copies.** The asset (`MrbAsset`, its bytes) is shared —
+`init_asset::<MrbAsset>` is registered once however many plugins are added — but what the VM
+builds out of those bytes, the irep, is the VM's own heap. Two VMs running the same script hold
+two of it. A VM is about half a megabyte resident before any script, so this is the price of
+isolation: memory and start-up (about 0.6 ms per VM, nearly all of it reading mrblib), not frame
+time.
+
+### What they do share
+
+The Bevy world. Both VMs' scripts spawn, despawn, read and write components, subscribe and ask
+through the same `World` — isolation here is about the *language*, not about authority. A mod
+that should not touch the game's entities is the answering system's business: it sees a
+`Request` that came from `ScriptWorld<Mods>` and can refuse it. What the name tag gives is that
+the answering system *knows* which VM asked, because it is a different system reading a
+different resource.
+
+The same entity may carry a script of each VM (`Script` and `Script<Mods>` are different
+components), which is how a game would let a mod add behaviour to something that already has its
+own. Their tasks, their ends (`ScriptDone<M>`) and their statistics stay apart.
+
+`examples/two_vms.rs` is a working app: a mod that cannot see the game's `$world_seed` or `Boss`,
+whose `loop {}` runs three million instructions without costing the game's script a beat, and
+whose `require "helper"` gets a `LoadError` while the game's own gets the file.
+
+### What this is not
+
+It is not a sandbox against a hostile script. Three things say so plainly.
+
+There is no heap cap yet, so a mod can still take the memory (`docs/outlook.md`, possibility 4).
+
+**The load path separates by name, not by a jail.** `require "helper"` in the mods' VM raises
+`LoadError` because `$LOAD_PATH` is `["assets/mods/scripts", "assets/mods"]` and the game's file
+is in neither. But SabiRuby's `require` (`src/mrblib/require.rb`, the shape picoruby-require has)
+treats a name beginning with `/`, `./` or `../` as a path that says where it lives and looks it up
+**with no load path at all** — and rubevy's `FileHost::read_file` is `std::fs::read`, so that path
+is resolved against the process's working directory. `require "./assets/scripts/helper"` from a
+mod reads the game's file; `require "assets/scripts/helper"` does not, because a bare name still
+goes through the load path and becomes `assets/mods/assets/scripts/helper.mrb`. A game that hands
+out a VM to code it does not trust wants a `Host` of its own — the trait is the plugin's
+`FileHost`, and a host that refuses a path outside its root is a dozen lines — rather than the
+load path alone.
+
+And a native the game installs into the mods' VM is exactly as powerful as the game makes it: a
+second VM is isolation from the *game's Ruby*, not authority over what the host answers.
+
+It is also compile-time: the VMs an app has are the name tags its source names. One VM per player
+or per loaded mod, decided while the game runs, would be a different design (a VM on an entity,
+or a `Vec` of them in one resource) and would show up in the game's own code;
+`docs/plans/multi-vm-plan.md` §5 stage 4 says why it is not built.
 
 ## What a HUD can show of a script
 
