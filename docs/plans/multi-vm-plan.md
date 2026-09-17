@@ -40,7 +40,7 @@ fn my_system(w: ResMut<ScriptWorld>) { … }
 
 // ── 2 本目が欲しいアプリだけ、これを足す
 struct Mods;                                            // ただの名札。中身は空でいい
-RubevyPlugin::<Mods>::with_asset_root("assets/mods")    // 2 本目の VM が立つ
+RubevyPlugin::<Mods>::for_vm("assets/mods")             // 2 本目の VM が立つ
 fn mod_system(w: ResMut<ScriptWorld<Mods>>) { … }
 ```
 
@@ -143,7 +143,16 @@ pub enum   RubevySet { … }             pub enum   RubevySet<M = ()> { Deliver,
 pub struct RubevyPlugin { … }          pub struct RubevyPlugin<M = ()> { …, _m: PhantomData<fn() -> M> }
 ```
 
-`Request` / `Answer` / `Arg` / `RootedValue` / `MrbAsset` / `ScriptStats` / `ScriptStatus` / `ScriptDone` / `SpawnedByScript` は**そのまま**。
+`Request` / `Answer` / `Arg` / `RootedValue` / `MrbAsset` / `ScriptStats` / `ScriptStatus` / `SpawnedByScript` は**そのまま**。
+`ScriptDone` は段階 1 で `ScriptDone<M = ()>` にする（下の「段階 0 で分かったこと」4）。
+
+**段階 0 で分かったこと（2026-09-17、`286d181`）— 既定型引数は「型の位置」でしか効かない。** `Script::new(h)` や `RubevySet::Answer` のような**式の位置**では Rust は既定値に落ちない（`default_type_parameter_fallback` は unstable）。それで上の表から次の 4 点がずれる。既存の綴りはすべてそのまま通る:
+
+1. `RubevySet` は enum ではなく **struct + 関連定数**。`RubevySet::Deliver` / `Tick` / `Answer` は `impl RubevySet<()>` の定数（綴りは不変）。名札つきは `RubevySet::<Mods>::deliver()` / `tick()` / `answer()`。
+2. `Script::new(h)` は `impl Script<()>`。名札つきは **`Script::<Mods>::for_vm(h)`**。
+3. `RubevyPlugin::default()` と `RubevyPlugin::with_asset_root(root)` は `impl RubevyPlugin<()>`（README の綴りを守る）。名札つきは **`RubevyPlugin::<Mods>::for_vm(root)`**（`Script::for_vm` と対）。段階 0 のコミットでは `with_asset_root` を総称にしたため 1 本目が `RubevyPlugin::<()>::with_asset_root` になっていた。段階 1 の最初のコミットで直す。
+4. `ScriptDone` に名札が無いと、1 エンティティに `Script<A>` と `Script<B>` を付けたとき（§3 既定 6）片方の終了で両方が「終わった」ことになる（`tick_scripts` の `Without<ScriptDone>` と `stop_removed_task` の判定）。段階 1 で `ScriptDone<M = ()>` にする。ゲーム側は `.remove::<ScriptDone>()` の型の位置でしか使っていないので壊れない。
+5. `ScriptWorld::QUEUE_LIMIT` はモジュール定数に移し `impl ScriptWorld<()>` から同名で公開（値は VM で変わらない）。
 `Request` に VM の識別は要らない（`take_requests` を呼ぶのが `ScriptWorld<M>` 自身だから、答え手はもう自分がどの VM か知っている）。
 
 ### 4.2 `PhantomData<fn() -> M>` を使うこと（`PhantomData<M>` ではなく）
@@ -156,7 +165,7 @@ pub struct RubevyPlugin { … }          pub struct RubevyPlugin<M = ()> { …, 
 ```rust
 App::new()
     .add_plugins(RubevyPlugin::default())                             // 本体の VM
-    .add_plugins(RubevyPlugin::<Mods>::with_asset_root("assets/mods")) // mod の VM
+    .add_plugins(RubevyPlugin::<Mods>::for_vm("assets/mods"))         // mod の VM
     .add_systems(Startup, |mut w: ResMut<ScriptWorld<Mods>>| {
         w.budget = 20_000;                    // 本体の 1/10 しか回らない
         w.frame_time = Some(Duration::from_millis(1));
@@ -186,13 +195,17 @@ App::new()
 
 コミット例: `rubevy: a type marker on the VM — the plumbing, with nothing yet behind it`
 
+**済み（2026-09-17、`286d181`）。** tests 45 件 + doctest 9、examples 5 本、サンプルゲーム 2 本（sabibots selftest ×2、garden selftest ×3）が無変更で通った。clippy 増減なし。§6.2 のフックは `on_remove = stop_removed_task::<M>` でそのまま通り、observer の代案は不要だった。境界は `M: 'static` だけ（`Send` を要求するとフックが通らない）。記録は `docs/worklog/2026-09-17-multi-vm.md`。
+
 ### 段階 1 — 2 本目が実際に立つ
 
 やること:
 
-1. **プラグインの二重登録を避ける**（§6.3）。`init_asset` / `init_asset_loader` は共有資源。
-2. `RubevySet<M>` の `configure_sets` が名札ごとに独立していること。
-3. 新テスト `tests/two_vms.rs`:
+0. **段階 0 の直し**（別コミット）: `with_asset_root` を `impl RubevyPlugin<()>` に戻し、名札つきの入口 `RubevyPlugin::<Mods>::for_vm(root)` を足す。crate doc の例（`src/lib.rs` の `RubevyPlugin` の rustdoc）も直す。
+1. **`ScriptDone<M = ()>`**（§4.1 の 4）。`tick_scripts` / `stop_removed_task` の判定が自分の名札だけを見ること。
+2. **プラグインの二重登録を避ける**（§6.3）。`init_asset` / `init_asset_loader` は共有資源。
+3. `RubevySet<M>` の `configure_sets` が名札ごとに独立していること。
+4. 新テスト `tests/two_vms.rs`:
    * 片方の `$x` / `class Foo` / `CONST` が他方から見えない
    * 片方で例外が上がっても他方は動き続ける
    * 片方の予算を 0 にしても他方は走る（一時停止の独立）
@@ -204,7 +217,11 @@ App::new()
 
 コミット例: `rubevy: a second VM in one app — the plugin twice, the tests that prove they do not mix`
 
+**済み（2026-09-17、`4d32569` + `51fb27b`）。** `tests/two_vms.rs` は 6 本 + 二重登録のガードが効いていることを示す 7 本目（プラグインとプラグインの間に足したアセットが消えないこと。ガード無しで落ちるのを確認済み）。名札は `struct A; struct B;` で、どちらも `()` ではない。`ScriptDone<M = ()>` は `ScriptDone::new()` / `ScriptDone::<Mods>::for_vm()`。項目 3 はコード不要（Bevy の `DynEq` は downcast してから比べ、`DynHash` は `TypeId` を混ぜるので、名札は同一性に効いている。`bevy_ecs/src/label.rs`）。tests 52 件 + doctest 9、ゲーム 2 本無変更で通過、clippy 増減なし。
+
 ### 段階 2 — 1 本前提の残りを潰す
+
+**段階 1 の時点で 1 と 2 は済んでいる**（`stop_removed_task::<M>` はフックのまま型付け、排他システム 2 本も `M` ごとに登録。§7.2 の despawn テストがフックの経路を通る）。残るのは 3 の `publish` のテストだけ。`tests/two_vms.rs` に 8 本目として足し、1 と 2 は「済んでいることを worklog に 1 段落で書く」に読み替える。
 
 やること（§2.2 の 2・5 の排他システム・`publish`）:
 
@@ -216,6 +233,8 @@ App::new()
 
 コミット例: `rubevy: the hook, the two exclusive systems and publish, once per VM`
 
+**済み（2026-09-17、`3fea9f0`）。** コード変更なし。`publish` の双方向テスト（8 本目）と、1・2 が済んでいる根拠の記録（`tests/two_vms.rs` のアプリには `ScriptWorld<()>` が存在しないので、名札なしの経路が 1 つでも残っていれば 8 本とも落ちる）。
+
 ### 段階 3 — 使い方を見せて、書き残す
 
 1. **`examples/two_vms.rs`** — ゲーム本体の VM と mod 用 VM。示すのは 3 つ:
@@ -225,11 +244,18 @@ App::new()
    スクリプトは `assets/scripts/` と `assets/mods/` に置く。
 2. **docs** — 「2 本目の VM はまだ作っていない」と書いてある 4 か所を書き換える:
    `README.md:50` / `src/lib.rs:46`（crate doc）/ `docs/host-api.md:3` / `docs/outlook.md:9,100`。
+   README の `::with_asset_root("assets")` の綴りはそのまま通る（段階 1 で戻した）。
    `docs/host-api.md` に「VM を 2 本立てるには」の節を足し、**予算が VM ごとであること（N 本なら最悪 N×`frame_time`）** と **irep が VM ごとに複製されること**を明記する。
 3. **worklog** `docs/worklog/2026-09-17-multi-vm.md` を仕上げる。
 4. この指示書の段階表を「済み」にし、ハッシュを入れる。
 
 コミット例: `docs: more than one VM in one app — the example, the host API, the outlook`
+
+**済み（2026-09-17、`a0daaa5`）。** `examples/two_vms.rs`（3 秒で自己終了、3 点を標準出力に出す）、`assets/scripts/game.rb` と `assets/mods/{mod,mod_helper}.rb`、README・crate doc・host-api（節「Two VMs in one app」）・outlook（英日）。tests 53 件 + doctest 10、examples 6 本、ゲーム 2 本無変更で通過、clippy 増減なし。
+
+**段階 3 で分かったこと（著者判断待ち）**:
+- **ロードパスの隔離は名前で分かれているだけで、檻ではない。** SabiRuby の `require` は `/`・`./`・`../` で始まる名前を `$LOAD_PATH` を通さずに開き、rubevy の `FileHost::read_file` は `std::fs::read`（cwd 基準）なので、mod の VM から `require "./assets/scripts/helper"` は読めてしまう（`require "helper"` と `require "assets/scripts/helper"` は LoadError）。docs には「sandbox ではない」と明記した。塞ぐなら `Host` トレイト側（root の外を拒む `FileHost` の差し替え、十数行）。§8 に無い挙動変更なので、コードでは塞いでいない。
+- 2 本の VM から同時にコンポーネントを読み書きするテストは無い（排他システムが `M` ごとに登録されていることまでは示した。`tests/components.rs` は 1 本目の VM だけ）。必要なら example に mod 側のコンポーネント操作を足す。
 
 ### 段階 4 — **やらない**
 
@@ -333,8 +359,8 @@ rubevy_games 側: `ScriptWorld` 39 行、`ScriptTask` 29 行、`.vm` 直接参�
 
 | 段階 | 内容 | 状態 |
 |---|---|---|
-| 0 | 型引数を通す（機能変更なし） | 未着手 |
-| 1 | 2 本目が実際に立つ＋独立のテスト | 未着手 |
-| 2 | フック・排他システム 2 本・`publish` を VM ごとに | 未着手 |
-| 3 | `examples/two_vms.rs` と docs、worklog | 未着手 |
+| 0 | 型引数を通す（機能変更なし） | **済み** `286d181`（2026-09-17） |
+| 1 | 2 本目が実際に立つ＋独立のテスト | **済み** `4d32569` `51fb27b`（2026-09-17） |
+| 2 | フック・排他システム 2 本・`publish` を VM ごとに | **済み** `3fea9f0`（2026-09-17。1・2 は段階 1 で済、`publish` のテストのみ） |
+| 3 | `examples/two_vms.rs` と docs、worklog | **済み** `a0daaa5`（2026-09-17） |
 | 4 | 実行時生成 | **やらない**（用途が出てから別の指示書で） |

@@ -6,8 +6,10 @@ the `Host` trait, `gems.md` for mruby-task, `utf8-plan.md`, and
 2026-09-14. The Japanese companion is `outlook.ja.md`; how a script and the game actually meet,
 and what that gains over embedding the C mruby, is `rust-bridge.ja.md` (Japanese).
 
-**rubevy today (v1, 2026-09-14):** one VM for the app (`ScriptWorld`, a plain Bevy resource —
-`Vm` is `Send + Sync`), one mruby-task task per `Script` entity with a priority, `sleep` on
+**rubevy today (v1, 2026-09-14; the second VM 2026-09-17):** one VM for the app by default
+(`ScriptWorld`, a plain Bevy resource — `Vm` is `Send + Sync`) and as many more as the app names,
+each behind a type marker (`RubevyPlugin::<Mods>::for_vm("assets/mods")`, `ScriptWorld<Mods>`),
+one mruby-task task per `Script` entity with a priority, `sleep` on
 Bevy's `Time`, a budget of instructions and time limits per frame, `Rubevy.ask` for a script to
 ask the game something and wait, `ScriptStats` for what a script spends and where it stands,
 the task terminated when its `ScriptTask` is removed or the entity despawned, `puts` to the log
@@ -23,7 +25,7 @@ and a `ScriptEnded` message. The game that uses all of it is SabiRuby Battle
 | bridge 3 | ECS bridge | **done**: deferred writes, `Rubevy.ask` (request/answer, not in the original list), `Rubevy::Entity` as a `Data` object, and components by name |
 | bridge 4 | reflection | **done**: `e[:Transform]`, `e[:X] = hash`, `has?`, `components`, `Rubevy.find` — through `ReflectComponent`, with no glue per type |
 | bridge 5 | coroutine-style scripts | **done in task form** (`sleep`, waiting on `ask(...).pop`) |
-| bridge 6 | mruby-task | **done**, with time limits and `Task::Overrun` since 2026-09-14 |
+| bridge 6 | mruby-task | **done**, with time limits and `Task::Overrun` since 2026-09-14, and a second VM per name tag since 2026-09-17 |
 | bridge 7 | events | **done in queue form**: `Rubevy.subscribe(:hit)` answers a queue a game `publish`es onto, read in the script's own task or in one it made. No Ruby blocks as callbacks, and no `ScriptError` |
 | bridge 8 | GC in slices | **the timing half**: collections at the scheduler's idle points (`GC.scheduler_driven`). Still stop-the-world; no `gc_step` |
 | bridge 9 | in-game debugger | **the playground has the inspector**; in a game, what a script spends and the lines it keeps returning to |
@@ -32,7 +34,7 @@ and a `ScriptEnded` message. The game that uses all of it is SabiRuby Battle
 | possibility 1 | live image | **partly** (in-game editor, reload) |
 | possibility 2 | snapshots | not started (determinism is in place) |
 | possibility 3 | one cartridge, three machines | **two of three** (PC and browser) |
-| possibility 4 | safe user and AI content | **mostly** (budgets and time limits; no heap cap) |
+| possibility 4 | safe user and AI content | **mostly** (budgets and time limits, and a VM of its own for the script that is not the game's; no heap cap) |
 | possibility 5 | thousands of small minds | **done** |
 | possibility 6 | learning by seeing the machine | **done in the playground** |
 | possibility 7 | prototype in CRuby | unchanged |
@@ -97,7 +99,11 @@ and a `ScriptEnded` message. The game that uses all of it is SabiRuby Battle
 6. **mruby-task.** Many scripts in one VM with priorities; the tick is the frame and the
    loop is `run_once` per frame, not the blocking `Task.run`. Keeps the one-VM-per-entity
    option (stronger isolation, more memory) next to one-VM-many-tasks.
-   *Now:* done, one VM with many tasks (a second VM for isolation is not built). Each frame
+   *Now:* done, one VM with many tasks — and since 2026-09-17 a second VM for isolation as
+   well, added as the same plugin under a name tag, with its own heap, globals, classes,
+   scheduler, subscriptions, budget and `require` path (`docs/host-api.md`, "Two VMs in one
+   app"; `examples/two_vms.rs`). How many VMs an app has is decided in its source, not while it
+   runs. Each frame
    runs under `task_run_limits`: the instruction budget, a time budget (`frame_time`, 8 ms)
    that cuts the running timeslice short, and an overrun limit (`overrun`, 50 ms) past which a
    task that cannot be switched out — inside a native waiting for a block — gets
@@ -258,8 +264,13 @@ free, but none needs a new kind of VM.
    endless loop; time limits stop what they cannot (`Array.new(1) { loop { } }` used to freeze
    SabiRuby Battle; now that robot gets `Task::Overrun`, which a plain `rescue` does not
    swallow, and the match goes on); a replaced or removed script's task is terminated; an
-   exception ends only its own script. Still to do: a heap cap, interrupting a single native
-   that takes long (it is noticed when it returns), and the host policy.
+   exception ends only its own script. Since 2026-09-17 a script that is not the game's own can
+   also be given a VM of its own — its heap, globals, classes, subscriptions, budget and
+   `require` path apart from the game's — which is the isolation half of this item
+   (`docs/host-api.md`, "Two VMs in one app"). Still to do: a heap cap, interrupting a single
+   native that takes long (it is noticed when it returns), and the host policy. A second VM is
+   not a sandbox on its own: without a heap cap a mod can still take the memory, and what its
+   VM may reach is whatever the game answers it.
 5. **Thousands of small minds.** mruby-task + fibers with tiny budgets: every NPC a Ruby
    task, scheduled by priority, sleeping most frames. VMs are small (no_std), so one per
    faction or one per entity are both affordable. Needs: task (planned), `gc_step`.

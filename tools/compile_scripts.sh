@@ -1,6 +1,6 @@
 #!/bin/bash
 # Compile the Ruby that ships with this crate to .mrb with the reference mruby (Docker image
-# kishima/mruby:4.1.0-rc): the example scripts in assets/scripts, and src/prelude.rb, which the
+# kishima/mruby:4.1.0-rc): the example scripts in assets/scripts and assets/mods, and src/prelude.rb, which the
 # plugin runs when the VM starts (`include_bytes!` in src/lib.rs). Both .rb and .mrb are
 # committed; run this after changing a .rb.
 set -eu
@@ -12,5 +12,10 @@ compile() {
 }
 for rb in assets/scripts/*.rb; do
   compile assets/scripts "$(basename "$rb")"
+done
+# the second VM's asset root in examples/two_vms.rs: a mod's files, which the game's VM
+# cannot reach and which must be compiled all the same
+for rb in assets/mods/*.rb; do
+  compile assets/mods "$(basename "$rb")"
 done
 compile src prelude.rb
