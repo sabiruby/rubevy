@@ -1673,20 +1673,29 @@ fn tick_scripts<M: 'static>(world: &mut World, tasks: &mut RunningTasks<M>) {
         // instructions the script spent asking it, and the budget and the frame time are
         // checked at the head of every round — so the two numbers the frame already had are
         // what end it.
-        let started = std::time::Instant::now();
+        //
+        // **The clock here is [`clock_ns`], the one the VM itself was given** — Bevy's `Instant`,
+        // which is `web-time` in a browser. It is not `std::time::Instant`: that one *panics* on
+        // `wasm32-unknown-unknown` ("time not implemented on this platform"), which is a panic in
+        // the middle of the first frame and takes the whole page with it. The loop's clock and the
+        // VM's deadline clock being one source is also what makes `time_ns` below mean what it
+        // says.
+        let started_ns = clock_ns();
         let mut spent = 0u64;
         loop {
             let left = scripts.budget.saturating_sub(spent);
             if left == 0 {
                 break;
             }
-            let time_left = scripts.frame_time.map(|t| t.saturating_sub(started.elapsed()));
-            if time_left == Some(std::time::Duration::ZERO) {
+            let time_left = scripts
+                .frame_time
+                .map(|t| (t.as_nanos() as u64).saturating_sub(clock_ns().saturating_sub(started_ns)));
+            if time_left == Some(0) {
                 break;
             }
             let limits = sabiruby::RunLimits {
                 instructions: Some(left),
-                time_ns: time_left.map(|d| d.as_nanos() as u64),
+                time_ns: time_left,
                 overrun_ns: scripts.overrun.map(|d| d.as_nanos() as u64),
                 ..Default::default()
             };
