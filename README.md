@@ -35,6 +35,10 @@ Run mruby bytecode inside [Bevy](https://bevy.org/) (0.19), using the
   and `Rubevy.find(:Npc)` say what is where. It goes through Bevy's reflection, so no type
   is named in rubevy: a game's own component joins in with `#[derive(Reflect)]`,
   `#[reflect(Component)]` and `register_type` (`docs/host-api.md`).
+  **A read costs no frame**: the tick runs the scripts, answers the reads they stopped on out
+  of the world it is holding and runs them again, so the value is there in the line that asked
+  for it — about 2.2 µs a read, and 2,667 of them fit in one frame where there used to be room
+  for one. A write still lands at the end of the frame, as `Rubevy.spawn` does.
 * **Events**: `Rubevy.subscribe(:hit)` answers a queue the game pushes onto
   (`ScriptWorld::publish`), so a script waits for something to happen exactly as it waits
   for an answer — in its own task, or in one it made with `Task.new`, which is what a reflex

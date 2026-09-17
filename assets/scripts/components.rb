@@ -9,7 +9,7 @@ Rubevy.log "components: a Waypoint? #{Rubevy.entity.has?(:Waypoint)}"
 
 4.times do |i|
   e = Rubevy.entity
-  tf = e[:Transform]                        # parked here until the host answers, next frame
+  tf = e[:Transform]                        # answered inside this tick: the value is here, now
   x = tf[:translation][0]
   Rubevy.log "components: step #{i}, x = #{x.round(2)}"
   tf[:translation][0] = x + 1.0             # a Vec3 is three numbers

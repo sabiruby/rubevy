@@ -99,16 +99,23 @@ actually run.
 | set | what is in it | what it is for |
 |---|---|---|
 | `RubevySet::Deliver` | `start_scripts`, `deliver_answers`, the release sweep | what arrived between the frames reaches the VM before a script runs |
-| `RubevySet::Tick` | `tick_scripts`, `drain_commands`, `apply_component_writes` | the scripts run, and what they asked for becomes a `Request` |
-| `RubevySet::Answer` | rubevy's own `answer_components` — **and the game's answering systems** | the questions this frame asked are answered before the frame ends |
+| `RubevySet::Tick` | `tick_scripts` (exclusive), `drain_commands`, `apply_component_writes` | the scripts run — and the component reads they make are answered while they are still running — and what they asked the *game* for becomes a `Request` |
+| `RubevySet::Answer` | **the game's answering systems** | the questions this frame asked are answered before the frame ends |
 
 ```rust
 app.add_systems(Update, answer_requests.in_set(RubevySet::Answer));
 ```
 
-**What it buys: a round trip costs one frame.** The `Rubevy.ask` happens in `Tick` and leaves a
-command behind, `drain_commands` (still `Tick`) turns it into a `Request`, the game answers it in
-`Answer`, and the script wakes in the next frame's `Tick`. `tests/scheduling.rs` measures this
+`tick_scripts` is an **exclusive** system (`&mut World`). That is what lets it answer a script's
+component reads while the scripts are still running ("A read costs no frame", below), and it has
+one consequence worth knowing: the `Tick` of one VM and the `Tick` of another cannot overlap, so
+with a second VM the two ticks are **serial** even though everything else about the two is
+separate ("Two VMs in one app").
+
+**What it buys: a round trip costs one frame.** This is about the questions the *game* answers;
+the four rubevy answers itself cost no frame at all. The `Rubevy.ask` happens in `Tick` and
+leaves a command behind, `drain_commands` (still `Tick`) turns it into a `Request`, the game
+answers it in `Answer`, and the script wakes in the next frame's `Tick`. `tests/scheduling.rs` measures this
 from the script's own side — six `Rubevy.ask(…).pop` round trips, each one exactly one
 `$rubevy[:frame]` apart.
 
@@ -336,22 +343,58 @@ only have its fields written while it is already the current one. A field that c
 it was given is logged with its path (`translation.x: takes a number`) and skipped; the rest of
 the write still happens.
 
-**A read costs a frame.** `e[:Transform]` is `Rubevy.ask` under a nicer name: the question goes
-out with the frame's commands and rubevy answers it at the end of the same frame, in
-`RubevySet::Answer` and after this frame's writes have been applied (so a read after a write sees
-it); the script has the answer in the next frame's `Tick`. The task is parked meanwhile, so it
-costs nothing and the other scripts keep running, but this is a boundary for declaration time and
-for events — not for a dozen reads a frame. `Rubevy.find` walks every entity in the world, so it
-is for a lookup now and then.
+**A read costs no frame** (since 2026-09-17). `e[:Transform]` is still `Rubevy.ask` under a nicer
+name, and the task is still parked on a queue while the question is out — but the question is
+answered inside the very tick that asked it, so the value is there in the line that asked for it.
+`tick_scripts` holds the world for as long as the scripts run, so a frame is a loop rather than a
+single run:
+
+> run the ready tasks → answer the component reads they parked on → run them again
+
+`Vm::task_run_limits` comes back as soon as no task can run, and that moment is exactly when the
+reads of that round are all waiting on the host. rubevy answers them out of the `&World` it is
+holding, which puts those tasks back on the ready list, and hands them what is left of the frame.
+The loop stops when a round answers nobody (waking no one, another run would find the same tasks
+asleep), or when the frame's budget of instructions or its `frame_time` is spent. It has no limit
+of its own and needs none: a script cannot ask a question without spending instructions on the
+asking, so the budget the frame already had bounds the rounds.
+
+Nothing of the world crosses into the VM to make this work. A native is handed `&mut Vm` and
+nothing else, exactly as before; the world and the VM are two arguments of one function of
+rubevy's, held apart by the borrow checker. There is no `unsafe` in the crate.
+
+What a read sees, and what it still costs:
+
+* **The world as it stands in `RubevySet::Tick`** — that is, before this frame's writes. It is
+  what makes `.before(RubevySet::Tick)` worth writing: a system that must have moved the world
+  before the scripts look at it belongs there.
+* **A value written in the same tick is not readable yet.** `e[:Hp] = …` still lands at the end of
+  the frame (`apply_component_writes`), so a read *after* a write in the same tick answers the
+  **old** value. That is the promise `Commands` makes and the one the games are built on: read,
+  decide, write.
+* **What got cheap is the waiting, not the walking.** A read is about 2.2 µs on the machine it was
+  measured on — one round of the loop: re-entering the scheduler, the type lookup, the
+  reflection, the Hash built in the VM, and the ~75 instructions Ruby spent asking. A task that
+  does nothing but read managed 2,667 of them in one frame, where before it managed one. But
+  `Rubevy.find` still walks every entity in the world and `e.components` still walks the type
+  registry, and that is unchanged: those two are for a lookup now and then, not for every frame.
+* **A read made outside a tick waits for one.** A script run at `Startup` leaves its question on
+  the queue like any other, and the first tick answers it before it runs anything else. There is
+  no separate path and no exception.
+
+The measurements are in `docs/worklog/2026-09-17-sync-reads.md`, and `tests/scheduling.rs` counts
+the frames from the script's own side — zero for these, one for the questions the game answers,
+in the same file.
 
 The four kinds rubevy answers itself — `component.get`, `component.has`, `components`,
 `entities.with` — never reach `ScriptWorld::take_requests`: they are sorted out where the
 request is made, so a game's answering system sees only its own. A game that wants those names
 picks others.
 
-**Why a read can wait inside `[]`.** mrbc folds a one-argument `[]` into `OP_GETIDX`, which the
-VM used to dispatch with `funcall` — a nested run loop, which is a native boundary, and a task
-cannot be parked across one (`blocking pop cannot be called from within a C function boundary`).
+**Why a read can wait inside `[]`.** Short as the wait is now, the task really is parked in the
+middle of `[]`, and that took something of the VM. mrbc folds a one-argument `[]` into
+`OP_GETIDX`, which the VM used to dispatch with `funcall` — a nested run loop, which is a native
+boundary, and a task cannot be parked across one (`blocking pop cannot be called from within a C function boundary`).
 For a while the read was `e.get(:Transform)` for that reason. SabiRuby now does what the
 reference does: the opcode answers an Array, Hash or String itself and *sends* everything else
 in the frame the call was made in, so a `[]` written in Ruby is an ordinary frame that a task

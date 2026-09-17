@@ -234,3 +234,89 @@ fn rubevys_own_questions_never_reach_the_game() {
         app.world().resource::<Seen>().0.iter().map(|r| r.kind.as_str()).collect();
     assert_eq!(kinds, vec!["mine"], "take_requests hands over only the game's own kinds");
 }
+
+/// Read, write, read: inside one tick the second read still answers the **old** value.
+///
+/// This is the seam of the change, and it is deliberate. A read is answered out of the world the
+/// tick is holding, so it is as fresh as `RubevySet::Tick`; a write is not made there at all — it
+/// waits for `apply_component_writes` at the end of the frame, which is the promise `Commands`
+/// makes and the one the sample games' `act` / last-writer-wins agreements are built on. So a
+/// script that writes and reads back in the same breath reads what it wrote only after the frame
+/// it wrote in.
+///
+/// The two frame numbers are in the test for the sake of the claim: without them "the old value"
+/// could also be a read that had simply been answered a frame earlier, which is what it used to
+/// be.
+#[test]
+fn a_read_after_a_write_in_the_same_tick_is_still_the_old_value() {
+    let mut app = app();
+    let entity = app.world_mut().spawn(Hp { current: 7.0, max: 10.0 }).id();
+    run(
+        &mut app,
+        entity,
+        r#"
+          e = Rubevy.entity
+          f0 = $rubevy[:frame]
+          before = e[:Hp][:current]
+          e[:Hp] = { current: 99.0 }
+          again = e[:Hp][:current]        # the write has not landed yet
+          f1 = $rubevy[:frame]
+          sleep 0.05                      # a frame goes by, and with it the write
+          after = e[:Hp][:current]
+          Rubevy.ask("hp", before, again, after, ($rubevy[:frame] - f0).to_f, (f1 - f0).to_f).pop
+        "#,
+    );
+    // the `sleep 0.05` is real time: a frame here is the 2 ms of `frames` plus what it costs
+    frames(&mut app, 40);
+
+    let seen = app.world().resource::<Seen>();
+    let r = seen.0.first().expect("the script asked");
+    assert_eq!(r.num(0), Some(7.0), "what the component says when the tick begins");
+    assert_eq!(r.num(1), Some(7.0), "and still says after a write in the same tick");
+    assert_eq!(r.num(2), Some(99.0), "the write is there in a later frame");
+    assert_eq!(r.num(4), Some(0.0), "both reads and the write were one and the same tick");
+    assert!(r.num_or(3, -1.0) > 0.0, "and the third read was a later one");
+    assert_eq!(app.world().get::<Hp>(entity), Some(&Hp { current: 99.0, max: 10.0 }));
+}
+
+/// A read asked **outside** a tick — here at `Startup`, before any frame has happened — is not an
+/// error and does not wait for a second frame: the first tick's answer loop finds it on the VM's
+/// command queue and answers it there, so the task that was waiting on it wakes inside that same
+/// first tick.
+///
+/// The question is spelled out (`Rubevy.ask("entities.with", "Npc")`, which is what `Rubevy.find`
+/// sends) because the waiting has to be somewhere else: a blocking `pop` may only be made from
+/// inside a task, and `Startup` is not one. So the program asks at `Startup` and a task it makes
+/// does the popping — and reports the frame it was in before and after, which are the same.
+#[test]
+fn a_read_asked_before_the_first_tick_is_answered_by_it() {
+    const AT_STARTUP: &str = r#"
+      q = Rubevy.ask("entities.with", "Npc")   # asked here, outside any tick
+      Task.new do
+        Rubevy.ask("before", $rubevy[:frame].to_f)
+        found = q.pop
+        Rubevy.ask("after", found.length.to_f, $rubevy[:frame].to_f)
+      end
+    "#;
+
+    let mut app = app();
+    app.world_mut().spawn(Npc);
+    let program = compile(AT_STARTUP).bytes;
+    app.add_systems(
+        Startup,
+        move |mut world: ResMut<ScriptWorld>| {
+            world.vm.load_and_run(&program).expect("the startup program runs");
+        },
+    );
+    frames(&mut app, 4);
+
+    let seen = app.world().resource::<Seen>();
+    let kinds: Vec<&str> = seen.0.iter().map(|r| r.kind.as_str()).collect();
+    assert_eq!(kinds, vec!["before", "after"], "the task got past the read: {kinds:?}");
+    assert_eq!(seen.0[1].num(0), Some(1.0), "and the read answered the one Npc");
+    assert_eq!(
+        seen.0[1].num(1),
+        seen.0[0].num(0),
+        "the task woke in the very tick it parked in"
+    );
+}

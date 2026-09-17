@@ -24,8 +24,11 @@
 //!   and `entity.has?`, `entity.components` and `Rubevy.find(:Npc)` say what is
 //!   where. It goes through Bevy's reflection, so no type is named in rubevy —
 //!   a game's own component joins in by being
-//!   `#[derive(Reflect)] #[reflect(Component)]` and registered. A read waits
-//!   for the host, which is one frame.
+//!   `#[derive(Reflect)] #[reflect(Component)]` and registered. A read is
+//!   answered inside the frame it was made in — the tick runs the scripts,
+//!   answers the reads they stopped on and runs them again — so the value comes
+//!   back in the line that asked for it. A write still lands at the end of the
+//!   frame, as `Rubevy.spawn` does.
 //! * **Events**: `Rubevy.subscribe(:hit)` answers a `Task::Queue` the game
 //!   pushes onto ([`ScriptWorld::publish`]), so a script waits for something to
 //!   happen exactly as it waits for an answer — in its own task, or in one it
@@ -74,6 +77,7 @@ mod reflect;
 use bevy::asset::{io::Reader, Asset, AssetApp, AssetLoader, LoadContext};
 use bevy::diagnostic::FrameCount;
 use bevy::ecs::reflect::AppTypeRegistry;
+use bevy::ecs::system::SystemState;
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use bevy::tasks::{block_on, poll_once, AsyncComputeTaskPool, Task};
@@ -714,7 +718,24 @@ pub struct ScriptWorld<M = ()> {
     /// game: a component by name, and the entities that have one. They are kept apart from
     /// [`ScriptWorld::requests`] at the moment they are made, so a game's own answering system
     /// never sees a kind it does not know — and cannot answer one of these by mistake.
+    ///
+    /// Most of them never reach this vector at all: [`tick_scripts`] takes them off the VM's
+    /// command queue and answers them while the frame is still running
+    /// ([`answer_reflect_requests`]). What lands here is the leftovers of a frame that ran out
+    /// of budget or of time with questions still on the queue — [`drain_commands`] sorts those
+    /// out as it always did, and the next frame's tick answers them first.
     reflect_requests: Vec<Request>,
+    /// The name a script wrote (`"Transform"`, `"my_game::Hp"`) to the `ReflectComponent` it
+    /// stands for, kept from one read to the next.
+    ///
+    /// Bevy's own advice, in the rustdoc of `ReflectComponent` itself: looking a type up in the
+    /// registry and then asking the registration for its `ReflectComponent` "can be costly if
+    /// done several times per frame", and a `ReflectComponent` is cheap to clone and worth
+    /// keeping between frames. Now that a script may read a component several times in one
+    /// frame — which is the whole point of the synchronous read — that is exactly this map.
+    /// A name nothing is registered under is *not* remembered: a type may be registered later
+    /// (a plugin added with a level), and the miss costs one hash.
+    reflect_cache: std::collections::HashMap<String, bevy::ecs::reflect::ReflectComponent>,
     /// Component writes waiting for [`apply_component_writes`], which is the system that has a
     /// `&mut World` to make them with.
     component_writes: Vec<ComponentWrite>,
@@ -780,6 +801,7 @@ impl<M: 'static> ScriptWorld<M> {
             tick_remainder: 0.0,
             requests: Vec::new(),
             reflect_requests: Vec::new(),
+            reflect_cache: std::collections::HashMap::new(),
             component_writes: Vec::new(),
             answering: Vec::new(),
             entity_class,
@@ -1208,8 +1230,8 @@ impl sabiruby::Host for FileHost {
 /// | set | what is in it | what it is for |
 /// |---|---|---|
 /// | [`RubevySet::Deliver`] | `start_scripts`, `deliver_answers`, the release sweep | what arrived between the frames reaches the VM before a script runs |
-/// | [`RubevySet::Tick`] | `tick_scripts`, `drain_commands`, `apply_component_writes` | the scripts run, and what they asked for becomes a [`Request`] |
-/// | [`RubevySet::Answer`] | rubevy's own `answer_components` — **and the host's answering systems** | the questions this frame asked are answered before the frame ends |
+/// | [`RubevySet::Tick`] | `tick_scripts` (exclusive), `drain_commands`, `apply_component_writes` | the scripts run — and the reads they make are answered while they run — and what they asked the *host* for becomes a [`Request`] |
+/// | [`RubevySet::Answer`] | **the host's answering systems** | the questions this frame asked are answered before the frame ends |
 ///
 /// **Put the system that calls [`ScriptWorld::take_requests`] in [`RubevySet::Answer`]**:
 ///
@@ -1244,8 +1266,9 @@ impl sabiruby::Host for FileHost {
 /// `Answer` are outside that window by construction. (Do not put an answering system *inside*
 /// [`RubevySet::Tick`]: that is the one set that contains the window.)
 ///
-/// The questions rubevy answers itself (a component by name) have always cost one frame, and
-/// still do: `answer_components` is in `Answer` with everybody else.
+/// The questions rubevy answers itself (a component by name) are not in this at all any more.
+/// They cost no frame: [`tick_scripts`] answers them between two runs of the VM, so the script
+/// has the value in the line it asked for it, and `Answer` is the host's set alone.
 ///
 /// **One set of three per VM.** `RubevySet::Deliver` is the first VM's, `RubevySet::<Mods>` the
 /// sets of the VM `RubevyPlugin::<Mods>` started; they are different sets, so the two VMs' frames
@@ -1423,14 +1446,15 @@ impl<M: 'static> Plugin for RubevyPlugin<M> {
             )
             .add_systems(
                 Update,
+                // `tick_scripts` is exclusive now (it answers the reads of the scripts it is
+                // running, which takes the world), so the whole set is a point the frame passes
+                // through one system at a time — two VMs tick one after the other
                 (tick_scripts::<M>, drain_commands::<M>, apply_component_writes::<M>)
                     .chain()
                     .in_set(RubevySet::<M>::tick()),
-            )
-            // rubevy's own answering system sits in the same set a host's does, so that a game
-            // reading `ScriptWorld` in `Answer` and rubevy reading it here are ordered against
-            // each other by Bevy rather than by luck
-            .add_systems(Update, answer_components::<M>.in_set(RubevySet::<M>::answer()));
+            );
+        // Nothing of rubevy's is in `RubevySet::Answer` any more: the questions rubevy answers
+        // itself are answered inside the tick, and the set is the game's alone.
     }
 }
 
@@ -1481,62 +1505,148 @@ fn release_values<M: 'static>(mut world: ResMut<ScriptWorld<M>>) {
     world.release_dropped_values();
 }
 
-/// Moves the scheduler's clock on by the frame time and runs the ready tasks
-/// for up to the frame's budget.
-fn tick_scripts<M: 'static>(
-    time: Res<Time>,
-    frame: Res<FrameCount>,
-    mut world: ResMut<ScriptWorld<M>>,
-    tasks: Query<(Entity, &ScriptTask<M>), Without<ScriptDone<M>>>,
-    mut ended: MessageWriter<ScriptEnded<M>>,
-    mut commands: Commands,
-) {
-    let delta = time.delta_secs();
-    let elapsed = time.elapsed_secs();
-    let frame_no = frame.0;
-    let world = &mut *world;
+/// The scripts of this VM that have not ended, kept between frames.
+///
+/// An exclusive system is handed the world and nothing else, so the one query [`tick_scripts`]
+/// still wants is spelled as a `SystemState`, which an exclusive system may take beside the
+/// world. That keeps the archetype matching from frame to frame the way the `Query` parameter
+/// did; `World::query_filtered` would build it again every frame.
+type RunningTasks<M> =
+    SystemState<Query<'static, 'static, (Entity, &'static ScriptTask<M>), Without<ScriptDone<M>>>>;
 
-    // frame time in ticks, keeping what did not make a whole one for next frame — unless the
-    // scripts are paused, in which case this frame does not count as time for them (see the
-    // rustdoc of `ScriptWorld::budget`)
-    if world.budget > 0 {
-        let unit_ms = world.vm.task_tick_unit_ms() as f32;
-        world.tick_remainder += delta * 1000.0 / unit_ms;
-        let whole = world.tick_remainder.floor().max(0.0);
-        world.tick_remainder -= whole;
-        if whole >= 1.0 {
-            world.vm.task_advance_ticks(whole as u32);
-        }
-    }
-
-    set_frame_state(&mut world.vm, frame_no, delta, elapsed);
-    let limits = sabiruby::RunLimits {
-        instructions: Some(world.budget),
-        time_ns: world.frame_time.map(|d| d.as_nanos() as u64),
-        overrun_ns: world.overrun.map(|d| d.as_nanos() as u64),
-        ..Default::default()
+/// Moves the scheduler's clock on by the frame time, runs the ready tasks for up to the frame's
+/// budget, and answers the component reads they make **while they are still running**.
+///
+/// It is an exclusive system (`&mut World`) for the sake of that last part. A read —
+/// `entity[:Transform]`, `has?`, `components`, `Rubevy.find` — parks the task that made it on a
+/// queue, and `Vm::task_run_limits` comes back as soon as no task can run. That moment is the
+/// one place in the frame where both halves of the answer are in the same pair of hands: the
+/// world the value is in, and the VM the value has to be built in. So a frame is a loop rather
+/// than a single run:
+///
+/// > run the tasks → answer the reads they parked on → run them again
+///
+/// and it ends when a round answers nothing (nobody would wake), or when the budget or the
+/// frame time is spent. The script gets the value in the line it asked for it, and what it sees
+/// is the world **as it stands in [`RubevySet::Tick`]** — which is what makes a game's own
+/// `.before(RubevySet::Tick)` mean something.
+///
+/// **Writes are not part of this.** They still go through [`apply_component_writes`] at the end
+/// of the frame, so a read that follows a write in the same tick reads the *old* value. The
+/// promise a write makes is the one `Commands` makes, and the games are built on it.
+///
+/// **Why there is no `unsafe` in it.** Nothing of the world crosses into the VM. `resource_scope`
+/// takes [`ScriptWorld<M>`] out of the world for the length of the loop, the natives are handed
+/// `&mut Vm` and nothing else exactly as they were, and the `&World` never leaves this function:
+/// the two references are two arguments of [`answer_reflect_requests`], held apart by the
+/// borrow checker like any others. For the same reason nothing structural happens inside the
+/// loop — while `ScriptWorld<M>` is out of the world the `on_remove` hook of [`ScriptTask`]
+/// cannot find it and would lose a task quietly — so the sweep of finished scripts is after the
+/// closure, and `Rubevy.spawn` / `Rubevy.despawn` stay with [`drain_commands`].
+fn tick_scripts<M: 'static>(world: &mut World, tasks: &mut RunningTasks<M>) {
+    let (delta, elapsed) = {
+        let time = world.resource::<Time>();
+        (time.delta_secs(), time.elapsed_secs())
     };
-    if let Err(e) = world.vm.task_run_limits(limits) {
-        // the scheduler itself failed, which a task's own exception never does
-        let message = world.vm.describe_error(&e);
-        error!("rubevy: the scheduler raised: {message}");
-    }
-    flush_output(&mut world.vm);
+    let frame_no = world.resource::<FrameCount>().0;
+    // the tasks to sweep at the end of the frame, read before `ScriptWorld` leaves the world:
+    // a query cannot be run inside `resource_scope`'s closure without the world being borrowed
+    // twice, and the sweep wants the VM anyway
+    // (a read-only `Query` has nothing to validate, so the `Err` arm is unreachable; it is
+    // spelled rather than unwrapped because a panic here would take the frame with it)
+    let running: Vec<(Entity, ObjId)> = tasks
+        .get(world)
+        .map(|q| q.iter().map(|(entity, st)| (entity, st.task)).collect())
+        .unwrap_or_default();
 
-    for (entity, st) in &tasks {
-        if !world.vm.task_finished(st.task) {
-            continue;
+    world.resource_scope(|world: &mut World, mut scripts: Mut<ScriptWorld<M>>| {
+        let scripts = &mut *scripts;
+        // frame time in ticks, keeping what did not make a whole one for next frame — unless the
+        // scripts are paused, in which case this frame does not count as time for them (see the
+        // rustdoc of `ScriptWorld::budget`)
+        if scripts.budget > 0 {
+            let unit_ms = scripts.vm.task_tick_unit_ms() as f32;
+            scripts.tick_remainder += delta * 1000.0 / unit_ms;
+            let whole = scripts.tick_remainder.floor().max(0.0);
+            scripts.tick_remainder -= whole;
+            if whole >= 1.0 {
+                scripts.vm.task_advance_ticks(whole as u32);
+            }
         }
-        let value = world.vm.task_value(st.task);
-        let status = if world.vm.is_exception(value) { ScriptStatus::Failed } else { ScriptStatus::Finished };
-        let text = world.vm.inspect_str(value).unwrap_or_else(|_| String::from("?"));
-        ended.write(ScriptEnded { entity, status, value: text, _m: PhantomData });
-        world.vm.gc_unregister(st.task);
-        // A script that runs to its end keeps its `ScriptTask` — that is what stops it starting
-        // again — so the `on_remove` hook is not reached here. What it subscribed to is let go
-        // of all the same: the script will never read those queues.
-        world.unsubscribe(entity);
-        commands.entity(entity).insert(ScriptDone::<M>::for_vm());
+
+        set_frame_state(&mut scripts.vm, frame_no, delta, elapsed);
+
+        // The answer loop. There is no count of rounds in it and no limit of its own: a round
+        // happens only when the round before it answered somebody, a question costs the
+        // instructions the script spent asking it, and the budget and the frame time are
+        // checked at the head of every round — so the two numbers the frame already had are
+        // what end it.
+        let started = std::time::Instant::now();
+        let mut spent = 0u64;
+        loop {
+            let left = scripts.budget.saturating_sub(spent);
+            if left == 0 {
+                break;
+            }
+            let time_left = scripts.frame_time.map(|t| t.saturating_sub(started.elapsed()));
+            if time_left == Some(std::time::Duration::ZERO) {
+                break;
+            }
+            let limits = sabiruby::RunLimits {
+                instructions: Some(left),
+                time_ns: time_left.map(|d| d.as_nanos() as u64),
+                overrun_ns: scripts.overrun.map(|d| d.as_nanos() as u64),
+                ..Default::default()
+            };
+            match scripts.vm.task_run_limits(limits) {
+                Ok(instructions) => spent += instructions,
+                Err(e) => {
+                    // the scheduler itself failed, which a task's own exception never does
+                    let message = scripts.vm.describe_error(&e);
+                    error!("rubevy: the scheduler raised: {message}");
+                    break;
+                }
+            }
+            // the tasks have stopped: either every one of them is waiting for something, or the
+            // frame is spent. Answer what this system can answer, and if that woke anybody, give
+            // them what is left of the frame.
+            if answer_reflect_requests(&*world, scripts) == 0 {
+                break;
+            }
+        }
+        flush_output(&mut scripts.vm);
+    });
+
+    // The scripts that ran to their end. It is outside the closure because `ScriptWorld<M>` is
+    // back in the world here: inserting `ScriptDone` is a structural change, and a structural
+    // change made while the resource was out of the world is one the component hooks cannot
+    // follow.
+    let mut finished: Vec<ScriptEnded<M>> = Vec::new();
+    {
+        let mut scripts = world.resource_mut::<ScriptWorld<M>>();
+        let scripts = &mut *scripts;
+        for (entity, task) in running {
+            if !scripts.vm.task_finished(task) {
+                continue;
+            }
+            let value = scripts.vm.task_value(task);
+            let status =
+                if scripts.vm.is_exception(value) { ScriptStatus::Failed } else { ScriptStatus::Finished };
+            let text = scripts.vm.inspect_str(value).unwrap_or_else(|_| String::from("?"));
+            finished.push(ScriptEnded { entity, status, value: text, _m: PhantomData });
+            scripts.vm.gc_unregister(task);
+            // A script that runs to its end keeps its `ScriptTask` — that is what stops it
+            // starting again — so the `on_remove` hook is not reached here. What it subscribed
+            // to is let go of all the same: the script will never read those queues.
+            scripts.unsubscribe(entity);
+        }
+    }
+    for message in finished {
+        let entity = message.entity;
+        world.write_message(message);
+        if let Ok(mut e) = world.get_entity_mut(entity) {
+            e.insert(ScriptDone::<M>::for_vm());
+        }
     }
 }
 
@@ -1643,7 +1753,7 @@ fn entity_from_bits(bits: u64) -> Option<Entity> {
 
 // ------------------------------------------------------------------ components by name
 
-/// The `Rubevy.ask` kinds rubevy answers itself, in [`answer_components`]. A game never sees
+/// The `Rubevy.ask` kinds rubevy answers itself, in [`answer_reflect_requests`]. A game never sees
 /// them in [`ScriptWorld::take_requests`], and a game that wants these names for itself has to
 /// pick others.
 ///
@@ -1651,51 +1761,107 @@ fn entity_from_bits(bits: u64) -> Option<Entity> {
 /// `Rubevy.find`.
 const RESERVED_KINDS: [&str; 4] = ["component.get", "component.has", "components", "entities.with"];
 
-/// Answers the questions about components, in [`RubevySet::Answer`] — after the scripts have
-/// run and after the writes they made have been applied.
+/// Takes the questions rubevy answers itself off the VM's command queue, leaving every other
+/// command where it is.
 ///
-/// A question asked on one frame is answered at the end of that same frame: the `Rubevy.ask`
-/// leaves a command behind, [`drain_commands`] turns it into a request, [`apply_component_writes`]
-/// makes the writes of the same frame (so a read after a write sees it), and this system answers
-/// before the frame ends. The script wakes in the next frame's [`tick_scripts`], so a read costs
-/// one frame of waiting, which is the shape to write scripts in — touch components when
-/// something happens (at the start, on an event, after a `sleep`), not a dozen times a frame.
-/// The task is parked meanwhile and costs nothing; the other scripts keep running.
+/// The `Rubevy.ask` native cannot tell the two apart — it is handed `&mut Vm` and puts a
+/// [`HostCommand::Ask`] on the queue whatever the kind — and the sorting has always been
+/// [`drain_commands`]'s. The tick needs the reserved four *before* `drain_commands` runs, so it
+/// takes those out here and lets the rest lie: a game's questions keep the order they were asked
+/// in, and the commands that need a `Commands` or a `Query` (`Rubevy.spawn`, `Rubevy.despawn`,
+/// `Rubevy.log`, `Rubevy.move_to`) are still carried out where they always were.
+fn take_reflect_asks(vm: &mut Vm) -> Vec<Request> {
+    let Some(state) = vm.host_state_mut::<HostState>() else { return Vec::new() };
+    let mut taken = Vec::new();
+    let mut i = 0;
+    while i < state.commands.len() {
+        let reserved = match &state.commands[i] {
+            HostCommand::Ask { kind, .. } => RESERVED_KINDS.contains(&kind.as_str()),
+            _ => false,
+        };
+        if !reserved {
+            i += 1;
+            continue;
+        }
+        if let HostCommand::Ask { entity, kind, args, queue } = state.commands.remove(i) {
+            taken.push(Request { entity: entity_from_bits(entity), kind, args, queue });
+        }
+    }
+    taken
+}
+
+/// The `ReflectComponent` a name stands for, through [`ScriptWorld::reflect_cache`].
+///
+/// The cache is what makes a read that happens a dozen times a frame cheap: without it every one
+/// of them is a lookup by short path, a lookup by `TypeId` and a downcast, which is what bevy's
+/// own rustdoc on `ReflectComponent` says to keep between frames instead. A `ReflectComponent`
+/// is a handful of function pointers, so the clone is a copy.
+fn reflect_component_of<M: 'static>(
+    scripts: &mut ScriptWorld<M>,
+    registry: &bevy::reflect::TypeRegistry,
+    name: &str,
+) -> Option<bevy::ecs::reflect::ReflectComponent> {
+    if let Some(rc) = scripts.reflect_cache.get(name) {
+        return Some(rc.clone());
+    }
+    // the component's short name (`"Transform"`), or its whole path where two types share the
+    // short one (`"my_game::Hp"`)
+    let rc = registry
+        .get_with_short_type_path(name)
+        .or_else(|| registry.get_with_type_path(name))?
+        .data::<bevy::ecs::reflect::ReflectComponent>()?
+        .clone();
+    scripts.reflect_cache.insert(name.to_string(), rc.clone());
+    Some(rc)
+}
+
+/// Answers the questions about components from the world the tick is holding, and says how many
+/// it answered. Called by [`tick_scripts`] between two runs of the VM — this is what makes a
+/// read return inside the same tick.
+///
+/// It was a system of its own (`answer_components`, in [`RubevySet::Answer`]) while a read cost
+/// a frame: the `Rubevy.ask` left a command behind, [`drain_commands`] turned it into a request,
+/// the system answered it at the end of the frame and the script woke in the next one. The same
+/// reflection is done here, only sooner, and the argument is `&World` and not `&mut World`
+/// because reading is all of it.
+///
+/// It looks in two places, in this order:
+/// * [`ScriptWorld::reflect_requests`] — the leftovers of a frame that ended with questions
+///   still unanswered (the budget or the frame time ran out), sorted there by
+///   [`drain_commands`].
+/// * the VM's command queue, where the questions of the round that has just stopped are
+///   ([`take_reflect_asks`]).
 ///
 /// What is reachable here is what is registered: a type with `#[derive(Reflect)]`,
 /// `#[reflect(Component)]` and `app.register_type::<T>()`. Bevy registers its own
 /// (`Transform`, `Visibility`, `Name`, …) in the plugins that own them — `TransformPlugin` for
 /// `Transform`, which `MinimalPlugins` does not add. An unregistered type is not an error: the
 /// component reads as `nil`, `has?` as `false`, and it is not in `components`.
-fn answer_components<M: 'static>(world: &mut World) {
-    if world.resource::<ScriptWorld<M>>().reflect_requests.is_empty() {
-        return;
+fn answer_reflect_requests<M: 'static>(world: &World, scripts: &mut ScriptWorld<M>) -> usize {
+    let mut asked = std::mem::take(&mut scripts.reflect_requests);
+    asked.append(&mut take_reflect_asks(&mut scripts.vm));
+    if asked.is_empty() {
+        return 0;
     }
+    let answered = asked.len();
     let Some(registry) = world.get_resource::<AppTypeRegistry>().cloned() else {
         warn!("rubevy: no AppTypeRegistry, so no component is reachable by name");
-        let mut scripts = world.resource_mut::<ScriptWorld<M>>();
-        for request in std::mem::take(&mut scripts.reflect_requests) {
+        for request in asked {
             scripts.answer(&request, Answer::Nil);
         }
-        return;
+        return answered;
     };
     let registry = registry.read();
-    world.resource_scope(|world: &mut World, mut scripts: Mut<ScriptWorld<M>>| {
-        let world = &*world;
-        let entity_class = scripts.entity_class;
-        for request in std::mem::take(&mut scripts.reflect_requests) {
-            // the component's short name (`"Transform"`), or its whole path where two types
-            // share the short one (`"my_game::Hp"`)
-            let named = |i: usize| -> Option<&bevy::reflect::TypeRegistration> {
-                let name = request.text(i)?;
-                registry
-                    .get_with_short_type_path(name)
-                    .or_else(|| registry.get_with_type_path(name))
-            };
+    let entity_class = scripts.entity_class;
+    {
+        for request in asked {
             match request.kind.as_str() {
                 "component.get" => {
-                    let value = named(1)
-                        .and_then(|r| r.data::<bevy::ecs::reflect::ReflectComponent>())
+                    let rc = request
+                        .text(1)
+                        .and_then(|name| reflect_component_of(scripts, &registry, name));
+                    let value = rc
+                        .as_ref()
                         .zip(request.entity_arg(0).and_then(|e| world.get_entity(e).ok()))
                         .and_then(|(rc, entity)| rc.reflect(entity));
                     match value {
@@ -1711,8 +1877,11 @@ fn answer_components<M: 'static>(world: &mut World) {
                     }
                 }
                 "component.has" => {
-                    let has = named(1)
-                        .and_then(|r| r.data::<bevy::ecs::reflect::ReflectComponent>())
+                    let rc = request
+                        .text(1)
+                        .and_then(|name| reflect_component_of(scripts, &registry, name));
+                    let has = rc
+                        .as_ref()
                         .zip(request.entity_arg(0).and_then(|e| world.get_entity(e).ok()))
                         .is_some_and(|(rc, entity)| rc.contains(entity));
                     scripts.answer(&request, Answer::Bool(has));
@@ -1746,7 +1915,7 @@ fn answer_components<M: 'static>(world: &mut World) {
                 "entities.with" => {
                     let mut found: Vec<Entity> = Vec::new();
                     if let Some(rc) =
-                        named(0).and_then(|r| r.data::<bevy::ecs::reflect::ReflectComponent>())
+                        request.text(0).and_then(|name| reflect_component_of(scripts, &registry, name))
                     {
                         // every entity in the world: this is the lookup the rustdoc of
                         // `Rubevy.find` warns is not for every frame
@@ -1767,7 +1936,8 @@ fn answer_components<M: 'static>(world: &mut World) {
                 _ => scripts.answer(&request, Answer::Nil),
             }
         }
-    });
+    }
+    answered
 }
 
 /// Writes what the scripts put on components this frame (`entity[:Transform] = hash`).

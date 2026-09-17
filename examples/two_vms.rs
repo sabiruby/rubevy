@@ -87,7 +87,9 @@ fn start_the_game(mut commands: Commands, server: Res<AssetServer>) {
 
 /// The second VM's share of the frame. Both numbers mean for `Mods` exactly what they mean for
 /// the game's VM — they are simply that VM's own: a tenth of the instructions and an eighth of
-/// the time. Nothing here caps the two VMs together; a frame's worst case is the sum.
+/// the time. Nothing here caps the two VMs together; a frame's worst case is the sum — and it
+/// really is a sum, because `tick_scripts` is an exclusive system (it answers its scripts'
+/// component reads out of the world), so the two VMs' ticks run one after the other.
 fn give_the_mods_less(mut mods: ResMut<ScriptWorld<Mods>>) {
     mods.budget = 20_000; // the game's default is 200_000
     mods.frame_time = Some(Duration::from_millis(1)); // the game's default is 8 ms

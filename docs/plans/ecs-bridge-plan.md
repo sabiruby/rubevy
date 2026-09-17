@@ -3,6 +3,7 @@
 作成 2026-09-15。sabiruby の `docs/plans/host-bridge-plan.md`（段階 0〜6、済み）の続きで、rubevy 側の仕事。
 著者の判断: **A（リフレクションの橋）→ B（イベント）の順**。読み取りはまず「質問して答えを待つ」形（1 往復 ≈ 1 フレーム）で作り、
 排他システムの中で同期に読む形は、遅さが問題になったときに足す。
+**足した**（2026-09-17、`docs/plans/sync-access-plan.md` の S1）。tick が排他システムになり、VM を走らせる合間に自分で読みを答えるので、読みは同じフレームの中で返る。書きはここに書いたまま（フレームの末尾）。
 
 土台（済み）: `Rubevy::Entity`（`Data` オブジェクト、`Entity::to_bits` を持つ）、`Rubevy.ask` と `ScriptWorld::take_requests`/`answer`/`answer_with`、
 `Answer::{Nil,Bool,Num,Text,List,Rows,Entity}`、`Rubevy::Proxy`（`method_missing` → `ask`。VM 側で同じフレームに入るので中で待てる）、

@@ -73,7 +73,11 @@ and a `ScriptEnded` message. The game that uses all of it is SabiRuby Battle
    `Entity` in a Ruby object is done since 2026-09-15 (`Rubevy::Entity`, a `Data` object that
    carries the entity's bits; `Answer::Entity`, `Arg::Entity`), and natives can be closures with
    the command queue in the VM's typed host state, so there is no `static` any more. Components
-   by name arrived the same day — see 4, which is the half of this item that was missing.
+   by name arrived the same day — see 4, which is the half of this item that was missing. The
+   exclusive system this item imagined arrived on 2026-09-17, and without lending the world to
+   anybody: `tick_scripts` holds the world itself and answers the scripts' reads between two runs
+   of the VM, so no reference to the world crosses into a native and rubevy still has no
+   `unsafe`. Writes are deferred exactly as this item says.
 4. **Reflect, no per-type glue.** With `Reflect`/`ReflectComponent`, field names and
    types are known at run time, so Ruby can do `entity[:Transform].translation.x = 1.0`
    without hand-written bindings. Ruby's dynamic access and Bevy's reflection are the same
@@ -83,9 +87,15 @@ and a `ScriptEnded` message. The game that uses all of it is SabiRuby Battle
    `e[:Transform] = hash` writes back the fields the Hash names and leaves the rest, and
    `e.has?`, `e.components` and `Rubevy.find(:Npc)` say what is where. Nothing per type is
    written in rubevy: `src/reflect.rs` walks whatever `ReflectComponent` and the type registry
-   hold, so a game's own component joins in with a derive and a `register_type`. A read is one
-   question and one frame — `Rubevy.ask` under a nicer name — so it is for declaration time and
-   for events, not for a dozen reads a frame. The read was `e.get(:Transform)` at first, because
+   hold, so a game's own component joins in with a derive and a `register_type`. A read is
+   `Rubevy.ask` under a nicer name, and since 2026-09-17 it is answered **inside the tick that
+   asked it**: the exclusive `tick_scripts` runs the scripts, answers the reads they parked on
+   out of the `&World` it is holding, and runs them again, so the value is there in the line that
+   asked for it (about 2.2 µs a read, and 2,667 of them in one frame where there used to be room
+   for one). So a dozen reads a frame is now an ordinary thing to write. What is left to pay is
+   the walking rather than the waiting — `Rubevy.find` still goes through every entity — and the
+   one rule to keep in mind is that a write still lands at the end of the frame, so a read after a
+   write in the same tick answers the old value. The read was `e.get(:Transform)` at first, because
    mrbc folds a one-argument `[]` into OP_GETIDX and the VM dispatched that through a nested run
    loop a task cannot be parked across; the VM now sends it in the caller's frame, as the
    reference does, so `[]` is the spelling and `get` is still there
@@ -147,8 +157,11 @@ and a `ScriptEnded` message. The game that uses all of it is SabiRuby Battle
 
 * **Budgeted runs ↔ the frame loop.** The VM has no loop of its own, so it is one
   system in Bevy's schedule: `task_run_limits` once a frame.
-* **No C stack, no longjmp ↔ borrows and `Result`.** A host call never re-enters the VM,
-  so `&mut World` can be lent. The boundary rule that remains is the reference's: a task
+* **No C stack, no longjmp ↔ borrows and `Result`.** A host call never re-enters the VM, so the
+  world and the VM can be held by one system at once: `tick_scripts` is exclusive, runs the
+  scripts, answers the component reads they parked on out of its `&World` and runs them again —
+  and nothing of the world ever crosses into a native, which is why the crate has no `unsafe`.
+  The boundary rule that remains is the reference's: a task
   cannot be switched out while a native waits for a block, and a fiber cannot be switched
   across one. Under time limits the first no longer holds the frame (`Task::Overrun`).
 * **VM state is plain data ↔ Reflect and inspectors.** Bevy's type info and Ruby's dynamic
