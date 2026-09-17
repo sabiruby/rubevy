@@ -11,7 +11,7 @@ This repository is small, so its documents sit flat here; the worklog has its ow
 | [outlook.md](outlook.md) | English | what rubevy builds on SabiRuby, in order, with the status of each item; the honest comparison with Lua; the possibilities |
 | [outlook.ja.md](outlook.ja.md) | Japanese | the possibilities and the status, in plain Japanese |
 | [plans/ecs-bridge-plan.md](plans/ecs-bridge-plan.md) | Japanese | the instructions for the ECS bridge (components by name through reflection) and the event queue; status inside |
-| [plans/sync-access-plan.md](plans/sync-access-plan.md) | (Japanese) component reads that return in the same tick: `&World` lent to the VM through a small sabiruby primitive (`lend_host_ref`), an exclusive tick, the four natives, writes left as they are; stages S0–S4, status inside |
+| [plans/sync-access-plan.md](plans/sync-access-plan.md) | (Japanese) component reads that return in the same tick, with no unsafe and no change to sabiruby: an exclusive tick that runs the VM, answers the reads it parked with `&World`, and runs it again; writes left as they are; stages S1–S5, status inside |
 | [plans/multi-vm-plan.md](plans/multi-vm-plan.md) | Japanese | the instructions for more than one VM in one app: what was already per-VM, the six places that assumed one, three designs (the type marker chosen), the stages; the result is in `host-api.md` and `examples/two_vms.rs` |
 | [worklog/](worklog/) | Japanese | dated records of work: what was read, tried, decided |
 
