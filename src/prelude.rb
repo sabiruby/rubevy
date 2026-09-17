@@ -7,14 +7,18 @@
 # refuses a blocking `pop` inside a native ("blocking pop cannot be called from within a C
 # function boundary", sabiruby src/builtins/ext_task.rs). A native would have to hand the queue
 # back and let the script `pop` it, which is not what `e[:Transform]` should be. So the work
-# stays on the Rust side (`answer_components` in src/lib.rs) and the waiting is here — the same
-# reason `Rubevy::Proxy` is Ruby.
+# stays on the Rust side (`answer_reflect_requests`, which the tick's answer loop calls between
+# two runs of the VM; src/lib.rs) and the waiting is here — the same reason `Rubevy::Proxy` is
+# Ruby.
 module Rubevy
   class Entity
     # The component as a Hash of its fields, or nil where the entity has no component of that
     # type — or the type is not registered (`app.register_type::<T>()`; nothing unregistered is
-    # visible from Ruby). The answer comes from the host on the next frame, and the task is
-    # parked until it does.
+    # visible from Ruby). The task is parked until the host answers, and that happens inside the
+    # same tick: `tick_scripts` runs the scripts, answers the reads they parked on out of the
+    # world it is holding, and runs them again — so the value is here, in the line that asked
+    # for it. (A write is still applied at the end of the frame, so a read after a write in the
+    # same tick answers the old value; see `set`.)
     def get(name)
       Rubevy.ask("component.get", self, name.to_s).pop
     end

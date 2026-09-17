@@ -382,3 +382,37 @@ until it does」は 1 フレームを約束してしまっている。**直し�
 `assets/scripts/components.rb` の 1 行に限っていること、`prelude.mrb` が checked-in の生成物で
 再生成に Docker が要ることの 2 つが理由。次にこのファイルに触るとき（S3 でも別の段でも）に
 一緒に直すのがよい。
+
+## 8. 追記: `src/prelude.rb` の嘘も直した（同じ S2、著者の指示）
+
+§7 で「置いていく」と書いた 2 か所を、そのあと直した。Docker が使えたので生成物も回している。
+
+* 冒頭の「Why Ruby and not `Vm::define_fn`」の中、`# stays on the Rust side (`answer_components` in src/lib.rs)` →
+  `answer_reflect_requests`（tick の答えループが VM の 2 回の実行の合間に呼ぶもの）に。
+  システムとしての `answer_components` は S1 で消えているので、名前だけでなく「どこから呼ばれるか」も書いた。
+* `Rubevy::Entity#get` の docstring の「The answer comes from the host on the next frame, and the task is
+  parked until it does」→「park するのは本当だが、答えるのは**同じ tick の中**」。
+  `tick_scripts` が走らせる→答える→また走らせる、という 1 行を入れ、括弧で「書きは今もフレームの末尾なので、
+  同じ tick で書いた値を読むと古い方が返る（`set` を見よ）」を添えた。
+  `[]` の docstring（OP_GETIDX を本家と同じ送信にした話）と `find` の「every frame ではない」は**そのまま**。
+  どちらも今も本当（park は残っているし、`find` は世界を舐める）。
+
+**生成物の再生成。** `docker info` が通ったので `tools/compile_scripts.sh` を実行した
+（`assets/scripts/*.rb` 9 本、`assets/mods/*.rb` 2 本、`src/prelude.rb`。イメージは `kishima/mruby:4.1.0-rc`）。
+12 本とも再コンパイルされ（mtime が更新されている）、**`git status` に出たのは `src/prelude.rb` だけ**。
+つまり `src/prelude.mrb` も `assets/scripts/components.mrb` も、**バイト列が 1 つも変わらなかった**。
+
+§5 で「コメントだけなら再生成しても同じバイト列になるはず」と書いたのは当たっていたが、
+理由は思っていたより強かった。`components.rb` は行数を変えずに直したので当然として、
+`prelude.rb` は**コメントを 4 行増やしている**のに同じ。`strings src/prelude.mrb | grep prelude.rb` が
+空なので、答えはこれ: `tools/compile_scripts.sh` は `mrbc` を `-g` なしで呼んでいるので、
+**.mrb にデバッグ情報（ファイル名と行番号）が入っていない**。だからコメントの増減はもちろん、
+コードの行が動いても .mrb は変わらない。`components.rb` を 1 行に収める工夫（§5）は要らなかったことになる。
+以後、`.rb` のコメントだけを直すときは .mrb の再生成を待たなくてよい（ただし念のため回して `git status` を見る）。
+
+**確認。**
+
+* `cargo test`: **66 件通過**、失敗 0（17 の走行、うち `tests/read_cost.rs` の 2 本は `#[ignore]`、doctest 10 本）。
+* `cargo run --example components`: 0 で終了。出力は S1 §6 と同じ
+  （先頭 4 行が同じミリ秒、`step 0..3` で x が 1.0 → 4.0、waypoint 2 つ、最後にホストが見る
+  `Vec3(5.0, 2.0, 3.0)`、`Finished :components_done`）。
