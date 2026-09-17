@@ -63,7 +63,7 @@ me[:Velocity] = [[vx, vz]]   # 変えない: Tick の末尾で反映され、次
 | 7 | `answer_components` と `RESERVED_KINDS` | `answer_components` は**消す**（答えループがその中身を関数として使う）。`RESERVED_KINDS` の仕分け（`drain_commands`）は残るが、仕分け先は tick の中で消費される |
 | 8 | `Rubevy::Entity#[]` 等の実装 | **変えない**（Ruby の `pop` で park する今の形が、ネイティブの中で park できない制約（`src/prelude.rb:5-11`）にちょうど合っている） |
 | 9 | 書きの道 | 変えない（`Rubevy.set_component` → `component_writes` → `apply_component_writes` を Tick の末尾で）。同じ tick で書いた値はまだ読めないことを docs に明記する |
-| 10 | 答えループの上限 | 予算（命令数）と `frame_time` で自然に止まる。加えて **1 tick あたりの周回数に上限**（既定 64。超えたら残りは次のフレームに持ち越し、`warn!` を 1 回）。読みしかしないタスクが命令数を使わずに周回だけ増やす事故を止めるため |
+| 10 | 答えループの止まり方 | **予算（命令数）と `frame_time` だけ。** 周回数の上限は置かない（初版の「64」は根拠なし、著者の指摘で撤回）。1 周は答えた質問が 1 つ以上のときだけ回り、質問を出すには Ruby 側で `Rubevy.ask` と `pop` が走って命令数を消費するので、予算が周回を有限に抑える。ホスト側の 1 周の手間は毎周の `frame_time` の確認で抑える。**1 周の手間と、読みしかしないタスク 1 本が 1 フレームで回れる周回数を測って worklog に残す** |
 | 11 | サンプルゲーム | rubevy 側の段階が終わってから（S3）。ゲームの selftest が閾値で落ちたら**閾値を動かす前に止まって報告** |
 
 ---
@@ -76,7 +76,6 @@ me[:Velocity] = [[vx, vz]]   # 変えない: Tick の末尾で反映され、次
 // tick_scripts::<M>(world: &mut World) の中、resource_scope の閉包
 let started = Instant::now();
 let mut spent = 0u64;
-let mut rounds = 0;
 loop {
     let left = budget.saturating_sub(spent);
     if left == 0 { break; }
@@ -84,8 +83,7 @@ loop {
     spent += scripts.vm.task_run_limits(RunLimits { instructions: Some(left), time_ns: time_left..., overrun_ns })?;
     // 止まった: 実行できるタスクが無い、か、予算・時間切れ
     let answered = answer_reflect_requests(&*world, &mut scripts);   // 旧 answer_components の中身。&World で足りる
-    rounds += 1;
-    if answered == 0 || rounds >= ROUNDS_PER_TICK || time_left == 0 { break; }
+    if answered == 0 || time_left == Some(0) { break; }               // 上限はこの 2 つと命令数の予算だけ
 }
 ```
 
@@ -99,7 +97,7 @@ loop {
 * `tick_scripts::<M>(world: &mut World)`: `Time` / `FrameCount` は先に値を写す。タスクの列挙は `world.query_filtered::<(Entity, &ScriptTask<M>), Without<ScriptDone<M>>>()` で `resource_scope` の前に集める。閉包の中で 3.1 の答えループ。終わったタスクの `ScriptEnded<M>` は `world.write_message`、`ScriptDone<M>` は `world.entity_mut(e).insert`（**閉包を抜けてから**。閉包の中で構造変更をしない: `ScriptTask` の `on_remove` フックが `ScriptWorld` を見つけられず空振りする、調査「引っかかりそうな点」3）。`Commands` は使わない。
 * `ScriptWorld<M>` に `reflect_cache: HashMap<String, ReflectComponent>`（既定 5）。
 * 消すもの: `answer_components`（中身は関数へ）、その `add_systems`。`src/prelude.rb` は変えない。
-* テスト: `tests/scheduling.rs:83-104` の期待値 `[1,1,1,1,1,1]` → `[0,0,0,0,0,0]`。`tests/components.rs:215-236`（`rubevys_own_questions_never_reach_the_game`）は「rubevy が答える質問はゲームの `take_requests` に出ない」という主張なので**そのまま通るはず**（通らなければ報告）。新テスト: 同じ tick の中で読み → 書き → 読み で古い値が返ること（既定 9）、`Startup` の `load_and_run` で読んだタスクが最初の tick で答えを受け取ること（既定 4）、2 本の VM でそれぞれ自分の読みが同じ tick で返ること（`tests/two_vms.rs` に 1 本）、周回上限（既定 10）で残りが次のフレームに持ち越されること。`tests/entity.rs` / `tests/proxy.rs` は無変更で通ること。
+* テスト: `tests/scheduling.rs:83-104` の期待値 `[1,1,1,1,1,1]` → `[0,0,0,0,0,0]`。`tests/components.rs:215-236`（`rubevys_own_questions_never_reach_the_game`）は「rubevy が答える質問はゲームの `take_requests` に出ない」という主張なので**そのまま通るはず**（通らなければ報告）。新テスト: 同じ tick の中で読み → 書き → 読み で古い値が返ること（既定 9）、`Startup` の `load_and_run` で読んだタスクが最初の tick で答えを受け取ること（既定 4）、2 本の VM でそれぞれ自分の読みが同じ tick で返ること（`tests/two_vms.rs` に 1 本）。`tests/entity.rs` / `tests/proxy.rs` は無変更で通ること。
 * **性能**: `tests/components.rs:80-105` の形で「1 フレームに 24 タスクが 4 回ずつ読む」を組み、答えループの周回数と 1 フレームの所要を測って worklog に（同期化の前後で。読み 1 回の費用が µs の桁であることを確かめる）。
 * `Cargo.lock` は**触らない**（sabiruby 0.5.0 のまま。同期読みに sabiruby の新しい API は要らない）。
 
@@ -142,7 +140,7 @@ loop {
 4. **2 本の VM**: tick が排他なので直列。`examples/two_vms.rs:77-78` と host-api の "Two VMs" に 1 行。
 5. **順序の意味論**: 読みが「N の Tick 時点」になるので、ゲームのシステムの `.before(RubevySet::Tick)` が初めて意味を持つ（S3）。書きは据え置きなので wheel / last-writer-wins は変わらない。
 6. **sabiruby の rev**: 触らない。S3 で games の `Cargo.lock` を rubevy の新しい rev に上げるだけ。
-7. **答えループの止まり方**: `task_run_limits` は「実行できるタスクが無い」「予算切れ」「時間切れ」のどれでも戻る（`src/vm.rs:797-816`）。答えた質問が 0 なら、残り予算があっても tick を終える（誰も起きないので回しても無駄）。読みだけを繰り返すタスクは命令数をほとんど使わないので周回上限（既定 10）が要る。
+7. **答えループの止まり方**: `task_run_limits` は「実行できるタスクが無い」「予算切れ」「時間切れ」のどれでも戻る（`src/vm.rs:797-816`）。答えた質問が 0 なら、残り予算があっても tick を終える（誰も起きないので回しても無駄）。読みだけを繰り返すタスクも 1 周ごとに `ask` と `pop` の命令を使うので、予算で止まる。周回の上限は置かない。
 8. **`Request` の寿命**: 今は `deliver_answers` が Deliver で `answering` を配る。答えループは `push_answer` を直接呼ぶので `answering` を通らない。`release_values`（Deliver）で解放される `Arg::Value` の道は変わらない — 答えループの中で `Request` を落とすと、その値の解放は次の Deliver。
 
 ---
