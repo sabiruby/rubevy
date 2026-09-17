@@ -1274,7 +1274,7 @@ impl<M> std::hash::Hash for RubevySet<M> {
 /// struct Mods;
 /// # fn build(app: &mut App) {
 /// app.add_plugins(RubevyPlugin::default())
-///     .add_plugins(RubevyPlugin::<Mods>::with_asset_root("assets/mods"));
+///     .add_plugins(RubevyPlugin::<Mods>::for_vm("assets/mods"));
 /// # }
 /// ```
 pub struct RubevyPlugin<M = ()> {
@@ -1292,14 +1292,27 @@ impl Default for RubevyPlugin<()> {
     }
 }
 
+impl RubevyPlugin<()> {
+    /// The app's first VM, reading its `require`s from `root`:
+    /// `RubevyPlugin::with_asset_root("assets")`.
+    ///
+    /// It is spelled without a name tag for the same reason [`Script::new`] is: a default type
+    /// parameter is filled in where a *type* is written and not where a value is, so a generic
+    /// `with_asset_root` would leave the plain call — which is the one every app with one VM
+    /// writes — with nothing to infer the tag from. The VM with a tag has [`RubevyPlugin::for_vm`].
+    pub fn with_asset_root(root: impl Into<String>) -> Self {
+        RubevyPlugin::<()>::for_vm(root)
+    }
+}
+
 impl<M: 'static> RubevyPlugin<M> {
     /// The VM named `M`, reading its `require`s from `root`:
-    /// `RubevyPlugin::<Mods>::with_asset_root("assets/mods")`.
+    /// `RubevyPlugin::<Mods>::for_vm("assets/mods")`.
     ///
-    /// Without a tag the VM is the first one, and the tag has to be written out —
-    /// `RubevyPlugin::<()>::with_asset_root("assets")` — because a default is filled in where a
-    /// type is written and not where a value is.
-    pub fn with_asset_root(root: impl Into<String>) -> Self {
+    /// The name is the pair to [`Script::for_vm`]: everything a tagged VM is reached by is
+    /// `for_vm`, and the untagged spellings — `RubevyPlugin::default()`,
+    /// `RubevyPlugin::with_asset_root(..)`, `Script::new(..)` — stay what they were.
+    pub fn for_vm(root: impl Into<String>) -> Self {
         RubevyPlugin { asset_root: root.into(), _m: PhantomData }
     }
 }
