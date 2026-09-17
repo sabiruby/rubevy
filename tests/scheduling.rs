@@ -81,11 +81,17 @@ fn a_host_answering_in_the_answer_set_costs_one_frame() {
     assert_eq!(gaps, &vec![1, 1, 1, 1, 1, 1], "every round trip is one frame");
 }
 
-/// The questions rubevy answers itself still cost one frame, now that `answer_components` has
-/// moved from the head of the frame into [`RubevySet::Answer`] with everybody else. This is the
-/// 1.0 rubevy_games measured for `entity[:Transform]`, kept.
+/// The questions rubevy answers itself cost **no** frame: the tick runs the scripts, answers the
+/// reads they stopped on out of the world it is holding, and runs them again, so `e[:Transform]`
+/// gives its value back in the line that asked for it. This was `1` for as long as the answer
+/// was a system of its own at the end of the frame (`answer_components`, the 1.0 rubevy_games
+/// measured for `entity[:Transform]`); it is the number this whole change is about.
+///
+/// A question the *game* answers is untouched and still costs one frame — the test above — which
+/// is the point of keeping both here: the two kinds of question no longer cost the same, and the
+/// difference is who answers.
 #[test]
-fn a_component_read_still_costs_one_frame() {
+fn a_component_read_costs_no_frame() {
     let mut app = App::new();
     app.add_plugins((
         MinimalPlugins.set(ScheduleRunnerPlugin::run_once()),
@@ -103,7 +109,7 @@ fn a_component_read_still_costs_one_frame() {
     frames(&mut app, 16);
 
     let gaps = &app.world().resource::<Gaps>().0;
-    assert_eq!(gaps, &vec![1, 1, 1, 1, 1, 1], "a component read is one frame");
+    assert_eq!(gaps, &vec![0, 0, 0, 0, 0, 0], "a component read is answered inside the tick");
 }
 
 /// The set is what a host orders against, and it is ordered: `Deliver` before `Tick` before

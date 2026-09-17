@@ -425,3 +425,43 @@ fn a_published_message_stays_inside_its_own_vm() {
     assert_eq!(marks.a, vec![0.0, 7.0], "the second VM's message crossed back as {:?}", marks.a);
     assert_eq!(marks.b, vec![0.0, 9.0], "the second VM's own subscriber missed its message");
 }
+
+/// Each VM answers its own scripts' component reads, in its own tick, and both of them inside
+/// the frame the read was made in.
+///
+/// Two VMs are two exclusive `tick_scripts` systems now, so Bevy runs them one after the other
+/// rather than beside each other. What that buys is here: the answer loop of the first VM holds
+/// the world while the first VM's scripts run and hands back a value that is the world of *this*
+/// frame, and then the second VM's does the same. Neither VM's reads wait for the other, and
+/// neither sees the other's requests — each `reflect_requests` is its own resource's.
+#[test]
+fn each_vm_answers_its_own_reads_inside_its_own_tick() {
+    // the frame the read began in against the frame it came back in: 0 is the whole claim
+    const READS: &str = r#"
+      e = Rubevy.entity
+      3.times do
+        f0 = $rubevy[:frame]
+        e[:Transform]
+        Rubevy.ask("gap", ($rubevy[:frame] - f0).to_f)
+        sleep 0.01
+      end
+    "#;
+
+    let mut app = app();
+    // `MinimalPlugins` brings no `TransformPlugin`, so the test registers what the scripts read
+    app.register_type::<Transform>();
+    let a = {
+        let asset = app.world_mut().resource_mut::<Assets<MrbAsset>>().add(compile(READS, "a.rb"));
+        app.world_mut().spawn((Script::<A>::for_vm(asset), Transform::from_xyz(1.0, 0.0, 0.0))).id()
+    };
+    let b = {
+        let asset = app.world_mut().resource_mut::<Assets<MrbAsset>>().add(compile(READS, "b.rb"));
+        app.world_mut().spawn((Script::<B>::for_vm(asset), Transform::from_xyz(2.0, 0.0, 0.0))).id()
+    };
+    assert_ne!(a, b);
+    frames(&mut app, 20);
+
+    let marks = app.world().resource::<Marks>();
+    assert_eq!(marks.a, vec![0.0, 0.0, 0.0], "the first VM's reads: {:?}", marks.a);
+    assert_eq!(marks.b, vec![0.0, 0.0, 0.0], "the second VM's reads: {:?}", marks.b);
+}
