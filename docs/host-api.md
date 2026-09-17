@@ -681,6 +681,13 @@ sabiruby = { path = "../sabiruby" }
 sabiruby-compiler = { path = "../sabiruby/compiler" }
 ```
 
+**rubevy also builds for the browser** (`wasm32-unknown-unknown`), where std has no clock, no
+filesystem, no threads and no sockets — and compiles them all regardless, so the failure comes as
+a panic in the first frame rather than as a build error (`docs/worklog/2026-09-18-wasm-instant.md`
+is the day it did). `cargo test --test no_wasm_unsupported` therefore reads `src/` for the std
+APIs a browser does not have; a line that really is native-only says so on the line, in a
+`// wasm: <reason>` comment.
+
 ## Adding to the VM (`ScriptWorld::vm`, at `Startup`)
 
 A game usually wants more in the VM than rubevy puts there: a JSON class, a module of its own, a
