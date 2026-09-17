@@ -103,7 +103,7 @@ loop {
 
 ### 3.3 docs（S2）
 
-`docs/host-api.md:329-362`（A read costs a frame / Why a read can wait inside `[]` — 理由ごと書き換え）、`:95-137`（RubevySet の表: Tick が排他で直列点になる）、`:583-586`（「ネイティブから World に触るな」の規則 → 「読みだけ、tick の間だけ、貸された `&World` を」）。`src/lib.rs:25-28`（crate doc）、`:682-700`、`:1646-1669`、`:1773-1777`。`docs/rust-bridge.ja.md:344-345,353`（「`unsafe` の数について」は**そのまま**: 今回も 0）。`docs/outlook.md:63-65,84-92,150-153`、`docs/outlook.ja.md:208-216`（`:211`「読み取りはその場の値が返ります」が本当になった）。`docs/plans/ecs-bridge-plan.md:5` の「遅さが問題になったときに足す」に「足した」と 1 行。`docs/README.md` の目次。
+`docs/host-api.md:329-362`（A read costs a frame / Why a read can wait inside `[]` — 理由ごと書き換え）、`:95-137`（RubevySet の表: Tick が排他で直列点になる）、`:583-586`（「ネイティブから World に触るな」の規則は**そのまま**。答えループの形ではネイティブは今までどおり `&mut Vm` しか受け取らない。初版の名残で書き換え対象にしていたが不要）。`assets/scripts/components.rb:12` のコメント（"parked here until the host answers, next frame"）は嘘になったので直す。`src/lib.rs:25-28`（crate doc）、`:682-700`、`:1646-1669`、`:1773-1777`。`docs/rust-bridge.ja.md:344-345,353`（「`unsafe` の数について」は**そのまま**: 今回も 0）。`docs/outlook.md:63-65,84-92,150-153`、`docs/outlook.ja.md:208-216`（`:211`「読み取りはその場の値が返ります」が本当になった）。`docs/plans/ecs-bridge-plan.md:5` の「遅さが問題になったときに足す」に「足した」と 1 行。`docs/README.md` の目次。
 
 ### 3.4 サンプルゲーム（S3、`rubevy_games`）
 
@@ -149,7 +149,7 @@ loop {
 
 | 段階 | 状態 |
 |---|---|
-| S1 | 未着手 |
+| S1 | **済み** `d0e9b85`（2026-09-17）。tests 66 件（新 3 本 + 計測 2 本 `#[ignore]`）、examples 3 本同じ結果、clippy 増減なし、unsafe 0。**実測**: 読み 1 回（= 答えループ 1 周）2.2 µs。読みしかしないタスク 1 本は 1 フレームに 2,667 回読め、止めたのは `frame_time` でなく命令数の予算（1 読み ≈ 75 命令、6 ms しか使っていない）。24 タスク × 4 読み/フレームで 96 読みがフレームを 0.3 ms 伸ばす（前は 24 読みしかできない）。記録 `docs/worklog/2026-09-17-sync-reads.md` |
 | S2 | 未着手 |
 | S3 | 未着手 |
 | S4 | 後で判断 |
