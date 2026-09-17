@@ -6,7 +6,7 @@ This repository is small, so its documents sit flat here; the worklog has its ow
 
 | file | language | what it is |
 |---|---|---|
-| [host-api.md](host-api.md) | English | what a script can say to the game and the game to a script: `Rubevy.ask`, where the game's systems go in the frame (`RubevySet`), what a question may carry (`Arg`, including a Hash or an Array), answers (including an object of the game's own), entities, components by name, events, `Rubevy::Proxy`, adding to the VM at `Startup`, time limits and pausing, running a second VM for mods under a name tag, replacing a script |
+| [host-api.md](host-api.md) | English | what a script can say to the game and the game to a script: `Rubevy.ask`, where the game's systems go in the frame (`RubevySet`), what a question may carry (`Arg`, including a Hash or an Array), answers (including an object of the game's own), entities, components by name (a read is answered inside the tick that asked it; a write still lands at the end of the frame), events, `Rubevy::Proxy`, adding to the VM at `Startup`, time limits and pausing, running a second VM for mods under a name tag, replacing a script |
 | [rust-bridge.ja.md](rust-bridge.ja.md) | Japanese | how a robot's question travels through rubevy and the game and back, point by point against embedding the C mruby |
 | [outlook.md](outlook.md) | English | what rubevy builds on SabiRuby, in order, with the status of each item; the honest comparison with Lua; the possibilities |
 | [outlook.ja.md](outlook.ja.md) | Japanese | the possibilities and the status, in plain Japanese |
