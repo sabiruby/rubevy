@@ -1,11 +1,12 @@
-//! Two VMs in one app, and the six ways they have to stay out of each other's way.
+//! Two VMs in one app, and the seven ways they have to stay out of each other's way.
 //!
 //! The app adds `RubevyPlugin` twice, under two name tags, so everything the plugin owns exists
 //! twice over: two `ScriptWorld`s, two sets of systems, two `RubevySet` chains. What the tests
 //! below check is that the *scripts* of one never reach the other: not through a global, a class
 //! or a constant; not through an exception; not through the frame budget; not through a task
-//! ending; not through `ScriptStats`; and not even when both scripts sit on the same entity.
-//! A seventh test is about the plugin rather than the scripts — the one thing the two VMs do
+//! ending; not through `ScriptStats`; not through a published message; and not even when both
+//! scripts sit on the same entity.
+//! One more test is about the plugin rather than the scripts — the one thing the two VMs do
 //! share is the `.mrb` asset, and the second plugin must not register it again.
 //!
 //! The name tags are deliberately empty structs that implement nothing at all (`struct A;`),
@@ -375,4 +376,52 @@ fn the_second_plugin_does_not_throw_away_the_first_vms_assets() {
         "the asset that survived did not start"
     );
     assert!(!app.world().resource::<Marks>().b.is_empty(), "and it did not run");
+}
+
+/// `publish` reaches the subscribers of the VM it was called on, and nobody else. That is the
+/// plan's default 2 (§3): the word keeps the meaning it has always had — "everything in this VM
+/// that subscribed to this name" — and a game that wants both VMs to hear something calls it
+/// once per VM. There is no all-VMs spelling, on purpose: the host state that holds the
+/// subscription list is the VM's own (`vm.set_host_state`), so there is nowhere for a broadcast
+/// to live that would not be a new concept.
+///
+/// Both directions are checked, so that the first one cannot pass because the second VM's
+/// script was broken or never subscribed.
+#[test]
+fn a_published_message_stays_inside_its_own_vm() {
+    const LISTENER: &str = r#"
+      hits = Rubevy.subscribe(:hit)
+      Rubevy.ask("ready", 0.0)
+      loop { Rubevy.ask("hit", hits.pop) }
+    "#;
+
+    let mut app = app();
+    start_a(&mut app, LISTENER, "listener.rb");
+    start_b(&mut app, LISTENER, "listener.rb");
+    frames(&mut app, 15);
+    {
+        let marks = app.world().resource::<Marks>();
+        assert_eq!(marks.a, vec![0.0], "the first VM's script reached its subscribe");
+        assert_eq!(marks.b, vec![0.0], "the second VM's script reached its subscribe");
+    }
+    assert_eq!(app.world().resource::<ScriptWorld<A>>().subscriptions(), 1);
+    assert_eq!(
+        app.world().resource::<ScriptWorld<B>>().subscriptions(),
+        1,
+        "each VM counts its own subscriptions, not both scripts'"
+    );
+
+    app.world_mut().resource_mut::<ScriptWorld<A>>().publish(None, "hit", Answer::Num(7.0));
+    frames(&mut app, 15);
+    {
+        let marks = app.world().resource::<Marks>();
+        assert_eq!(marks.a, vec![0.0, 7.0], "the message never reached its own VM's subscriber");
+        assert_eq!(marks.b, vec![0.0], "it crossed to the other VM's subscriber as {:?}", marks.b);
+    }
+
+    app.world_mut().resource_mut::<ScriptWorld<B>>().publish(None, "hit", Answer::Num(9.0));
+    frames(&mut app, 15);
+    let marks = app.world().resource::<Marks>();
+    assert_eq!(marks.a, vec![0.0, 7.0], "the second VM's message crossed back as {:?}", marks.a);
+    assert_eq!(marks.b, vec![0.0, 9.0], "the second VM's own subscriber missed its message");
 }
