@@ -2,9 +2,15 @@
 name = "rubevy"
 version = "0.0.1"
 edition = "2024"
+# the largest `rust-version` among the dependencies, read with `cargo metadata`:
+# bevy 0.19.1 says 1.95.0, sabiruby 0.5.x says 1.85, thiserror 2 says 1.71.
+rust-version = "1.95.0"
 license = "MIT"
 description = "Run mruby bytecode (via SabiRuby) inside Bevy"
 keywords = ["bevy", "mruby", "ruby", "scripting"]
+categories = ["game-development"]
+repository = "https://github.com/sabiruby/rubevy"
+readme = "README.md"
 
 [features]
 default = []
@@ -13,17 +19,18 @@ default = []
 ruby-source = ["dep:sabiruby-compiler"]
 
 [dependencies]
-# The VM, from git while the host entry points this plugin needs are still being added (the
-# published 0.4.0 is behind). A clone of this repository still builds on its own — cargo fetches
-# it — and this goes back to a crates.io version once the API settles. To work against a checkout
-# of the VM next to this one, put the redirect in `.cargo/config.toml` (git-ignored):
-#   [patch."https://github.com/sabiruby/sabiruby"]
+# The VM. 0.5.1 is the lowest that works: it carries the scheduler fix (a task that ends in nil,
+# the dormant queue) that `docs/worklog/2026-09-17-restart-burst.md` concluded belonged in the VM
+# — on 0.5.0 replacing ten scripts in one frame freezes it. To work against a checkout of the VM
+# next to this one, put the redirect in `.cargo/config.toml` (git-ignored):
+#   [patch.crates-io]
 #   sabiruby = { path = "../sabiruby" }
-sabiruby = { git = "https://github.com/sabiruby/sabiruby" }
+sabiruby = "0.5.1"
 bevy = { version = "0.19.1", default-features = false, features = ["bevy_asset", "bevy_log"] }
 thiserror = "2"
-# only for the `ruby-source` feature
-sabiruby-compiler = { git = "https://github.com/sabiruby/sabiruby", features = ["host"], optional = true }
+# only for the `ruby-source` feature. 0.2.2 is the first compiler that names a 0.5.x VM
+# (sabiruby `docs/design/compiler.md`, "Publishing"); rubevy does not call `highlight()`.
+sabiruby-compiler = { version = "0.2.2", features = ["host"], optional = true }
 
 [dev-dependencies]
 # `multi_threaded` is bevy's, not this crate's: it is what makes bevy's task pools threads, so
@@ -31,13 +38,13 @@ sabiruby-compiler = { git = "https://github.com/sabiruby/sabiruby", features = [
 # beside the frames. The library itself does not ask for it (see `answer_with`'s rustdoc).
 bevy = { version = "0.19.1", default-features = false, features = ["bevy_asset", "bevy_log", "bevy_window", "bevy_winit", "x11", "multi_threaded"] }
 # the tests compile their Ruby in process
-sabiruby-compiler = { git = "https://github.com/sabiruby/sabiruby", features = ["host"] }
+sabiruby-compiler = { version = "0.2.2", features = ["host"] }
 # `macros` is the proc macro behind `#[derive(RubyClass)]` / `#[ruby_methods]`, which
 # `tests/host_data.rs` uses to show that a game answers a question with an object of its own.
 # The library does not want it: a proc macro is a compiler plugin, and rubevy defines no Ruby
 # class of its own beyond `Rubevy::Entity` (which is `Vm::data_new` by hand).
-sabiruby = { git = "https://github.com/sabiruby/sabiruby", features = ["macros"] }
+sabiruby = { version = "0.5.1", features = ["macros"] }
 # JSON and serde on top of the VM, for `tests/vm_setup.rs` and the example in
 # `docs/host-api.md`. **rubevy does not depend on this** — a game that wants `JSON` installs it
 # into the VM itself, which is the whole point of the test.
-sabiruby-serde = { git = "https://github.com/sabiruby/sabiruby" }
+sabiruby-serde = "0.1.0"

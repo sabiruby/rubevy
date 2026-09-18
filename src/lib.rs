@@ -863,7 +863,7 @@ impl<M: 'static> ScriptWorld<M> {
     /// and hand them back to [`ScriptWorld::answer`] on a later frame.
     ///
     /// Two sorts of question are never in here: the four rubevy answers itself
-    /// ([`RESERVED_KINDS`]) and the kinds the game registered with
+    /// (`RESERVED_KINDS`) and the kinds the game registered with
     /// [`ScriptWorld::answer_in_tick`]. Both are answered inside the tick, and both are sorted
     /// out where the question is made, so a system that answers here sees only what is left for
     /// it.
@@ -923,7 +923,7 @@ impl<M: 'static> ScriptWorld<M> {
     ///
     /// A kind registered here never reaches [`ScriptWorld::take_requests`]. Registering the same
     /// kind twice keeps the later closure and warns; the four kinds rubevy answers itself
-    /// ([`RESERVED_KINDS`]) cannot be taken over this way, because they are taken off the queue
+    /// (`RESERVED_KINDS`) cannot be taken over this way, because they are taken off the queue
     /// first.
     pub fn answer_in_tick(&mut self, kind: impl Into<String>, f: InTickAnswerer) {
         let kind = kind.into();
@@ -1357,7 +1357,7 @@ impl sabiruby::Host for FileHost {
 /// [`RubevySet::Tick`]: that is the one set that contains the window.)
 ///
 /// The questions rubevy answers itself (a component by name) are not in this at all any more.
-/// They cost no frame: [`tick_scripts`] answers them between two runs of the VM, so the script
+/// They cost no frame: `tick_scripts` answers them between two runs of the VM, so the script
 /// has the value in the line it asked for it, and `Answer` is the host's set alone. A host that
 /// wants a question of its own answered there too — a spatial one, asked every frame — registers
 /// it with [`ScriptWorld::answer_in_tick`] instead of answering it in a system; the trade is
