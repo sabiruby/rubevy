@@ -4,6 +4,9 @@ The layout every repository of the organization uses is described in
 [sabiruby/.github/CONTRIBUTING.md](https://github.com/sabiruby/.github/blob/main/CONTRIBUTING.md).
 This repository is small, so its documents sit flat here; the worklog has its own directory.
 
+What changed in each release, with the commit behind every claim, is
+[`../CHANGELOG.md`](../CHANGELOG.md) at the root of the repository.
+
 | file | language | what it is |
 |---|---|---|
 | [host-api.md](host-api.md) | English | what a script can say to the game and the game to a script: `Rubevy.ask`, where the game's systems go in the frame (`RubevySet`), what a question may carry (`Arg`, including a Hash or an Array), answers (including an object of the game's own, one made by a future, and one given by a closure inside the tick — `answer_in_tick`, no frame at all), entities, components by name (a read is answered inside the tick that asked it; a write still lands at the end of the frame), events, `Rubevy::Proxy`, adding to the VM at `Startup`, time limits and pausing, running a second VM for mods under a name tag, replacing a script |

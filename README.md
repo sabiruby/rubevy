@@ -110,7 +110,8 @@ and ship the `.mrb`.
 rubevy = { version = "0.0.1", features = ["ruby-source"] }
 ```
 
-The version is 0.0.1: the API is still moving.
+The version is 0.0.1: the API is still moving. What each release contains is
+[`CHANGELOG.md`](CHANGELOG.md).
 
 ## Try it
 

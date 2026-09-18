@@ -132,4 +132,4 @@ Pages の CI を見る → 両 repo の docs の「状況」とこの計画書�
 
 残ったもの: `cargo test --features ruby-source` の最初の 1 回だけ `tests/child_task.rs` が 1 本落ち、
 再実行 4 回では再現しなかった（C のビルドと並走中。どのテスト名かは取れていない）。
-CHANGELOG はまだ無い — 0.0.2 を出すときに作る。
+CHANGELOG は 2026-09-19 に書いた（ルートの `CHANGELOG.md`。0.0.1 の package には入っていない。次の版から同梱される）。
