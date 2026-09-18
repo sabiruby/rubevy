@@ -126,6 +126,10 @@ Pages の CI を見る → 両 repo の docs の「状況」とこの計画書�
 
 | 段階 | |
 |---|---|
-| P1 rubevy の依存と package | 未着手 |
-| P2 rubevy_games の依存と patch | 未着手 |
-| P3 公開 | 未着手 |
+| P1 rubevy の依存と package | **済み**（2026-09-18、`6fd46dd` + README 1 行 `bbe0484`、merge `2d9eb92`）。下限の版（0.5.1 / 0.2.2）でも最新（0.5.2 / 0.2.3）でも 75 passed。`rust-version` は bevy 0.19.1 の 1.95.0。記録は `docs/worklog/2026-09-18-crates-io.md` |
+| P2 rubevy_games の依存と patch | **済み**（2026-09-18、games `bac6dc1`、merge `62a7cbf`）。games の compiler の下限だけ 0.2.3（エディタが `highlight()` を呼ぶ。§2.1 の 0.2.2 は rubevy の数）。`sabiruby-macros` は patch に要らなかった。wasm 5 走行で pageerror 0・FAIL 0。記録は games `docs/worklog/2026-09-18-rubevy-published.md` |
+| P3 公開 | **済み**（2026-09-18）。`rubevy` 0.0.1 を crates.io に公開（`Packaged 87 files, 933.5KiB (296.2KiB compressed)`）、タグ `v0.0.1`（`2d9eb92`）。games の lock は rubevy `2d9eb92` |
+
+残ったもの: `cargo test --features ruby-source` の最初の 1 回だけ `tests/child_task.rs` が 1 本落ち、
+再実行 4 回では再現しなかった（C のビルドと並走中。どのテスト名かは取れていない）。
+CHANGELOG はまだ無い — 0.0.2 を出すときに作る。
