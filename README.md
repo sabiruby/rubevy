@@ -83,14 +83,42 @@ How a script and the game actually meet — `Rubevy.ask`, answering from a syste
 where a script stands, stopping it — and what that gains over embedding the C mruby, is written up
 in Japanese in [`docs/rust-bridge.ja.md`](docs/rust-bridge.ja.md).
 
+## Install
+
+```
+cargo add rubevy
+```
+
+```toml
+[dependencies]
+rubevy = "0.0.1"
+bevy = "0.19.1"
+```
+
+The VM comes from crates.io with it: [`sabiruby`](https://crates.io/crates/sabiruby) 0.5.1 or
+later (0.5.1 is the first with the scheduler fix that replacing ten scripts in one frame needs —
+`docs/worklog/2026-09-17-restart-burst.md`). Nothing else is required: a script that `require`s a
+`.mrb` works out of the box.
+
+`ruby-source` is the one feature. It lets a script `require` a `.rb` as well, by bringing
+[`sabiruby-compiler`](https://crates.io/crates/sabiruby-compiler) (the reference mruby compiler,
+built as C) along — so it wants a C toolchain, and it does not build for
+`wasm32-unknown-unknown`. Without it, compile the `.rb` ahead of time (`tools/compile_scripts.sh`)
+and ship the `.mrb`.
+
+```toml
+rubevy = { version = "0.0.1", features = ["ruby-source"] }
+```
+
+The version is 0.0.1: the API is still moving, and each release says what changed.
+
 ## Try it
 
-The VM comes from git (`sabiruby`, main), so a clone of this repository alone builds. To
-work against a checkout of `sabiruby/sabiruby` next to this one, redirect it in
+To work against a checkout of `sabiruby/sabiruby` next to this one, redirect it in
 `.cargo/config.toml` (git-ignored) instead of editing `Cargo.toml`:
 
 ```toml
-[patch."https://github.com/sabiruby/sabiruby"]
+[patch.crates-io]
 sabiruby = { path = "../sabiruby" }
 sabiruby-compiler = { path = "../sabiruby/compiler" }
 ```
