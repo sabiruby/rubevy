@@ -110,7 +110,7 @@ and ship the `.mrb`.
 rubevy = { version = "0.0.1", features = ["ruby-source"] }
 ```
 
-The version is 0.0.1: the API is still moving, and each release says what changed.
+The version is 0.0.1: the API is still moving.
 
 ## Try it
 
