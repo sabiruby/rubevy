@@ -607,9 +607,11 @@ a script (`assets/scripts/events.rb`) with a brain and a reflex.
 **Rules.**
 
 * Nothing is queued for a name nobody subscribed to, so a game may publish freely.
-* A queue holds `ScriptWorld::QUEUE_LIMIT` (64) messages and drops the oldest past that. A
-  script that wakes late gets the last 64 things that happened, not the first 64 — and a script
-  that never reads its queue is not a leak with a slow fuse.
+* A queue holds `ScriptWorld::queue_limit` messages and drops the oldest past that. A script
+  that wakes late gets the last few things that happened, not the first few — and a script that
+  never reads its queue is not a leak with a slow fuse. The limit starts at
+  `ScriptWorld::QUEUE_LIMIT` (64), and both ends can move it: see **How much a queue holds**
+  below.
 * A subscription is let go of when the script's task ends and when its `ScriptTask` is removed
   (a reload, a despawn). A script that runs off its end keeps its `ScriptTask` — that is what
   stops it starting again — so both places matter. `ScriptWorld::subscriptions()` says how many
@@ -637,9 +639,77 @@ a script (`assets/scripts/events.rb`) with a brain and a reflex.
   that task's result, as any unhandled exception in a task does; nothing else stops.
 
   It is the subscription's queue that says this, not every queue: `Rubevy.subscribe` extends the
-  one it answers with `Rubevy::Subscription` (`pop`, `shift`, `deq`). A queue from `Rubevy.ask`
-  is an ordinary `Task::Queue` and keeps mruby-task's own meaning, where a closed queue answers
-  `pop` with nil.
+  one it answers with `Rubevy::Subscription` (`pop`, `shift`, `deq`, `dropped`). A queue from
+  `Rubevy.ask` is an ordinary `Task::Queue` and keeps mruby-task's own meaning, where a closed
+  queue answers `pop` with nil.
+
+### How much a queue holds, and what it lost
+
+A full queue drops its oldest message to make room for the newest. That used to happen in
+silence — no log, no counter — and at a number (64) that nothing could change. Both ends can now
+see it and both ends can set it.
+
+**Seeing it.** `ScriptWorld::dropped()` is how many messages this VM has dropped since it
+started, over every subscription: one number for a HUD, and a number that climbs is a game
+publishing faster than its scripts read. `Rubevy::Subscription#dropped` is the same count for one
+subscription, which is the one a script can act on — it says that there is a hole between what it
+read last and what it is reading now, which `pop` cannot say, because a dropped message leaves
+nothing behind:
+
+```ruby
+belt = Rubevy.subscribe(:belt)
+missed = 0
+loop do
+  item = belt.pop
+  if belt.dropped > missed
+    Rubevy.log "fell behind by #{belt.dropped - missed}"
+    missed = belt.dropped
+  end
+  handle item
+end
+```
+
+**Setting it.** The VM's own default is a field beside `budget`:
+
+```rust
+world.queue_limit = 512;      // this VM's subscriptions, unless one asked for its own
+```
+
+It is read where a message is published, not where a script subscribed, so changing it moves
+every standing subscription that did not name its own — and a second VM (`ScriptWorld<Mods>`) has
+a limit of its own, as it has a budget of its own. A script that knows its own stream says so:
+
+```ruby
+belt  = Rubevy.subscribe(:belt, limit: 512)   # a heavy stream this script reads in bulk
+alarm = Rubevy.subscribe(:alarm, limit: 1)    # only the latest matters
+```
+
+`limit:` takes a whole number of messages, one or more; anything else — a Float, a zero, a
+keyword that is not `limit:` — is an `ArgumentError` where the script wrote it. A subscription's
+own limit is its own for as long as it stands, whatever the VM's field does afterwards.
+
+**What to set it to.** 64 is where it starts, and 64 is not a measured number: it was chosen in
+2026-09-15 for the qualitative reason that it is "enough for a script that reads its queue every
+few frames". Two measured numbers bound it from either side
+(`docs/worklog/2026-09-20-overflow-and-limits.md`, 2026-09-20, one machine):
+
+* **From above.** A script that does nothing but `pop` and count gets through about **3,900
+  messages in a frame** before the frame's 200,000 instructions stop it — 51 instructions a
+  message. A limit larger than that is a queue its owner can never empty, so overflow is delayed
+  rather than avoided.
+* **From below.** A message waiting in a queue costs **16–21 bytes** as a number, **300–340** as
+  a short string and **330–520** as a small array (the VM's own object, not the queue's slot).
+  A subscriber that never reads holds `limit` of them, so the worst case for a VM is
+  `limit × bytes × subscriptions`: at the default 64, a thousand such subscriptions hold 1.0 MB
+  of numbers or 20.5 MB of short strings.
+
+So: a game that publishes numbers to a handful of scripts can raise this into the thousands and
+lose nothing; a game that publishes strings or arrays to hundreds of scripts should think about
+lowering it. rubevy knows neither, which is why the number is yours and the default is the one
+that hurts least.
+
+There is no `drop: :newest`: the oldest goes, which is what a script that wakes late wants, and
+nobody has asked for the other.
 
 ## A dynamic proxy (`Rubevy::Proxy`)
 
@@ -859,15 +929,16 @@ less than the game does. There is no all-VMs spelling on purpose: it would need 
 subscription index outside the VMs, which is a new concept for a case that a two-line loop covers.
 `tests/two_vms.rs` checks both directions.
 
-**The budget is per VM.** `budget`, `frame_time` and `overrun` are fields of `ScriptWorld<M>`, so
-each VM gets its own share and **nothing caps them together**: with N VMs a frame's worst case is
-N × `frame_time` (8 ms each by default, so two VMs is 16 ms). A game that adds a VM should lower
+**The budget is per VM.** `budget`, `frame_time`, `overrun` and `queue_limit` are fields of
+`ScriptWorld<M>`, so each VM gets its own share and **nothing caps them together**: with N VMs a
+frame's worst case is N × `frame_time` (8 ms each by default, so two VMs is 16 ms). A game that adds a VM should lower
 the new one's numbers rather than leave two default budgets running:
 
 ```rust
 fn give_the_mods_less(mut mods: ResMut<ScriptWorld<Mods>>) {
     mods.budget = 20_000;                                  // the default is 200_000
     mods.frame_time = Some(Duration::from_millis(1));       // the default is 8 ms
+    mods.queue_limit = 16;                                  // the default is 64
 }
 ```
 
