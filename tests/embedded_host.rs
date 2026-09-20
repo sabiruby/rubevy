@@ -25,6 +25,11 @@ static SOURCE_FILES: &[(&str, &str)] = &[
 static COMPILED_FILES: &[(&str, &[u8])] =
     &[("ruby/helper.mrb", include_bytes!("../assets/scripts/helper.mrb"))];
 
+/// The **source** [`COMPILED_FILES`] was built from, for the test at the end of this file that
+/// checks the two still agree.
+static HELPER_SOURCE: &[(&str, &str)] =
+    &[("ruby/helper.rb", include_str!("../assets/scripts/helper.rb"))];
+
 /// What the scripts said, in order.
 #[derive(Resource, Default)]
 struct Said(Vec<String>);
@@ -193,4 +198,33 @@ fn source_without_a_compiler_says_what_is_missing() {
     );
     assert_eq!(said.len(), 1, "the require raised");
     assert!(said[0].contains("ruby-source"), "and named the feature: {}", said[0]);
+}
+
+/// **The committed `.mrb` still says what the `.rb` beside it says.**
+///
+/// `COMPILED_FILES` is `include_bytes!` of a *generated* file: `assets/scripts/helper.mrb`,
+/// built from `assets/scripts/helper.rb` by `tools/compile_scripts.sh` (the reference `mrbc`, in
+/// Docker). Both are committed, so editing the `.rb` and forgetting to run the script leaves a
+/// test passing against yesterday's bytecode — the test above would go on saying
+/// `hello, x` whatever `helper.rb` now says.
+///
+/// There is no cheap way to compare the two *as programs*: the `.mrb` was built by the reference
+/// `mrbc` and the only compiler this crate has at test time is `sabiruby-compiler`, and the two
+/// do not emit the same bytes for the same source. What is cheap is to compare what they **do**,
+/// which is what this does: compile the `.rb` here, run it and the committed `.mrb` through the
+/// same question, and require the same answer. It catches a `helper.rb` that was changed in any
+/// way the answer shows; it would miss a change that this one question cannot see, and the way
+/// to make it catch more is to ask more here.
+#[test]
+fn the_committed_mrb_and_its_rb_answer_the_same() {
+    const ASK: &str = r#"require "helper"; Rubevy.ask("said", Helper.greet("x")).pop"#;
+
+    let from_bytecode = run(EmbeddedHost::new(&[]).with_binaries(COMPILED_FILES), ASK);
+    let from_source = run(EmbeddedHost::new(HELPER_SOURCE).compile_with(a_compiler()), ASK);
+
+    assert_eq!(
+        from_bytecode, from_source,
+        "assets/scripts/helper.mrb is out of date: run tools/compile_scripts.sh"
+    );
+    assert_eq!(from_source, vec!["hello, x"], "and both are what the file says");
 }

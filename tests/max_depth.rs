@@ -72,9 +72,12 @@ fn app(depth: Option<usize>) -> App {
     app
 }
 
+/// 5 ms a frame, so that the `sleep 0.05` in the writing scripts below is over well inside the
+/// frames they are given: the VM's clock is real time, and a machine under load makes frames
+/// longer but never shorter.
 fn frames(app: &mut App, n: usize) {
     for _ in 0..n {
-        std::thread::sleep(Duration::from_millis(2));
+        std::thread::sleep(Duration::from_millis(5));
         app.update();
     }
 }
@@ -135,7 +138,7 @@ fn the_default_writes_a_component_four_levels_down() {
     let mut app = app(None);
     let entity = app.world_mut().spawn(Deep::default()).id();
     run(&mut app, entity, WRITES_THE_BOTTOM);
-    frames(&mut app, 20);
+    frames(&mut app, 40);
     assert_eq!(
         app.world().get::<Deep>(entity).expect("still there").b.c.d.n,
         9.0,
@@ -151,7 +154,7 @@ fn a_shallower_setting_stops_a_write() {
     let mut app = app(Some(2));
     let entity = app.world_mut().spawn(Deep::default()).id();
     run(&mut app, entity, WRITES_THE_BOTTOM);
-    frames(&mut app, 20);
+    frames(&mut app, 40);
     assert_eq!(
         app.world().get::<Deep>(entity).expect("still there").b.c.d.n,
         0.0,

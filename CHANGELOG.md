@@ -6,6 +6,46 @@ ones those documents carry, and nothing is estimated.
 
 ## Unreleased
 
+* **What R9's first readers walked into** (R10 of `docs/plans/generalize-plan.md`, on branch
+  `generalize`; the merge's commit goes here when the branch comes in —
+  `docs/worklog/2026-09-20-numbers-inventory.md`, `docs/host-api.md`). Four small things the
+  camera layer and the entry points left behind, and the documents that were missing beside
+  them.
+  **`Rubevy::Camera#scale` is now `magnification`.** It answers apparent size — 4.0 after two
+  `zoom 2`s — and bevy's `OrthographicProjection::scale` is the same word for the reverse thing,
+  how much world fits across the window, so a script could print `4.0x` beside `scale 0.25` for
+  one camera. The layer is not published, so the old name is simply gone rather than kept as an
+  alias.
+  **A `follow` now stops saying it is following once it has stopped.** It ended by itself
+  already, whether the target was despawned or the camera itself was — a despawned entity's
+  `Transform` reads nil, so `move_to` answers nil and the loop ends, and nothing was refused
+  every frame; what was wrong is that `following?` went on answering true for ever, so a script
+  polling it never got its turn. The camera now holds the task itself rather than a flag
+  (`follower`, which `follow` already answered), so the two cannot disagree, and a `follow` that
+  replaces another cannot have its task cleared by the one it replaced.
+  **A layer taken up twice is taken up once.** `ScriptWorld::load_and_run` remembers the
+  programs it has run in that VM, by their bytes, and answers `Ok(false)` for one it has run
+  already — so two plugins that both want `Rubevy::Camera` get one layer, and a library whose
+  top level *does* something does it once. Its signature is now `Result<bool, String>`.
+  `docs/host-api.md` has the rules for adding a second layer: where the file goes, that it may
+  depend on the host API and no Rust, how its `ask` kinds are named, and what its top level must
+  not do.
+  **`tests/embedded_host.rs` can tell when the `.mrb` it embeds is stale.** It
+  `include_bytes!`s a generated file, so editing `helper.rb` and forgetting
+  `tools/compile_scripts.sh` used to leave the test passing against yesterday's bytecode. The
+  two cannot be compared as bytes — the reference `mrbc` built one and `sabiruby-compiler` is
+  what the tests have — so they are compared by what they answer, which was checked by making
+  the `.rb` disagree.
+  Written down beside all that: **a read cannot wait inside `initialize`** (`Class#new` is a
+  native, so the task dies with `blocking pop cannot be called from within a C function
+  boundary` and the script just stops — the two-step build that `Rubevy::Camera.attach` is);
+  **the VM's clock moves in whole ticks of 4 ms**, so `sleep 0` waits for the clock and not for
+  the next frame; that `replace_script` also clears the mark left by a script that would not
+  start; when to read `$rubevy` and when `Rubevy.resource("Time<Virtual>")`; that `publish` to a
+  name nobody listens for no longer costs the number of standing subscriptions; that the
+  reflection caches keep the old entry for a type registered again over itself; and, in
+  `docs/README.md`, that **`cargo fmt` is not run in this repository** and why.
+
 * **Every number rubevy holds, written down — and the last one that could not be changed, made
   settable** (R10 of `docs/plans/generalize-plan.md`, on branch `generalize`; the merge's commit
   goes here when the branch comes in — `docs/numbers.md`,
@@ -51,7 +91,8 @@ ones those documents carry, and nothing is estimated.
   `src/layers/camera.rb`, Ruby over `Rubevy.find`, `e[:Transform] =`, `e[:Projection] =` and
   `Rubevy.ask`, and the crate's dependencies are unchanged.
   `Rubevy::Camera.find` / `.find_all` / `.attach`, then `position`, `move_to`, `pan`, `zoom`,
-  `scale`, `follow` / `unfollow`, `world_at`, `reload` and `rejected_writes`. **`zoom 2` is twice
+  `magnification`, `follow` / `unfollow` / `follower`, `world_at`, `reload` and
+  `rejected_writes`. **`zoom 2` is twice
   as close on a 2D camera and on a 3D one alike**, which is most of the reason it exists: an
   orthographic camera zooms by `scale` (divided by the factor) and a perspective one by `fov`,
   where what sets apparent size is `tan(fov / 2)` — so the layer writes

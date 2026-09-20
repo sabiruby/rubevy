@@ -1071,12 +1071,22 @@ pub struct ScriptWorld<M = ()> {
     /// frame — which is the whole point of the synchronous read — that is exactly this map.
     /// A name nothing is registered under is *not* remembered: a type may be registered later
     /// (a plugin added with a level), and the miss costs one hash.
+    ///
+    /// **It has no way of being emptied, and a name that is registered again keeps the old
+    /// entry.** Nothing takes a type out of Bevy's registry in an ordinary game, so what this
+    /// could go stale on is a type *re-registered* over itself — a hot reload of a plugin, mods
+    /// loaded in another order — where a script would then read through the `ReflectComponent`
+    /// of the registration that was replaced. It has not been seen and there is nothing here to
+    /// fix it with (the registry says nothing about having changed); it is written down because
+    /// a game that does reload its registrations should know.
     reflect_cache: std::collections::HashMap<String, bevy::ecs::reflect::ReflectComponent>,
     /// The name a script wrote (`"Score"`, `"Time<Virtual>"`) to what a resource of that type
     /// takes to reach: its `TypeId`, which is how the world is asked where it keeps that
     /// resource, and the `ReflectComponent` that reads it once the entity is known.
     ///
-    /// Kept for the same reason [`ScriptWorld::reflect_cache`] is, and the two are apart because
+    /// Kept for the same reason [`ScriptWorld::reflect_cache`] is — including the lifetime that
+    /// one's rustdoc sets out, that a type registered again over itself leaves the old entry
+    /// here — and the two are apart because
     /// a name only lands here once the registration has said `#[reflect(Resource)]`
     /// ([`reflect_resource_of`]).
     resource_cache:
@@ -1163,6 +1173,17 @@ pub struct ScriptWorld<M = ()> {
     /// and whatever fell out of the cap would go back to being parsed once a frame for ever.
     /// [`ScriptWorld::broken_programs`] is how a game watches it.
     broken: std::collections::HashMap<Box<[u8]>, String>,
+    /// The programs [`ScriptWorld::load_and_run`] has already run in this VM, by their bytes —
+    /// the layers the app took up, and any library of its own it ran the same way.
+    ///
+    /// It is what makes taking a layer up twice the same as taking it up once. The cost is one
+    /// copy of each such program's bytes, which is small and bounded by how many *distinct*
+    /// programs a game runs this way: layers and libraries are named in an app's `Startup`, not
+    /// made at run time, so this is a handful of entries for the life of the app. It is kept
+    /// apart from [`ScriptWorld::programs`] because the two answer different questions — that
+    /// one is "which irep are this program's tasks spawned from", this one is "has this
+    /// program's top level already run" — and a `.mrb` could be both.
+    ran: std::collections::HashSet<Box<[u8]>>,
     /// Which VM this is, as a type. Nothing reads it; what it does is keep the resources of two
     /// VMs apart, and with them their tasks, requests and components.
     _m: PhantomData<fn() -> M>,
@@ -1230,6 +1251,7 @@ impl<M: 'static> ScriptWorld<M> {
             release,
             programs: std::collections::HashMap::new(),
             broken: std::collections::HashMap::new(),
+            ran: std::collections::HashSet::new(),
             _m: PhantomData,
         })
     }
@@ -1437,11 +1459,33 @@ impl<M: 'static> ScriptWorld<M> {
     /// [`ScriptWorld::require_from`] are called there: a script that has already run has already
     /// been past the line that would have used what this defines.
     ///
+    /// **The same program is run once.** Answering `Ok(false)` rather than running it again is
+    /// what makes a layer safe to take up from more than one place — two plugins of a game that
+    /// both want `Rubevy::Camera`, a `Startup` system that a test adds beside the app's own —
+    /// which is how a *layer* differs from a script: a script belongs to an entity and two
+    /// entities running one program are two tasks on purpose, while a layer is a thing the VM
+    /// either has or has not. Without this, a second call re-ran the top level: for the camera
+    /// layer that only redefined the same methods, but a layer or a library that starts a task,
+    /// appends to a table or counts something would do it twice, and nothing would say so.
+    ///
+    /// What it remembers is **the bytes of the program**, the same key the map of loaded
+    /// programs uses ([`ScriptWorld::loaded_programs`]) and for the same reason: a program that
+    /// changed is other bytes, so it misses and runs. A game that wants a program run twice —
+    /// which is not what a layer or a library is — runs it with `Vm::load_and_run` through
+    /// [`ScriptWorld::vm`], which is the unconditional spelling.
+    ///
     /// The `Err` is what the VM said, as a sentence for a log — the program would not load, or
-    /// its top level raised.
-    pub fn load_and_run(&mut self, program: &[u8]) -> Result<(), String> {
+    /// its top level raised. A program that failed is **not** remembered, so a game may fix it
+    /// and try again.
+    pub fn load_and_run(&mut self, program: &[u8]) -> Result<bool, String> {
+        if self.ran.contains(program) {
+            return Ok(false);
+        }
         match self.vm.load_and_run(program) {
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                self.ran.insert(program.into());
+                Ok(true)
+            }
             Err(e) => Err(self.vm.describe_error(&e)),
         }
     }
@@ -1661,7 +1705,13 @@ impl<M: 'static> ScriptWorld<M> {
     ///
     /// `entity` is who it is about: `Some(e)` reaches only the scripts on that entity, `None`
     /// every script that subscribed to the name. Nothing is queued for a name nobody
-    /// subscribed to, so a game may publish freely.
+    /// subscribed to, so a game may publish freely — and since 2026-09-20 (R1) that is true of
+    /// the *cost* as well: subscriptions are filed by name, so **publishing to a name nobody
+    /// listens for does not depend on how many subscriptions the VM holds**. It used to walk
+    /// every one of them: 228 ns a message at a thousand standing subscriptions, against 9.6 ns
+    /// now (`docs/worklog/2026-09-20-subscription-index.md`). A game that publishes everything
+    /// and lets the scripts choose is the shape this invites, and it is the shape that is
+    /// cheap.
     ///
     /// A Bevy event reaches Ruby by a game writing the one line that turns it into this — an
     /// observer, or an ordinary system reading its messages:
