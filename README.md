@@ -135,6 +135,8 @@ cargo run --example nearest       # a question the game answers inside the tick:
                                   # the same question answered by a system: 1 frame
 cargo run --example events        # an observer publishes to a queue; a reflex task waits on it
 cargo run --example two_vms       # a second VM for mods: the three things it cannot reach
+cargo run --release --example how_many_scripts       # measuring instruments, not tests: what this
+cargo run --release --example how_many_subscribers   # machine carries (docs/verification/scale.md)
 ```
 
 ```rust

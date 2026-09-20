@@ -275,6 +275,101 @@ pub struct ScriptStats {
     pub finished: bool,
 }
 
+/// What one frame's tick did, over all the scripts of one VM (`ScriptWorld::last_frame`).
+///
+/// The pair to [`ScriptStats`], which is one script: this is the frame. Every number in it is one
+/// the tick already had — a counter it was keeping anyway, or a clock reading the deadline made it
+/// take — so a game that never looks at this pays for [`FrameStats::time_ns`] (one clock read a
+/// frame, 16.7 ns on the machine of 2026-09-20) and nothing else.
+///
+/// It is **the last tick**, not a total: every field but [`FrameStats::loaded_programs`] is of
+/// that one frame, and reading it twice in a frame answers the same thing twice. What a HUD
+/// wants over several frames — an average, a worst case — is the game's to keep, because how
+/// many frames it should be kept over is the game's question.
+///
+/// **A paused frame is a frame.** With `budget = 0` the tick's loop ends before its first round
+/// (that is what the pause is), so `instructions`, `rounds`, the two answer counts and
+/// `longest_answer_ns` are zero or `None`, `time_ns` is what it costs to find that out, and
+/// `more_to_run` is true while the VM still holds tasks that would run — which is how a HUD tells
+/// a paused VM from one whose scripts have all ended. The carried counts keep whatever an earlier
+/// frame left, because a pause answers nothing and puts nothing off.
+///
+/// **A second VM has its own**, as it has its own budget: `ScriptWorld::<Mods>::last_frame()` is
+/// the tick of the VM named `Mods` and nothing of the first VM is in it.
+///
+/// `examples/how_many_scripts.rs` and `examples/how_many_subscribers.rs` print these numbers
+/// beside the wall clock of the frame, and `docs/verification/scale.md` is a run of them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FrameStats {
+    /// Bevy's `FrameCount` when this tick ran, so a reader can tell a fresh answer from the one
+    /// it saw last frame (a `ScriptWorld` that has not ticked yet answers the default, all
+    /// zeroes).
+    pub frame: u32,
+    /// Instructions the VM ran in this tick, over every script of this VM. It is what the tick
+    /// took out of [`ScriptWorld::budget`]: a frame that reaches the budget shows the budget.
+    pub instructions: u64,
+    /// Times round the tick's loop — run the ready tasks, answer what they parked on, run them
+    /// again. One round is the least a frame with any script in it does; many rounds mean the
+    /// scripts are asking and being answered inside the tick, which is what the loop is for.
+    pub rounds: u32,
+    /// Questions rubevy answered itself in this tick: a component or resource by name,
+    /// `Rubevy.find`, `components`.
+    pub reflect_answers: u32,
+    /// Questions the game's own in-tick answerers made in this tick
+    /// ([`ScriptWorld::answer_in_tick`]). The two are counted apart because they are bounded
+    /// apart — a late tick still makes one answer of each.
+    pub in_tick_answers: u32,
+    /// Questions of rubevy's own kinds that this frame did not reach and left for the next one
+    /// (the frame time or the budget ran out), waiting at the head of the next tick's answering.
+    /// A number that stays above zero frame after frame says the tick cannot keep up with what
+    /// the scripts are asking: the frame time is short for the number of scripts, or a single
+    /// answer is dear.
+    pub carried_reflect: u32,
+    /// The same for the game's own kinds ([`ScriptWorld::answer_in_tick`]).
+    pub carried_in_tick: u32,
+    /// Messages this VM dropped since the previous tick, over all its subscriptions — the
+    /// difference of [`ScriptWorld::dropped`] between the two ticks, so a publish the game made
+    /// between them is in it. Nonzero means a subscriber's queue was full when something was
+    /// published to it ([`ScriptWorld::queue_limit`]).
+    pub dropped: u64,
+    /// The wall clock of the tick, in nanoseconds, on the clock the VM itself was given (Bevy's
+    /// `Instant`, which a browser has). This is the number [`ScriptWorld::frame_time`] is meant
+    /// to bound, and the rustdoc of that field says by how much it can still be passed.
+    ///
+    /// It is the tick alone: starting the scripts of new entities, carrying out their commands
+    /// and the writes at the end of the frame are systems of their own and not in it. What *is*
+    /// in it beside the answer loop is the flush of what the scripts printed (`puts` becomes a
+    /// line in the log at the end of the tick), which is a cost a game that prints every frame
+    /// pays and one it can stop paying.
+    pub time_ns: u64,
+    /// The longest single answer of the tick, in nanoseconds — the span between two of the
+    /// clock readings the deadline takes, which is one answer and the little the loop does
+    /// around it. A round's answering takes a reading of its own before its first answer, so
+    /// what is between two rounds (a run of the VM, the taking of the round's questions off the
+    /// VM's queue) is in no answer's span.
+    ///
+    /// It is the number to look at where a tick passes its `frame_time` by more than a
+    /// microsecond or two: a late tick always makes one more answer, so the overshoot is the
+    /// dearest one, and an `answer_in_tick` closure the game wrote is the only answer that can
+    /// be arbitrarily dear.
+    ///
+    /// **`None` where the tick read no clock**, which is an app that set
+    /// `frame_time = None`: nothing here makes the tick read a clock it was not going to read.
+    pub longest_answer_ns: Option<u64>,
+    /// Whether the VM still had something that could run when the tick ended: a task ready now,
+    /// or one sleeping until a deadline (`Vm::task_pending`). False means every script of this
+    /// VM has ended or is waiting for something only the game can give it.
+    ///
+    /// It is a yes or no and not a count because the VM has no way to say how many
+    /// (`docs/worklog/2026-09-20-frame-stats.md`).
+    pub more_to_run: bool,
+    /// [`ScriptWorld::loaded_programs`] as the tick ended — the one number here that is not of
+    /// the frame. It is in this struct so that a HUD that shows one thing a frame shows it
+    /// too: it climbs, for the life of the app, by one for every distinct program a game
+    /// compiles, and each of them holds an irep the VM has no way to give back.
+    pub loaded_programs: usize,
+}
+
 /// Marks an entity whose script has ended, so that [`ScriptEnded`] is sent once and the task
 /// is let go of once. The [`ScriptTask`] stays, which is what keeps the script from starting
 /// again — and where there is no task because the script never started (its `.mrb` would not
@@ -856,6 +951,14 @@ pub struct ScriptWorld<M = ()> {
     pub queue_limit: usize,
     /// Ticks not yet handed to the scheduler (frame times shorter than a tick).
     tick_remainder: f32,
+    /// What the last tick did ([`ScriptWorld::last_frame`]), written by [`tick_scripts`] as it
+    /// ends. It is a field and not something worked out on demand because every number in it is
+    /// of a moment inside the tick, and the tick is over by the time a HUD asks.
+    last_frame: FrameStats,
+    /// [`ScriptWorld::dropped`] as the previous tick ended, so that [`FrameStats::dropped`] can
+    /// be the difference. The VM's own counter never goes down, and what a HUD wants to see is
+    /// what this frame lost.
+    dropped_before: u64,
     /// What scripts asked the game for and are waiting on (`Rubevy.ask`).
     requests: Vec<Request>,
     /// The questions rubevy answers itself ([`RESERVED_KINDS`]) rather than handing to the
@@ -1019,6 +1122,8 @@ impl<M: 'static> ScriptWorld<M> {
             overrun: Some(std::time::Duration::from_millis(50)),
             queue_limit: QUEUE_LIMIT,
             tick_remainder: 0.0,
+            last_frame: FrameStats::default(),
+            dropped_before: 0,
             requests: Vec::new(),
             reflect_requests: Vec::new(),
             in_tick_answerers: std::collections::HashMap::new(),
@@ -1153,6 +1258,35 @@ impl<M: 'static> ScriptWorld<M> {
             frames: self.vm.task_frames(script.task),
             finished: self.vm.task_finished(script.task),
         }
+    }
+
+    /// What this VM's last tick did: [`FrameStats`], the frame-sized pair to
+    /// [`ScriptWorld::stats`].
+    ///
+    /// Where `stats` says what one script has spent and where it stands, this says what the
+    /// whole of the last tick came to — the instructions it ran, the times round its answer
+    /// loop, the questions answered and the questions put off, what it dropped, and how long it
+    /// took on the clock [`ScriptWorld::frame_time`] is measured against. A system that reads it
+    /// anywhere after [`RubevySet::Tick`] reads this frame's; one that reads it before the tick
+    /// reads the frame before.
+    ///
+    /// ```no_run
+    /// # use bevy::prelude::*;
+    /// # use rubevy::ScriptWorld;
+    /// fn hud(scripts: Res<ScriptWorld>) {
+    ///     let f = scripts.last_frame();
+    ///     info!("{} insn, {} answers, {:.2} ms", f.instructions, f.reflect_answers, f.time_ns as f64 / 1e6);
+    ///     if f.carried_reflect + f.carried_in_tick > 0 {
+    ///         info!("{} questions put off to the next frame", f.carried_reflect + f.carried_in_tick);
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// Nothing of this reaches a script: `$rubevy` carries the frame, the delta and the time and
+    /// no more. A game that wants its scripts to see what its scripts cost can publish it or
+    /// answer a question with it, which is where the decision about *what* to show belongs.
+    pub fn last_frame(&self) -> FrameStats {
+        self.last_frame
     }
 
     /// Terminates a task that is still running and, where `release`, lets the collector have it.
@@ -2274,6 +2408,12 @@ fn tick_scripts<M: 'static>(world: &mut World, tasks: &mut RunningTasks<M>) {
         // not only on the runs of the VM inside it
         let deadline_ns = scripts.frame_time.map(|t| started_ns.saturating_add(t.as_nanos() as u64));
         let mut spent = 0u64;
+        // what this tick will have to say for itself afterwards (`ScriptWorld::last_frame`). The
+        // counters are the loop's own; the clock is the one the deadline makes it read anyway.
+        let mut rounds = 0u32;
+        let mut reflect_answers = 0usize;
+        let mut in_tick_answers = 0usize;
+        let mut clock = AnswerClock { at_ns: started_ns, longest_ns: None };
         loop {
             let left = scripts.budget.saturating_sub(spent);
             if left == 0 {
@@ -2283,6 +2423,7 @@ fn tick_scripts<M: 'static>(world: &mut World, tasks: &mut RunningTasks<M>) {
             if time_left == Some(0) {
                 break;
             }
+            rounds += 1;
             let limits = sabiruby::RunLimits {
                 instructions: Some(left),
                 time_ns: time_left,
@@ -2302,13 +2443,44 @@ fn tick_scripts<M: 'static>(world: &mut World, tasks: &mut RunningTasks<M>) {
             // frame is spent. Answer what this system can answer — rubevy's own kinds first,
             // then the game's in-tick answerers — and if that woke anybody, give them what is
             // left of the frame.
-            let answered = answer_reflect_requests(&*world, scripts, deadline_ns)
-                + answer_in_tick_requests(&*world, scripts, deadline_ns);
-            if answered == 0 {
+            //
+            // (Each of the two takes its own first clock reading, where its answering begins:
+            // what is between them — the run of the VM above, and the taking of the round's
+            // questions off the VM's queue — is not an answer and must not be charged to one
+            // as `FrameStats::longest_answer_ns`. Those readings are the only clock reads this
+            // stage added, and only where there is a deadline: an app with `frame_time = None`
+            // reads no clock in here at all, as before.)
+            let reflect = answer_reflect_requests(&*world, scripts, deadline_ns, &mut clock);
+            let in_tick = answer_in_tick_requests(&*world, scripts, deadline_ns, &mut clock);
+            reflect_answers += reflect;
+            in_tick_answers += in_tick;
+            if reflect + in_tick == 0 {
                 break;
             }
         }
         flush_output(&mut scripts.vm);
+
+        // What the frame came to. The clock is read once more here — the only reading this makes
+        // that the limits did not already need — because the wall clock of the tick is the number
+        // `frame_time` is chosen against, and a game cannot take it from the outside: a system
+        // placed after `RubevySet::Tick` measures the tick plus whatever bevy put between them.
+        // One read is 16.7 ns on the machine of 2026-09-20 (`clock_cost`, the R4 worklog).
+        let dropped_total = scripts.dropped();
+        scripts.last_frame = FrameStats {
+            frame: frame_no,
+            instructions: spent,
+            rounds,
+            reflect_answers: reflect_answers as u32,
+            in_tick_answers: in_tick_answers as u32,
+            carried_reflect: scripts.reflect_requests.len() as u32,
+            carried_in_tick: scripts.in_tick_requests.len() as u32,
+            dropped: dropped_total.saturating_sub(scripts.dropped_before),
+            time_ns: clock_ns().saturating_sub(started_ns),
+            longest_answer_ns: clock.longest_ns,
+            more_to_run: scripts.vm.task_pending(),
+            loaded_programs: scripts.programs.len(),
+        };
+        scripts.dropped_before = dropped_total;
     });
 
     // The scripts that ran to their end. It is outside the closure because `ScriptWorld<M>` is
@@ -2616,6 +2788,7 @@ fn answer_reflect_requests<M: 'static>(
     world: &World,
     scripts: &mut ScriptWorld<M>,
     deadline_ns: Option<u64>,
+    clock: &mut AnswerClock,
 ) -> usize {
     let mut asked = std::mem::take(&mut scripts.reflect_requests);
     asked.append(&mut take_reflect_asks(&mut scripts.vm));
@@ -2633,6 +2806,10 @@ fn answer_reflect_requests<M: 'static>(
     let registry = registry.read();
     let entity_class = scripts.entity_class;
     let mut answered = 0usize;
+    // where the first answer's span starts (`FrameStats::longest_answer_ns`): here, and not
+    // where the round began, because everything above — the run of the VM, taking this round's
+    // questions off its queue, the registry — is not an answer
+    clock.start(deadline_ns);
     {
         let mut asked = asked.into_iter();
         while let Some(request) = asked.next() {
@@ -2743,7 +2920,7 @@ fn answer_reflect_requests<M: 'static>(
                 _ => scripts.answer(&request, Answer::Nil),
             }
             answered += 1;
-            if out_of_time(deadline_ns) {
+            if clock.answer_made(deadline_ns) {
                 // the rest of this round's questions go to the next frame, which takes them
                 // before anything asked in it
                 scripts.reflect_requests.extend(asked);
@@ -2754,13 +2931,49 @@ fn answer_reflect_requests<M: 'static>(
     answered
 }
 
-/// Whether the tick has used up the frame time it was given, on the VM's own clock.
+/// The one clock reading the answering carries from one answer to the next.
 ///
-/// `None` is an app that set no [`ScriptWorld::frame_time`]: no deadline, and — which is the
-/// point of the `is_some_and` rather than a comparison against `u64::MAX` — no call to the clock
-/// at all, so nothing is charged to a game that does not use this.
-fn out_of_time(deadline_ns: Option<u64>) -> bool {
-    deadline_ns.is_some_and(|deadline| clock_ns() >= deadline)
+/// It is here because two things want the same reading and neither should make a second one: the
+/// deadline, which is why the clock is read at all ([`ScriptWorld::frame_time`]), and
+/// [`FrameStats::longest_answer_ns`], which is that reading minus the one before it. So an
+/// answer costs exactly the clock read it always cost, and what a HUD can say about the tick
+/// grew by the subtraction.
+struct AnswerClock {
+    /// The last reading, and so where the next answer's span starts. [`tick_scripts`] sets it
+    /// afresh where a round's answering begins, so that the run of the VM before it is not
+    /// counted as an answer.
+    at_ns: u64,
+    /// The longest span between two readings this frame. `None` where the tick has taken no
+    /// reading — an app with no `frame_time`, which is the case this whole road is skipped in.
+    longest_ns: Option<u64>,
+}
+
+impl AnswerClock {
+    /// Called where a round's answering begins, which is where the first answer's span starts.
+    /// It is a reading of its own — one a frame's rounds add to what the deadline costs — because
+    /// the alternative is charging the first answer of a round with the run of the VM before it
+    /// and with the taking of that round's questions off the VM's queue, neither of which is an
+    /// answer. `None` is an app with no deadline: no reading, as everywhere else on this road.
+    fn start(&mut self, deadline_ns: Option<u64>) {
+        if deadline_ns.is_some() {
+            self.at_ns = clock_ns();
+        }
+    }
+
+    /// Called with the deadline after each answer: says whether the tick has used up the frame
+    /// time it was given, and remembers what that answer took.
+    ///
+    /// `None` is an app that set no [`ScriptWorld::frame_time`]: no deadline, and — which is the
+    /// point of the `let else` rather than a comparison against `u64::MAX` — no call to the
+    /// clock at all, so nothing is charged to a game that does not use this.
+    fn answer_made(&mut self, deadline_ns: Option<u64>) -> bool {
+        let Some(deadline) = deadline_ns else { return false };
+        let now = clock_ns();
+        let took = now.saturating_sub(self.at_ns);
+        self.longest_ns = Some(self.longest_ns.unwrap_or(0).max(took));
+        self.at_ns = now;
+        now >= deadline
+    }
 }
 
 /// Answers the questions the game registered an in-tick answerer for
@@ -2787,6 +3000,7 @@ fn answer_in_tick_requests<M: 'static>(
     world: &World,
     scripts: &mut ScriptWorld<M>,
     deadline_ns: Option<u64>,
+    clock: &mut AnswerClock,
 ) -> usize {
     if scripts.in_tick_answerers.is_empty() {
         // nothing was registered, so nothing was sorted into `in_tick_requests` either
@@ -2796,6 +3010,9 @@ fn answer_in_tick_requests<M: 'static>(
     let mut asked = std::mem::take(&mut scripts.in_tick_requests);
     asked.append(&mut take_asks(&mut scripts.vm, |kind| answerers.contains_key(kind)));
     let mut answered = 0usize;
+    // as in `answer_reflect_requests`: the first closure's span starts here, after the questions
+    // have been taken off the VM's queue, so that what is measured is the game's closure
+    clock.start(deadline_ns);
     let mut asked = asked.into_iter();
     while let Some(request) = asked.next() {
         // a question is only ever sorted into this road while its kind has an answerer, and an
@@ -2807,7 +3024,7 @@ fn answer_in_tick_requests<M: 'static>(
         };
         scripts.answer(&request, answer);
         answered += 1;
-        if out_of_time(deadline_ns) {
+        if clock.answer_made(deadline_ns) {
             scripts.in_tick_requests.extend(asked);
             break;
         }
