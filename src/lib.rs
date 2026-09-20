@@ -525,17 +525,21 @@ enum HostCommand {
     Ask { entity: u64, kind: String, args: Vec<Arg>, queue: ObjId },
     /// `entity[:Transform] = hash`, through `Rubevy.set_component`: the value was read out of
     /// the VM by the native (a `&mut World` is a system away), and [`apply_component_writes`]
-    /// writes it over the component through `ReflectComponent`.
-    SetComponent { entity: u64, name: String, value: RubyData },
+    /// writes it over the component through `ReflectComponent`. `by` is the entity of the task
+    /// that wrote it, which is not the entity written to: a script may write another's
+    /// component, and what a script asks about afterwards is its *own* writes
+    /// ([`RejectedWrite`]).
+    SetComponent { by: u64, entity: u64, name: String, value: RubyData },
     /// `Rubevy.set_resource(:Score, hash)`: the same thing for a resource, which belongs to no
     /// entity, so there is nothing to name but the type. [`apply_resource_writes`] makes it.
-    SetResource { name: String, value: RubyData },
+    SetResource { by: u64, name: String, value: RubyData },
 }
 
 /// A component write waiting for the exclusive system that can make it
 /// ([`apply_component_writes`]).
 #[derive(Debug, Clone)]
 struct ComponentWrite {
+    by: Option<Entity>,
     entity: Entity,
     name: String,
     value: RubyData,
@@ -546,8 +550,48 @@ struct ComponentWrite {
 /// ECS names it.
 #[derive(Debug, Clone)]
 struct ResourceWrite {
+    by: Option<Entity>,
     name: String,
     value: RubyData,
+}
+
+/// A write a script made that the world would not take, from the last frame that wrote.
+///
+/// A write is applied at the end of the frame (`apply_component_writes`,
+/// `apply_resource_writes`), long after the line that made it has run on, so nothing can be
+/// handed back to the script where it wrote: `e[:X] = hash` answers the hash it was given,
+/// always. What the host could say was said to the log and nowhere else, so a script whose
+/// write was refused — the type is not registered, the entity has no such component, the enum
+/// is in another variant, a field cannot take what it was given — carried on as if it had
+/// landed. That is the case the camera layer met first: a `zoom` into the wrong variant of
+/// `Projection` changes nothing and says nothing.
+///
+/// So the frame's refusals are kept, for one frame, and a script reads them on the next one:
+/// `Rubevy.rejected_writes` from Ruby (its own, and see there for what that means),
+/// [`ScriptWorld::rejected_writes`] from the host (all of them). The log is unchanged — the
+/// `warn!` is still made — because a game's log is where a game already looks.
+///
+/// **One frame's worth and no more.** The list holds what one frame's writes refused: the next
+/// frame in which the scripts write anything replaces the lot, and `apply_component_writes`
+/// says why it is that frame and not simply the next one. A game whose scripts do not read it
+/// pays for the `Vec` that stays empty and nothing else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RejectedWrite {
+    /// The entity of the script that made the write — the task's `@rubevy_entity`, which a task
+    /// a script makes with `Task.new` inherits. `None` where the write came from a task with no
+    /// entity at all (one the host spawned outside a [`Script`]).
+    pub by: Option<Entity>,
+    /// The entity whose component it was, or `None` for a resource write. A component write
+    /// whose entity is gone by the end of the frame is *not* here: nothing is refused in it —
+    /// the target simply stopped existing — and it makes no `warn!` either, so the list and the
+    /// log say the same thing.
+    pub on: Option<Entity>,
+    /// The type the script named, as it spelled it (`"Projection"`, `"my_game::Hp"`).
+    pub name: String,
+    /// Why it was refused, in the words the log carries: the sentence `src/reflect.rs` builds,
+    /// with the path inside the value in front of it where there is one
+    /// (`translation.x: takes a number`), or the host's own (`no registered component named …`).
+    pub reason: String,
 }
 
 /// Where a [`RootedValue`] that has been dropped leaves its object until the next sweep
@@ -1012,6 +1056,23 @@ pub struct ScriptWorld<M = ()> {
     component_writes: Vec<ComponentWrite>,
     /// Resource writes waiting for [`apply_resource_writes`], the same way.
     resource_writes: Vec<ResourceWrite>,
+    /// The writes the world would not take, of the last frame in which the scripts wrote
+    /// anything at all ([`ScriptWorld::rejected_writes`], `Rubevy.rejected_writes`). Replaced by
+    /// [`apply_component_writes`], which is the first of the two systems that fill it and says
+    /// there why it is replaced rather than emptied every frame.
+    ///
+    /// **It has no limit of its own and needs none.** What could fill it is bounded already:
+    /// a script cannot write without spending instructions on the writing, and the frame's
+    /// [`ScriptWorld::budget`] is what it spends them out of. One refused write costs 33
+    /// instructions in the narrowest loop that can make one (measured 2026-09-20,
+    /// `tests/rejected_writes.rs::what_one_rejected_write_costs`), so the default budget of
+    /// 200,000 bounds a frame at some six thousand of them — and a script that asks for more is
+    /// simply cut at the budget and finishes the loop next frame, which the same instrument
+    /// shows: a script writing 1,100 of them left 524 in the frame it ended in. Each entry is
+    /// four small fields and two short strings, the type's name and the sentence the log
+    /// carries. A cap would be a number with nothing behind it, and what fell out of it would
+    /// be exactly the refusal a script was looking for.
+    rejected_writes: Vec<RejectedWrite>,
     /// Answers still being worked out on Bevy's task pool ([`ScriptWorld::answer_with`]), each
     /// with the request it belongs to. [`deliver_answers`] takes them off as they finish.
     answering: Vec<(Request, Task<Answer>)>,
@@ -1132,6 +1193,7 @@ impl<M: 'static> ScriptWorld<M> {
             resource_cache: std::collections::HashMap::new(),
             component_writes: Vec::new(),
             resource_writes: Vec::new(),
+            rejected_writes: Vec::new(),
             answering: Vec::new(),
             entity_class,
             freed_entities,
@@ -1289,6 +1351,71 @@ impl<M: 'static> ScriptWorld<M> {
         self.last_frame
     }
 
+    /// The writes of the frame before this one that the world would not take, over every script
+    /// of this VM ([`RejectedWrite`]).
+    ///
+    /// It is the host's side of `Rubevy.rejected_writes`, and it is the wider of the two: a
+    /// script is answered its own refusals, this is all of them, each with the entity of the
+    /// script that made it. A HUD or a test reads it in any system after
+    /// [`RubevySet::Tick`] — that is where the writes are made and where the list is filled —
+    /// and it is empty again in the next frame's.
+    ///
+    /// It is **not** in [`FrameStats`]. Every number there is one the tick already had, and this
+    /// is not of the tick at all: the writes are applied in two systems after it, so a count
+    /// here would be a number from another part of the frame standing in a struct that says it
+    /// is the tick's. The count a game wants is `rejected_writes().len()`, which is exact.
+    ///
+    /// ```no_run
+    /// # use bevy::prelude::*;
+    /// # use rubevy::ScriptWorld;
+    /// fn complain(world: Res<ScriptWorld>) {
+    ///     for write in world.rejected_writes() {
+    ///         warn!("{:?} could not write {}: {}", write.by, write.name, write.reason);
+    ///     }
+    /// }
+    /// ```
+    pub fn rejected_writes(&self) -> &[RejectedWrite] {
+        &self.rejected_writes
+    }
+
+    /// Runs a program in this VM, the way the prelude is run: it is loaded, its top level runs
+    /// at once, and what it leaves behind — a module, a class, a method — is there for every
+    /// script afterwards.
+    ///
+    /// This is how an **optional layer** is taken up ([`layers`]), and a game says so at
+    /// `Startup`:
+    ///
+    /// ```no_run
+    /// # use bevy::prelude::*;
+    /// # use rubevy::ScriptWorld;
+    /// fn add_the_camera_layer(mut world: ResMut<ScriptWorld>) {
+    ///     world.load_and_run(rubevy::layers::CAMERA).expect("the layer runs");
+    /// }
+    /// # fn build(app: &mut App) {
+    /// app.add_systems(Startup, add_the_camera_layer);
+    /// # }
+    /// ```
+    ///
+    /// The bytes are a `.mrb` — rubevy's own layers, or a library of the game's, or anything
+    /// else the game compiled. It is not how a *script* is run: a script belongs to an entity,
+    /// gets a task of its own and is ticked with the rest ([`Script`]). This runs now, in the
+    /// system that called it, and comes back when the program's top level has ended, so the
+    /// program must not park (no `sleep`, no `Rubevy.ask`, nothing that waits for a frame that
+    /// has not begun). A layer that defines classes and methods does none of that.
+    ///
+    /// **Call it at `Startup`**, for the reason [`ScriptWorld::vm`] and
+    /// [`ScriptWorld::require_from`] are called there: a script that has already run has already
+    /// been past the line that would have used what this defines.
+    ///
+    /// The `Err` is what the VM said, as a sentence for a log — the program would not load, or
+    /// its top level raised.
+    pub fn load_and_run(&mut self, program: &[u8]) -> Result<(), String> {
+        match self.vm.load_and_run(program) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(self.vm.describe_error(&e)),
+        }
+    }
+
     /// Terminates a task that is still running and, where `release`, lets the collector have it.
     fn stop_task(&mut self, task: ObjId, release: bool) {
         if !self.vm.task_finished(task) {
@@ -1307,7 +1434,7 @@ impl<M: 'static> ScriptWorld<M> {
     /// answer. A request stays valid until it is answered: keep the ones you cannot answer yet
     /// and hand them back to [`ScriptWorld::answer`] on a later frame.
     ///
-    /// Two sorts of question are never in here: the four rubevy answers itself
+    /// Two sorts of question are never in here: the ones rubevy answers itself
     /// (`RESERVED_KINDS`) and the kinds the game registered with
     /// [`ScriptWorld::answer_in_tick`]. Both are answered inside the tick, and both are sorted
     /// out where the question is made, so a system that answers here sees only what is left for
@@ -2593,13 +2720,15 @@ fn drain_commands<M: 'static>(
                     world.requests.push(request);
                 }
             }
-            HostCommand::SetComponent { entity, name, value } => {
+            HostCommand::SetComponent { by, entity, name, value } => {
                 if let Some(entity) = entity_from_bits(entity) {
-                    world.component_writes.push(ComponentWrite { entity, name, value });
+                    let by = entity_from_bits(by);
+                    world.component_writes.push(ComponentWrite { by, entity, name, value });
                 }
             }
-            HostCommand::SetResource { name, value } => {
-                world.resource_writes.push(ResourceWrite { name, value });
+            HostCommand::SetResource { by, name, value } => {
+                let by = entity_from_bits(by);
+                world.resource_writes.push(ResourceWrite { by, name, value });
             }
             HostCommand::Log(text) => info!("[script] {text}"),
             HostCommand::Spawn { name, x, y, z } => {
@@ -2633,16 +2762,22 @@ fn entity_from_bits(bits: u64) -> Option<Entity> {
 /// queue before the game's own in-tick answerers are.
 ///
 /// They are what `src/prelude.rb` sends: `Rubevy::Entity#[]`, `#has?`, `#components`,
-/// `Rubevy.find` and `Rubevy.resource`.
-const RESERVED_KINDS: [&str; 5] =
-    ["component.get", "component.has", "components", "entities.with", "resource.get"];
+/// `Rubevy.find`, `Rubevy.resource` and `Rubevy.rejected_writes`.
+const RESERVED_KINDS: [&str; 6] = [
+    "component.get",
+    "component.has",
+    "components",
+    "entities.with",
+    "resource.get",
+    "writes.rejected",
+];
 
 /// Takes the questions rubevy answers itself off the VM's command queue, leaving every other
 /// command where it is.
 ///
 /// The `Rubevy.ask` native cannot tell the two apart — it is handed `&mut Vm` and puts a
 /// [`HostCommand::Ask`] on the queue whatever the kind — and the sorting has always been
-/// [`drain_commands`]'s. The tick needs the reserved four *before* `drain_commands` runs, so it
+/// [`drain_commands`]'s. The tick needs the reserved kinds *before* `drain_commands` runs, so it
 /// takes those out here and lets the rest lie: a game's questions keep the order they were asked
 /// in, and the commands that need a `Commands` or a `Query` (`Rubevy.spawn`, `Rubevy.despawn`,
 /// `Rubevy.log`, `Rubevy.move_to`) are still carried out where they always were.
@@ -2860,6 +2995,45 @@ fn answer_reflect_requests<M: 'static>(
                         None => scripts.answer(&request, Answer::Nil),
                     }
                 }
+                // `Rubevy.rejected_writes` — the frame before's refusals, and only the ones
+                // this script made. The asker is known here and nowhere else (`Request::entity`
+                // is the entity of the task that asked), so the filtering is done where the
+                // question is answered rather than in Ruby, where every script would first be
+                // handed every other script's.
+                "writes.rejected" => {
+                    let mine: Vec<RejectedWrite> = match request.entity {
+                        Some(asker) => scripts
+                            .rejected_writes
+                            .iter()
+                            .filter(|w| w.by == Some(asker))
+                            .cloned()
+                            .collect(),
+                        // a task with no entity of its own made no write anything here is `by`
+                        None => Vec::new(),
+                    };
+                    scripts.answer_value(&request, move |vm| {
+                        let items: Vec<Value> = mine
+                            .iter()
+                            .map(|w| {
+                                let h = vm.hash_new();
+                                let on = match w.on {
+                                    Some(e) => entity_object(vm, entity_class, e),
+                                    None => Value::Nil,
+                                };
+                                for (key, value) in [
+                                    ("entity", on),
+                                    ("name", vm.str_new(w.name.as_bytes())),
+                                    ("reason", vm.str_new(w.reason.as_bytes())),
+                                ] {
+                                    let k = Value::Sym(vm.intern(key));
+                                    let _ = vm.hash_set(h, k, value);
+                                }
+                                h
+                            })
+                            .collect();
+                        vm.ary_new(items)
+                    });
+                }
                 "component.has" => {
                     let rc = request
                         .text(1)
@@ -3038,31 +3212,71 @@ fn answer_in_tick_requests<M: 'static>(
 /// It runs after [`drain_commands`], at the end of the frame, which is the promise `Commands`
 /// makes and the one `Rubevy.spawn` already made: a script's write is seen by the next frame,
 /// not in the middle of this one.
+///
+/// It is also where the list of refusals is replaced ([`RejectedWrite`]): what stands in it
+/// until this moment is of the last frame that wrote anything, which the tick that has just run
+/// was answering `Rubevy.rejected_writes` out of, and a frame that writes replaces the lot.
+///
+/// **Why "the last frame that wrote" and not "the frame before".** A script cannot ask to be
+/// woken on the very next frame. `sleep 0` parks it until the VM's clock moves, and the clock
+/// moves in whole ticks of 4 ms (`Vm::task_tick_unit_ms`), so at a fast frame rate two or three
+/// frames go by before it runs again — and a list emptied by every frame would be gone before
+/// the script that wrote could look at it. Replacing it only where there is something to
+/// replace it with holds it until the scripts next write, which is the soonest anything in it
+/// could be stale. It is still one frame's worth: whatever a frame's writes refuse, and nothing
+/// from any frame before that one.
+///
+/// Both queues of writes are looked at here and not only this system's own: it runs first of the
+/// two, so a frame that wrote only resources must have its list replaced here all the same,
+/// before [`apply_resource_writes`] appends to it.
 fn apply_component_writes<M: 'static>(world: &mut World) {
-    if world.resource::<ScriptWorld<M>>().component_writes.is_empty() {
-        return;
+    {
+        let mut scripts = world.resource_mut::<ScriptWorld<M>>();
+        let wrote = !scripts.component_writes.is_empty() || !scripts.resource_writes.is_empty();
+        if wrote && !scripts.rejected_writes.is_empty() {
+            scripts.rejected_writes.clear();
+        }
+        if scripts.component_writes.is_empty() {
+            return;
+        }
     }
     let writes = std::mem::take(&mut world.resource_mut::<ScriptWorld<M>>().component_writes);
     let Some(registry) = world.get_resource::<AppTypeRegistry>().cloned() else { return };
     let registry = registry.read();
+    let mut rejected: Vec<RejectedWrite> = Vec::new();
     for write in writes {
+        let mut refused = |reason: String| {
+            rejected.push(RejectedWrite {
+                by: write.by,
+                on: Some(write.entity),
+                name: write.name.clone(),
+                reason,
+            });
+        };
         let Some(rc) = registry
             .get_with_short_type_path(&write.name)
             .or_else(|| registry.get_with_type_path(&write.name))
             .and_then(|r| r.data::<bevy::ecs::reflect::ReflectComponent>())
         else {
             warn!("rubevy: no registered component named {}", write.name);
+            refused(format!("no registered component named {}", write.name));
             continue;
         };
+        // An entity that is gone is not a refusal: there is nothing left to refuse, and it is
+        // the one case here that makes no `warn!` either — a script that despawned something
+        // and wrote to it in the same frame did nothing wrong.
         let Ok(mut entity) = world.get_entity_mut(write.entity) else { continue };
         let Some(mut value) = rc.reflect_mut(&mut entity) else {
             warn!("rubevy: {} has no {}", write.entity, write.name);
+            refused(format!("{} has no {}", write.entity, write.name));
             continue;
         };
         if let Err(e) = reflect::apply_ruby(value.as_partial_reflect_mut(), &write.value) {
             warn!("rubevy: {} was not written whole: {e}", write.name);
+            refused(e);
         }
     }
+    world.resource_mut::<ScriptWorld<M>>().rejected_writes.append(&mut rejected);
 }
 
 /// Writes what the scripts put on resources this frame (`Rubevy.set_resource(:Score, hash)`).
@@ -3080,24 +3294,40 @@ fn apply_resource_writes<M: 'static>(world: &mut World) {
     let writes = std::mem::take(&mut world.resource_mut::<ScriptWorld<M>>().resource_writes);
     let Some(registry) = world.get_resource::<AppTypeRegistry>().cloned() else { return };
     let registry = registry.read();
+    // appended to what `apply_component_writes` left, which ran before this and emptied the
+    // frame before's: the two systems fill one list, as they refuse writes for the same reasons
+    let mut rejected: Vec<RejectedWrite> = Vec::new();
     for write in writes {
+        let mut refused = |reason: String| {
+            rejected.push(RejectedWrite {
+                by: write.by,
+                on: None,
+                name: write.name.clone(),
+                reason,
+            });
+        };
         let Some((type_id, rc)) = resource_data(&registry, &write.name) else {
             warn!("rubevy: no registered resource named {}", write.name);
+            refused(format!("no registered resource named {}", write.name));
             continue;
         };
         let Some(holder) = resource_entity(world, type_id) else {
             warn!("rubevy: there is no {} in this world", write.name);
+            refused(format!("there is no {} in this world", write.name));
             continue;
         };
         let Ok(mut holder) = world.get_entity_mut(holder) else { continue };
         let Some(mut value) = rc.reflect_mut(&mut holder) else {
             warn!("rubevy: {} is not where the world said it was", write.name);
+            refused(format!("{} is not where the world said it was", write.name));
             continue;
         };
         if let Err(e) = reflect::apply_ruby(value.as_partial_reflect_mut(), &write.value) {
             warn!("rubevy: {} was not written whole: {e}", write.name);
+            refused(e);
         }
     }
+    world.resource_mut::<ScriptWorld<M>>().rejected_writes.append(&mut rejected);
 }
 
 // ------------------------------------------------------------------ the Ruby side
@@ -3105,6 +3335,38 @@ fn apply_resource_writes<M: 'static>(world: &mut World) {
 /// The Ruby half of the host API, run when the VM starts: `Rubevy::Entity#[]` and the rest
 /// (`src/prelude.rb`, compiled by `tools/compile_scripts.sh`).
 const PRELUDE: &[u8] = include_bytes!("prelude.mrb");
+
+/// Ruby the crate carries but does not run: an **app** says which of these its scripts get, with
+/// [`ScriptWorld::load_and_run`] at `Startup`.
+///
+/// ```no_run
+/// # use bevy::prelude::*;
+/// # use rubevy::ScriptWorld;
+/// fn add_the_layers(mut world: ResMut<ScriptWorld>) {
+///     world.load_and_run(rubevy::layers::CAMERA).expect("the layer runs");
+/// }
+/// # fn build(app: &mut App) {
+/// app.add_systems(Startup, add_the_layers);
+/// # }
+/// ```
+///
+/// **Why they are not the prelude.** The prelude is the host API — a script has
+/// `Rubevy::Entity#[]` because it is rubevy's, the way `Rubevy.ask` is. A layer is a way of
+/// speaking about *something a game has*, and rubevy does not know what a game has. Nothing in
+/// `src/` knows what a camera is and nothing here should: the camera layer is Ruby over
+/// `Rubevy.find`, `e[:Transform] =`, `e[:Projection] =` and `Rubevy.ask`, and the crate's
+/// dependencies are the same with it as without it. A game that wants none of it loads none of
+/// it, and its scripts are then as they were — `Rubevy::Camera` does not exist.
+///
+/// Each is a `.mrb` compiled by `tools/compile_scripts.sh` from the `.rb` beside it in
+/// `src/layers/`, which is the file to read: the reasoning is in its comments, and the Ruby it
+/// defines is documented in `docs/host-api.md` ("An optional layer, and the first one").
+pub mod layers {
+    /// `Rubevy::Camera` — finding the camera, moving it, zooming it by the same word on a 2D and
+    /// a 3D one, following an entity, and asking the game where a point on the window is in the
+    /// world. The source is `src/layers/camera.rb`.
+    pub const CAMERA: &[u8] = include_bytes!("layers/camera.mrb");
+}
 
 /// What a `Rubevy::Entity` object is, in the `tag` of [`Vm::data_new`]. A host that gives its
 /// scripts Data objects of its own picks other numbers.
@@ -3259,7 +3521,10 @@ fn install_host_api(vm: &mut Vm, release: ReleaseQueue) -> ObjId {
             None => return Err(vm.raise_arg("set_component needs the name of a component")),
         };
         let value = reflect::read_ruby(vm, a.get(2).copied().unwrap_or(Value::Nil), ENTITY_TAG)?;
-        push_command(vm, HostCommand::SetComponent { entity: bits, name, value });
+        // who is writing, which is not who is written to: `Rubevy.rejected_writes` answers a
+        // script its own writes, and a script may write another entity's component
+        let by = match current_entity(vm) { Value::Int(bits) => bits as u64, _ => u64::MAX };
+        push_command(vm, HostCommand::SetComponent { by, entity: bits, name, value });
         Ok(Value::Nil)
     });
     // `Rubevy.set_resource(:Score, {points: 10})`, the resource half of the same thing. It is a
@@ -3273,7 +3538,8 @@ fn install_host_api(vm: &mut Vm, release: ReleaseQueue) -> ObjId {
             None => return Err(vm.raise_arg("set_resource needs the name of a resource")),
         };
         let value = reflect::read_ruby(vm, a.get(1).copied().unwrap_or(Value::Nil), ENTITY_TAG)?;
-        push_command(vm, HostCommand::SetResource { name, value });
+        let by = match current_entity(vm) { Value::Int(bits) => bits as u64, _ => u64::MAX };
+        push_command(vm, HostCommand::SetResource { by, name, value });
         Ok(Value::Nil)
     });
     // `hits = Rubevy.subscribe(:hit)` — a `Task::Queue` the game pushes messages onto

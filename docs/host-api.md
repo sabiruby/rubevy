@@ -532,8 +532,9 @@ The measurements are in `docs/worklog/2026-09-17-sync-reads.md`, and `tests/sche
 the frames from the script's own side — zero for these, one for the questions the game answers,
 in the same file.
 
-The five kinds rubevy answers itself — `component.get`, `component.has`, `components`,
-`entities.with`, `resource.get` — never reach `ScriptWorld::take_requests`: they are sorted out
+The six kinds rubevy answers itself — `component.get`, `component.has`, `components`,
+`entities.with`, `resource.get`, `writes.rejected` — never reach `ScriptWorld::take_requests`:
+they are sorted out
 where the request is made, so a game's answering system sees only its own. A game that wants
 those names picks others.
 
@@ -588,6 +589,59 @@ never reaches `ScriptWorld::take_requests`. `tests/resources.rs` is the whole of
 second VM under a name tag reading and writing the app's one resource, and
 `tests/read_cost.rs::a_resource_read_beside_a_component_read` is the `#[ignore]`d instrument
 that says what the extra lookup costs on the machine it is run on.
+
+## A write the world would not take (`Rubevy.rejected_writes`)
+
+A write lands at the end of the frame, so there is nothing to answer where it is made:
+`e[:X] = hash` gives back the hash it was handed, whether the world took it or not. Until the
+next frame there is nothing to say — and what the host had to say, it said to its log. So the
+refusals of a frame's writes are kept, and a script reads its own on a later frame:
+
+```ruby
+cam[:Projection] = { Orthographic: [ { scale: 2.0 } ] }
+sleep 0                                    # the clock moves, and the write has landed or not
+Rubevy.rejected_writes.each do |w|
+  Rubevy.log "#{w[:name]} on #{w[:entity].inspect}: #{w[:reason]}"
+end
+```
+
+| key | what it is |
+|---|---|
+| `:entity` | the `Rubevy::Entity` the component was on, or **nil** for a resource write |
+| `:name` | the type as the script spelled it (`"Projection"`, `"my_game::Hp"`) |
+| `:reason` | the sentence the log carries, with the path inside the value where there is one (`translation.x: takes a number`) |
+
+**Its own, and not everybody's.** A script is answered the writes *it* made — the entity of the
+task that asked is what says which those are, and a task a script makes with `Task.new` carries
+its maker's entity, so a script's second task counts as the same script. `:entity` is what was
+written *to*, which is not the same thing: a script may write another entity's component, and it
+is still that script's write. A task with no entity at all is answered an empty Array. The host's
+side, `ScriptWorld::rejected_writes() -> &[RejectedWrite]`, is the wider one — every script's,
+each carrying `by` (who wrote) beside `on` (what was written to).
+
+**What is in it** is a refusal and not a mishap: a type nobody registered, an entity without that
+component, a resource nothing has inserted, an enum in another variant than the one the value
+names, a field that cannot take what it was given. A write to an entity that was despawned in
+the meantime is **not** in it — there was nothing left to refuse — and that case makes no line
+in the log either, so the list and the log say the same things.
+
+**One frame's worth.** The list holds what one frame's writes refused, and the next frame in
+which the scripts write anything replaces the lot. It is not emptied by every frame on purpose:
+a script cannot ask to be woken on the very next one (`sleep 0` waits for the VM's clock, which
+moves in whole ticks of 4 ms), so a list that lasted one frame would usually be gone before the
+script that wrote could look at it. Holding it until the scripts next write is the soonest
+anything in it could be out of date.
+
+**It has no limit and needs none.** A script cannot write without spending instructions on the
+writing, so the frame's `budget` already bounds how many refusals a frame can make: 33
+instructions each in the narrowest loop that can make one, which is some six thousand under the
+default budget (`tests/rejected_writes.rs::what_one_rejected_write_costs`, an `#[ignore]`d
+instrument — the count is of the VM and not of the machine).
+
+**The log is unchanged.** Every refusal still makes the `warn!` it always made, because a game's
+log is where a game already looks; this is for the script, which could not see the log.
+`tests/rejected_writes.rs` is the whole of it and
+`docs/worklog/2026-09-20-rejected-writes.md` is how it was decided.
 
 ## Events
 
@@ -744,6 +798,92 @@ that hurts least.
 
 There is no `drop: :newest`: the oldest goes, which is what a script that wakes late wants, and
 nobody has asked for the other.
+
+## An optional layer, and the first one (`Rubevy::Camera`)
+
+A **layer** is Ruby the crate carries and does not run. The app says whether its scripts get it,
+in one line at `Startup`:
+
+```rust
+fn add_the_camera_layer(mut world: ResMut<ScriptWorld>) {
+    world.load_and_run(rubevy::layers::CAMERA).expect("the layer runs");
+}
+```
+
+`ScriptWorld::load_and_run(&[u8])` runs a `.mrb` in the VM the way the prelude is run — its top
+level runs now, in the system that called it, and what it leaves behind is there for every
+script. It is not how a *script* is run (a script belongs to an entity and gets a task), so the
+program must not park: no `sleep`, no `Rubevy.ask`, nothing that waits for a frame. A layer that
+defines classes and methods does none of that. The same call takes a library of the game's own.
+
+**Why a layer and not the prelude.** The prelude is the host API: a script has
+`Rubevy::Entity#[]` because it is rubevy's, as `Rubevy.ask` is. A layer is a way of speaking
+about *something a game has*, and rubevy does not know what a game has. Nothing in `src/` knows
+what a camera is and nothing is to start: the camera layer is Ruby over `Rubevy.find`,
+`e[:Transform] =`, `e[:Projection] =` and `Rubevy.ask`, and the crate's dependencies are the same
+with it as without it (`bevy_camera` is a dev-dependency, for the tests and the example). An app
+that loads nothing has no `Rubevy::Camera`, and `tests/camera_layer.rs` begins by checking that.
+
+### The camera layer
+
+```ruby
+cam = Rubevy::Camera.find            # the 2D one first (`markers`), or nil
+Rubevy::Camera.find_all              # every camera, as Rubevy::Camera objects
+Rubevy::Camera.attach(e, :Camera3d)  # one on an entity you already hold
+
+cam.move_to(100.0, 0.0)              # z is kept unless you pass one
+cam.pan(20.0, -40.0)                 # and two pans in one tick both count
+cam.zoom 2                           # twice as close: 2D and 3D alike
+cam.zoom 2                           # 4x, not 2x
+cam.scale                            # 4.0 — the magnification, not bevy's `scale`
+cam.position                         # [x, y, z]
+cam.follow(target)                   # a task of its own; `unfollow` stops it
+cam.world_at(x, y)                   # a question for the game; answers the queue
+cam.reload                           # read the projection again, from 1x
+cam.rejected_writes                  # what this camera's writes ran into
+```
+
+**`zoom 2` is twice as close on both cameras**, which is the layer's main reason for being: the
+two are zoomed by different numbers, in different units, in opposite directions.
+
+| | what holds the zoom | what `zoom f` writes |
+|---|---|---|
+| `Projection::Orthographic` (2D) | `scale` — how much world fits across the window, so apparent size is `1 / scale` | `scale / f` |
+| `Projection::Perspective` (3D) | `fov` — the angle seen, in radians; what sets apparent size is `tan(fov / 2)` | `2 * atan(tan(fov / 2) / f)` |
+
+Halving the angle itself would be wrong by more and more as the angle grows, and could pass pi,
+which is no angle at all; through the tangent, any positive magnification lands somewhere in
+`0 < fov < pi`, because `atan` does. `zoom 2` then `zoom 0.5` comes back exactly where it
+started, on either camera.
+
+**What the layer remembers, and why.** Two of the three are forced by the frame:
+
+* **The variant.** A Ruby write cannot switch an enum's variant, so the layer reads `Projection`
+  once (`attach`, `reload`) and writes into the variant it found. `reload` is how a script is
+  told to look again after the *host* has changed the projection from Rust.
+* **The magnification.** A write lands at the end of the frame, so reading the projection,
+  multiplying it and writing it back would lose every `zoom` in a tick but the first. The layer
+  holds the magnification on the Ruby side and writes an absolute value. `scale` answers that
+  magnification — 1.0 after a `reload`, whatever bevy's own number happens to be.
+* **Where it put the camera**, for this frame only: `position` answers what the layer wrote if it
+  wrote it this frame (`$rubevy[:frame]`, which costs no round trip) and the world's own
+  otherwise, which is what makes two `pan`s in one tick add up.
+
+**`follow(target, every = 0, offset = nil)`** is a task of its own (`Task.new`, so it carries the
+script's entity) that moves the camera to the target's x and y. `every` is what it sleeps between
+turns — 0 is "every frame the VM's clock moves" — and `offset` is `[dx, dy]` or `[dx, dy, dz]`,
+where the third puts the camera dz from the target's z instead of leaving its own alone. There is
+no smoothing and no speed in it, because either would be a number this layer has no grounds for;
+a game that wants one writes its own task around `move_to`. It stops on `unfollow`, and by itself
+when the target is gone — a despawned entity's `Transform` reads nil.
+
+**`world_at(x, y)` is a question with no answerer.** Where a point on the window is in the world
+is worked out from the camera's placing and its projection; no component holds it, so the layer
+asks `Rubevy.ask("camera.world_at", camera_entity, x, y)` and hands the **queue** back without
+waiting. The camera is in the question because a game may have several. Answering is the game's,
+and **nobody answers it by default**: a `pop` on the queue of a question no system answers parks
+that task for ever. So pop it where the game says it answers this, or in a task of its own.
+`examples/camera_from_ruby.rs` shows the answering side.
 
 ## A dynamic proxy (`Rubevy::Proxy`)
 

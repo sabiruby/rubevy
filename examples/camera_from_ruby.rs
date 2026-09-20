@@ -2,22 +2,16 @@
 //!
 //! Bevy's camera is three ordinary reflected components: the marker (`Camera2d`), the `Transform`
 //! that places it, and `Projection` — an enum whose current variant holds the numbers that zoom
-//! it. So the camera is reachable with what `docs/host-api.md` already documents under
-//! "Components by name": `Rubevy.find`, `e[:Transform] =`, `e[:Projection] =`.
+//! it. A script can reach all three with what `docs/host-api.md` documents under "Components by
+//! name", and `tests/camera.rs` is that, spelled out. What is spelled out there is awkward,
+//! though: the projection's variant has to be named on every write, a tuple variant takes an
+//! Array and not a Hash, and two zooms in one tick come to one, because a write lands at the end
+//! of the frame.
 //!
-//! The one thing worth reading twice is the write to `Projection`. It is an enum, and the variant
-//! it is in is a *tuple* of one — `Projection::Orthographic(OrthographicProjection { .. })` — so
-//! the value is a one-entry Hash naming the variant, holding the Array of the variant's fields,
-//! holding a partial Hash for the projection itself:
-//!
-//! ```text
-//! cam[:Projection] = { Orthographic: [ { scale: 2.0 } ] }
-//! ```
-//!
-//! The variant has to be the one the component is already in; switching a tuple variant from Ruby
-//! is refused on purpose (`src/reflect.rs`, `apply_enum`). The measurements and the reasoning are
-//! in `docs/worklog/2026-09-20-camera-from-ruby.md`, and `tests/camera.rs` holds the same ground
-//! as assertions.
+//! So rubevy carries an **optional Ruby layer** over it, and the app says whether its scripts get
+//! it — one line, `world.load_and_run(rubevy::layers::CAMERA)` at `Startup`. The script below is
+//! what the same work looks like through it; `src/layers/camera.rb` is the layer itself, and it
+//! is Ruby over `Rubevy.find` and the component writes, with no Rust and no new dependency.
 //!
 //! Headless: this renders nothing, so it wants no window and no GPU. It registers the three types
 //! itself, as `examples/components.rs` registers `Transform` — `MinimalPlugins` registers none of
@@ -33,36 +27,35 @@ use bevy::asset::AssetPlugin;
 use bevy::camera::{Camera2d, OrthographicProjection, Projection};
 use bevy::log::LogPlugin;
 use bevy::prelude::*;
-use rubevy::{MrbAsset, RubevyPlugin, Script, ScriptEnded};
+use rubevy::{Answer, MrbAsset, RubevyPlugin, Script, ScriptEnded, ScriptWorld};
 
 const SCRIPT: &str = r#"
-  cam = Rubevy.find(:Camera2d)[0]
-  Rubevy.log "camera: #{cam.inspect}, components #{cam.components.join(', ')}"
+  cam = Rubevy::Camera.find
+  Rubevy.log "camera: #{cam.inspect}, components #{cam.entity.components.join(', ')}"
 
-  # Reading the projection: a one-entry Hash naming the variant it is in.
-  shown = cam[:Projection]
-  Rubevy.log "projection: #{shown.keys[0]} #{shown[:Orthographic][0][:scale]}x"
+  # Panning. The layer keeps z — in 2D that is the drawing order, not a place — and remembers
+  # where it put the camera, so two moves in one tick both count (the world would still be
+  # answering the value from before the first one, since a write lands at the end of the frame).
+  cam.move_to(100.0, 0.0)
+  cam.pan(20.0, -40.0)
 
-  # Panning is an ordinary partial Transform write; the fields not named keep their values.
-  tf = cam[:Transform]
-  tf[:translation][0] += 120.0
-  tf[:translation][1] -= 40.0
-  cam[:Transform] = tf
+  # Zooming. `zoom 2` is twice as close on a 2D camera and on a 3D one alike: the layer divides
+  # the orthographic `scale` and works the perspective `fov` out through its tangent. Twice,
+  # here, in one tick — which is the other thing the layer holds the magnification for.
+  cam.zoom 2
+  cam.zoom 2
+  Rubevy.log "now at #{cam.position.inspect} at #{cam.scale}x"
 
-  # Zooming is a write into the current variant of the enum.
-  cam[:Projection] = { Orthographic: [ { scale: 2.0 } ] }
+  sleep 0                                  # the clock moves on, and the frame's writes land
+  there = cam.entity[:Transform][:translation]
+  scale = cam.entity[:Projection][:Orthographic][0][:scale]
+  Rubevy.log "the world says #{there.inspect} at scale #{scale}"
+  Rubevy.log "refused: #{cam.rejected_writes.length}"
 
-  sleep 0.05                       # a frame goes by, and with it both writes
-
-  at = cam[:Transform][:translation]
-  Rubevy.log "now at #{at[0]}, #{at[1]} at #{cam[:Projection][:Orthographic][0][:scale]}x"
-
-  # Switching the variant is refused: bevy would have to build the whole new variant out of a
-  # Ruby Hash, which says nothing about types. The line below is logged and skipped, and the
-  # camera stays orthographic.
-  cam[:Projection] = { Perspective: [ { fov: 1.0 } ] }
-  sleep 0.05
-  Rubevy.log "still #{cam[:Projection].keys[0]}"
+  # A question no component can answer — where a point on the window is in the world — is thrown
+  # at the game and answered by it. The layer hands the queue back rather than waiting on it.
+  where = cam.world_at(640.0, 360.0).pop
+  Rubevy.log "the middle of the window is #{where.inspect}"
 "#;
 
 fn main() {
@@ -79,9 +72,14 @@ fn main() {
         .register_type::<Transform>()
         .register_type::<Camera2d>()
         .register_type::<Projection>()
-        .add_systems(Startup, spawn)
-        .add_systems(Update, report_ended)
+        .add_systems(Startup, (add_the_camera_layer, spawn))
+        .add_systems(Update, (answer_world_at, report_ended))
         .run();
+}
+
+/// The whole of taking the layer up. An app that leaves this out has no `Rubevy::Camera`.
+fn add_the_camera_layer(mut world: ResMut<ScriptWorld>) {
+    world.load_and_run(rubevy::layers::CAMERA).expect("the camera layer runs");
 }
 
 fn spawn(mut commands: Commands, mut assets: ResMut<Assets<MrbAsset>>) {
@@ -100,6 +98,33 @@ fn spawn(mut commands: Commands, mut assets: ResMut<Assets<MrbAsset>>) {
     commands.spawn(Script::new(script).with_name("camera"));
 }
 
+/// The answering side of `cam.world_at`, which is the game's: rubevy answers nothing for it, and
+/// a script that popped the queue of a question nobody answers would park for ever. Working the
+/// real answer out wants the window's size and the camera's projection; this one is the shape of
+/// it and not the arithmetic.
+fn answer_world_at(
+    mut world: ResMut<ScriptWorld>,
+    cameras: Query<(&Transform, &Projection), With<Camera2d>>,
+) {
+    for request in world.take_requests() {
+        if request.kind != "camera.world_at" {
+            world.answer(&request, Answer::Nil);
+            continue;
+        }
+        let camera = request.entity_arg(0).and_then(|e| cameras.get(e).ok());
+        let (x, y) = (request.num_or(1, 0.0), request.num_or(2, 0.0));
+        let answer = match camera {
+            Some((at, Projection::Orthographic(o))) => Answer::Text(format!(
+                "({}, {})",
+                at.translation.x + (x as f32 - 640.0) * o.scale,
+                at.translation.y - (y as f32 - 360.0) * o.scale
+            )),
+            _ => Answer::Nil,
+        };
+        world.answer(&request, answer);
+    }
+}
+
 fn report_ended(
     mut ended: MessageReader<ScriptEnded>,
     cameras: Query<(&Transform, &Projection), With<Camera2d>>,
@@ -111,7 +136,7 @@ fn report_ended(
                 Projection::Orthographic(o) => o.scale,
                 _ => f32::NAN,
             };
-            info!("host: the camera is at {:?} at {}x", at.translation, scale);
+            info!("host: the camera is at {:?} with scale {}", at.translation, scale);
         }
         info!("host: script on {:?} ended: {:?} {}", e.entity, e.status, e.value);
         exit.write(AppExit::Success);
