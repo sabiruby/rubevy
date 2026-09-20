@@ -7,8 +7,7 @@ ones those documents carry, and nothing is estimated.
 ## Unreleased
 
 * **What a frame's tick came to, and two instruments that measure what a machine carries** (R5 of
-  `docs/plans/generalize-plan.md`, on branch `generalize`; the merge's commit goes here when the
-  branch comes in — `docs/worklog/2026-09-20-frame-stats.md`, `docs/verification/scale.md`).
+  `docs/plans/generalize-plan.md`, merged in `3e215c1` — `docs/worklog/2026-09-20-frame-stats.md`, `docs/verification/scale.md`).
   A game could ask what one script had spent (`ScriptWorld::stats`) and nothing at all about the
   frame the scripts share: how long the tick took, how much of the budget it used, how many
   questions it answered and how many it had to put off, what its queues lost. Each of those is a
