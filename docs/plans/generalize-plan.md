@@ -178,6 +178,7 @@ rubevy が同梱するが、**読み込むかどうかは app が決める** `.m
    `budget` 200,000 / `frame_time` 8 ms / `overrun` 50 ms の既定（`src/lib.rs:818-820`）、`QUEUE_LIMIT`（R3 で済み）、スクリプトとハンドラの優先度の既定と差、
    ロードパスの既定（`{root}/scripts`）、`$rubevy` の更新、リフレクションの深さや大きさの限度があればそれ、`prelude.rb` の中の数。
    0・1・添字・単位換算（ns ⇄ ms）のように数そのものに意味が無いものは一覧に入れず、入れなかった基準を書く。
+   数だけでなく**埋め込みの既定の名前**（`rubevy-build` の `RUBY_FILES` / `ruby_files.rs` / `.rb`、ロードパスの `scripts`、`$rubevy` のキー）も同じ表に入れる。
 2. **出どころを探す。** 各々について rustdoc、`docs/worklog/`、`docs/plans/`、`git log -S` で「なぜこの値か」を探し、見つかったものは引用つきで、
    見つからないものは**「出どころ不明」とそのまま書く**（もっともらしい理由を後から作らない）。
 3. **分類する。** (a) 不変量（変えると壊れる。`const` のまま、壊れる理由を 1 行）、(b) 既に設定できる（出どころを rustdoc に足すだけ）、
@@ -233,10 +234,11 @@ rubevy を触ったあとの **`web/build.sh` + Playwright の確認**（共通 
 | 段階 | 状況 |
 |---|---|
 | R0 | **済み**（2026-09-20、ブランチ `generalize` の `bf45bde`、`src/` 無変更）。3 つとも書ける: `Rubevy.find(:Camera2d)`、`cam[:Transform] =`、ズームは `cam[:Projection] = { Orthographic: [ { scale: 2.5 } ] }`（変種名の Hash → tuple 変種なので **Array** → 中の struct への部分書き）。通らない形 3 つもテストにした: 変種の切り替え、tuple 変種のフィールドを名前で書く、同じ tick の 2 回のズーム（書きはフレーム末尾）。`tests/camera.rs` 6 件、全体 70 passed。記録は `docs/worklog/2026-09-20-camera-from-ruby.md` |
-| R6 | 実行中（計測が無いので R1〜R5 より先に回す。games の S2 がこれを待っている） |
-| R7 | **sabiruby 側は済み**（2026-09-20、sabiruby のブランチ `declare` の `2f1043f`、worktree `sabiruby-wt-declare`。VM の crate は無変更、unsafe 0、数 0）。`sabiruby_serde::declare`: `Declarations::<T>::install(&mut vm).define(&mut vm, "unit")` → `load_and_run` → `take(&mut vm) -> Vec<(String, T)>`（宣言順、取り出した後 VM に何も残らない — `live_count` が宣言しなかった VM と一致）。重複は `ArgumentError`、上書きは別名の口 `define_replacing`。エラーは `missing field \`scale\` (TypeError) at data.rb:2` の形。読み返しは `expose(&mut vm, "unit_of", table)`（取り出した後の**別の表**。間にホストの検証が入るため）。表は `T` の host store に置く（使われない `Data` tag を型ごとに 1 つ消費）。serde のテスト 20 → 36、workspace 221 → 237、`thumbv7em-none-eabi` で `no_std` ビルド可。**main への取り込みと push は著者の指示待ち**（games が `[patch]` の git 経由で使うには push が要る）。rubevy 側の節と example は R6 の後 |
+| R6 | **済み**（2026-09-20、`generalize` の `cb8bf00`）。`Program::new(prelude, name, body, tail)` と `prelude_lines`、`in_the_authors_lines`（garden の 7 ケースを移した。エラー文の形式はネイティブとブラウザの橋の両方の実物で確かめた — 同じ `CompileError` の `Display` で、違いはファイル名が `playground.rb` に固定されることだけ）、`replace_script`、`EmbeddedHost`（`compile_with` に渡す関数は `Host::compile` と同じ形）、build ヘルパ `rubevy-build`（std のみ・依存 0。repo を workspace にした影響は実測で小: 根の `cargo test` 不変、`Cargo.lock` +4 行、`cargo package --list` 97 ファイルのまま）。101 passed（着手前 81）、wasm の lib ビルド可、依存の追加なし、既存の API は不変。未確認: build.rs → `include!` → `EmbeddedHost` の通し（最初の客は games の S2）。記録は `docs/worklog/2026-09-20-shared-entry-points.md` |
+| R7 | **sabiruby 側は済み**（2026-09-20、sabiruby のブランチ `declare` の `2f1043f`、worktree `sabiruby-wt-declare`。VM の crate は無変更、unsafe 0、数 0）。`sabiruby_serde::declare`: `Declarations::<T>::install(&mut vm).define(&mut vm, "unit")` → `load_and_run` → `take(&mut vm) -> Vec<(String, T)>`（宣言順、取り出した後 VM に何も残らない — `live_count` が宣言しなかった VM と一致）。重複は `ArgumentError`、上書きは別名の口 `define_replacing`。エラーは `missing field \`scale\` (TypeError) at data.rb:2` の形。読み返しは `expose(&mut vm, "unit_of", table)`（取り出した後の**別の表**。間にホストの検証が入るため）。表は `T` の host store に置く（使われない `Data` tag を型ごとに 1 つ消費）。serde のテスト 20 → 36、workspace 221 → 237、`thumbv7em-none-eabi` で `no_std` ビルド可。**main への取り込みと push は著者の指示待ち**（games が `[patch]` の git 経由で使うには push が要る）。**rubevy 側の節と example は `sabiruby-serde` の公開待ち**: rubevy の dev-dependency は crates.io の 0.1.0 で、`declare` が無い版に対して example をコミットすると clone しただけでは `cargo test` が通らなくなる |
 | R1〜R5 | 未着手。計測を伴うので、機械が静かになってから 1 本ずつ |
-| R8〜R10 | 未着手 |
+| R8 | 実行中（R0 が見つけた warn の表示と `host-api.md` の 2 か所もここで直す） |
+| R9〜R10 | 未着手（R9 の前に著者判断 3 つ: 拒まれた書きを知る口、ズームの向き、答え手のいない問い） |
 
 VM 側に残るもの（sabiruby、未計画）: キューごとの待ち手リスト・sleep 期限のヒープ・タスクが自分のいるキューを覚える（待ちタスクの O(N)）、`ireps` の解放。
 
@@ -253,6 +255,10 @@ VM 側に残るもの（sabiruby、未計画）: キューごとの待ち手リ�
 | 09-20 R0 | `host-api.md` の「`DefaultPlugins` does it」: bevy 0.19.1 の `bevy_camera` / `bevy_transform` に `register_type` は無く、登録しているのは `reflect_auto_register` feature。どちらが効いているかは未確認 | `docs/host-api.md:406-408` | rubevy（文書、小） | 計画に足す: R8 で確かめて直す。games は `DefaultPlugins` なので F0 でも確かめる |
 | 09-20 R0 | repo に rustfmt の設定が無く、`cargo fmt --check` が既存コードで落ちる。担当が `cargo fmt` を走らせると無関係な差分が出る | repo の根 | repo の作法 | **著者判断待ち**: 設定を置くか「fmt は使わない」と書くか。それまで担当には「`cargo fmt` を走らせない」と伝える |
 | 09-20 R0 | 誰も答えない `Rubevy.ask(...).pop` は永久に park する。任意の Ruby 層の `world_at` に答え手がいないときの振る舞いが決まらない | `Rubevy.ask` | rubevy（口の設計） | R9 は「投げっぱなしでキューを返す」で始める。答え手の有無を聞ける口は**著者判断待ち** |
+| 09-20 R6 | **`EmbeddedHost` を `set_host` したら `set_load_path` も書き直す必要があるのに、型に現れない**。プラグインは `{root}/scripts` と `{root}` を入れるので、忘れると `require` が静かに LoadError になり、ブラウザでだけ起きる | `src/lib.rs` の `RubevyPlugin::build` | rubevy（口の設計） | **著者判断待ち**: host とパスを一緒に受ける口（例 `ScriptWorld::embed(host, paths)`）を足すか。S2 の実感を見てから |
+| 09-20 R6 | `Program::new(prelude, name, body, tail)` は `&str` 4 本で、取り違えても型が通る（`name` と `body` を逆にすると静かに 1 行のプログラムができる） | `src/source.rs` | rubevy（API の使いにくさ） | S2 で使ってみてから。直すならビルダを**足す** |
+| 09-20 R6 | `tests/embedded_host.rs` が生成物 `assets/scripts/helper.mrb`（Docker の mrbc で作る）を `include_bytes!` している。`helper.rb` を変えて作り直し忘れると古いバイトコードで通り続ける | `tests/embedded_host.rs`、`tools/compile_scripts.sh` | repo の作法 | 見送り（今ある他のテストと同じ性質）。R10 のついでに、生成物が古いと落ちる確認を足せるか見る |
+| 09-20 R6 | `rubevy-build` の既定の**名前** 3 つ（`RUBY_FILES` / `ruby_files.rs` / `.rb`）の出どころは「2 本のゲームがそう書いていた」だけ。数ではないが、R10 の一覧に入れるのか | `rubevy-build/src/lib.rs` | 計画書（R10 の範囲） | 計画に足す: R10 は数だけでなく「埋め込みの既定の名前」も一覧に入れる（全部引数で変えられることは確認済み） |
 | 09-20 R7 | **キーワードを 1 つも書かない宣言（`item :iron_plate`）は `define_fn` では受けられない**（引数の数が固定。`src/convert.rs:440`）。`define_closure` で 1〜2 個を受ける。調査の「`(Symbol, Serde<T>)` で受けられる」は半分だけ正しかった | 調査 §2、計画 3.7 | 計画書の前提 | `Declarations` が吸収済み。rubevy 側の example はこの口を使うので影響なし |
 | 09-20 R7 | 複数行に分けた宣言のエラー行は**最後の行**（SEND 命令の行番号）。「宣言の頭」ではなく閉じる行を指す | sabiruby の行番号の持ち方 | 本の素材／rubevy の文書 | R7 の rubevy 側の節に 1 行。book repo の findings に写す |
 | 09-20 R7 | `Vm::backtrace(Some(mid))` はネイティブ名を先頭に足すが、例外が抱える `Exception#backtrace` には入らない（mruby は C フレームを直下の Ruby フレームに置く） | sabiruby `src/vm.rs:2570-2574`、`:2589-2600` | VM（小さな食い違い） | **著者判断待ち**（VM 本体の話） |
