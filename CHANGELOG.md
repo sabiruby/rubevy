@@ -6,8 +6,7 @@ ones those documents carry, and nothing is estimated.
 
 ## Unreleased
 
-* **What R9's first readers walked into** (R10 of `docs/plans/generalize-plan.md`, on branch
-  `generalize`; the merge's commit goes here when the branch comes in —
+* **What R9's first readers walked into** (R10 of `docs/plans/generalize-plan.md`, merged in `06a9d32` —
   `docs/worklog/2026-09-20-numbers-inventory.md`, `docs/host-api.md`). Four small things the
   camera layer and the entry points left behind, and the documents that were missing beside
   them.
@@ -47,8 +46,7 @@ ones those documents carry, and nothing is estimated.
   `docs/README.md`, that **`cargo fmt` is not run in this repository** and why.
 
 * **Every number rubevy holds, written down — and the last one that could not be changed, made
-  settable** (R10 of `docs/plans/generalize-plan.md`, on branch `generalize`; the merge's commit
-  goes here when the branch comes in — `docs/numbers.md`,
+  settable** (R10 of `docs/plans/generalize-plan.md`, merged in `06a9d32` — `docs/numbers.md`,
   `docs/worklog/2026-09-20-numbers-inventory.md`). The `const`s and the numeric literals of
   `src/`, `rubevy-build/` and the two standing instruments were swept mechanically (33 `const`
   declarations, 361 lines holding a literal) and the **44** that are numbers or fixed names
