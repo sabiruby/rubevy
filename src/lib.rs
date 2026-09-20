@@ -335,7 +335,8 @@ pub struct FrameStats {
     ///
     /// The tasks still waiting for their `Rubevy.next_frame` when the waking ran out of frame
     /// time are in here too, and only those: a task that asked for the next frame *during* this
-    /// tick is waiting because it said so, which is not a backlog and is not counted
+    /// tick is waiting because it said so, and so is everything waiting through a paused frame
+    /// (`budget = 0`, which wakes nobody). Neither is a backlog and neither is counted
     /// (`wake_next_frame`).
     pub carried_reflect: u32,
     /// The same for the game's own kinds ([`ScriptWorld::answer_in_tick`]).
@@ -2741,13 +2742,20 @@ fn tick_scripts<M: 'static>(world: &mut World, tasks: &mut RunningTasks<M>) {
         // not one instruction, so an answer pushed here would sit in a queue carrying the number
         // of a frame the script never saw. A pause is not a frame the scripts lived through
         // (`ScriptWorld::budget`), and this follows the clock above in saying so.
+        let paused = scripts.budget == 0;
         let mut reflect_answers =
-            if scripts.budget > 0 { wake_next_frame(scripts, frame_no, deadline_ns, &mut clock) } else { 0 };
+            if paused { 0 } else { wake_next_frame(scripts, frame_no, deadline_ns, &mut clock) };
         // Whoever is still waiting *at this moment* asked on an earlier frame and was not reached
         // before the frame time was up — a backlog, and the only part of the queue that is one.
         // The tasks that ask later in this tick are waiting on purpose and are not counted
         // (`FrameStats::carried_reflect`).
-        let carried_waiters = scripts.next_frame_waiters.len() as u32;
+        //
+        // A paused frame has no backlog either, although it reached nobody: what is waiting in a
+        // pause is waiting because the game stopped the scripts, and a `carried_reflect` that
+        // showed the whole queue every paused frame would be saying "the tick cannot keep up"
+        // about a tick that was asked to do nothing. The rest of a paused frame's numbers say the
+        // same thing by being zero.
+        let carried_waiters = if paused { 0 } else { scripts.next_frame_waiters.len() as u32 };
         loop {
             let left = scripts.budget.saturating_sub(spent);
             if left == 0 {

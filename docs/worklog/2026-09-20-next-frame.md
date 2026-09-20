@@ -245,3 +245,13 @@ R9 の「直前に書きのあったフレーム」はそのまま。`next_frame
    （テスト `two_tasks_wait_for_the_same_frame`）。当たり前だが、`next_frame` の戻り値を
    「自分だけの通し番号」と勘違いする利用者はいそうなので、`prelude.rb` の rustdoc は
    「`$rubevy[:frame]` が持っているのと同じ Integer」と書いてある。
+
+## 追記: 一時停止のフレームは backlog ではない
+
+上の「`FrameStats` の数え方」を書いたあとで、止めている間（`budget == 0`）の扱いが 1 つ
+抜けているのに気づいた。起こさないのは正しいが、**待っている人数を `carried_reflect` に
+数えてしまっていた**。止めているフレームは「tick が追いつけなかった」のではなく
+「ゲームがスクリプトを止めた」のだから、HUD にそのフレームだけ待ち人数が出るのは嘘に近い
+（止めているフレームの他の数 — `rounds`、`instructions`、`reflect_answers` — は全部 0 である）。
+止めている間は 0 を数えることにして、テストにも 1 行足した
+（`a_paused_frame_is_not_the_next_frame`）。

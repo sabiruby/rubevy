@@ -214,8 +214,14 @@ fn a_paused_frame_is_not_the_next_frame() {
     let asked_in = said(&app, "asked")[0][0];
 
     app.world_mut().resource_mut::<ScriptWorld>().budget = 0;
+    app.world_mut().resource_mut::<Carried>().0.clear();
     frames(&mut app, PAUSED);
     assert!(said(&app, "woke").is_empty(), "nobody is woken by a paused frame");
+    let carried = app.world().resource::<Carried>().0.clone();
+    assert!(
+        carried.iter().all(|&n| n == 0),
+        "and a paused frame does not call what is waiting a backlog: {carried:?}"
+    );
 
     app.world_mut().resource_mut::<ScriptWorld>().budget = 200_000;
     frames(&mut app, 2);
