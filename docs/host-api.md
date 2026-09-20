@@ -383,6 +383,16 @@ something needs it. An argument that is a Hash or an Array can be seen for what 
 * The questions are answered in the order they were asked in, and the loop ends the way it always
   did — when a round answers nobody, or when the frame's budget or its `frame_time` is spent. A
   question left over from a spent frame is answered first on the next one.
+* **The frame time ends the answering too, and the closure is on the inside of it.** The tick
+  looks at the clock after every answer, so a round of a hundred questions to a closure that
+  takes a hundred microseconds each stops where `frame_time` says and the rest are answered on
+  the next frame, in order ("A read costs no frame, except at the tail of a frame that ran out
+  of time", below). Two things follow for a game's closure. It is charged to the frame it runs
+  in, so a closure that takes longer than `frame_time` by itself makes a tick that passes
+  `frame_time` by that much — a tick always makes at least one answer, or a run of the VM that
+  used the whole frame time would leave every task parked for ever. And the game's kinds and
+  rubevy's own are counted apart: a late tick makes one answer of each, so neither road starves
+  the other.
 * `Rubevy::Proxy` is sugar for `Rubevy.ask`, so `garden.nearest(:Plant)` becomes synchronous by
   registering `"garden.nearest"`; the Ruby side does not change.
 * What the closure costs comes out of the scripts' own frame, since it runs in the middle of it.
@@ -470,6 +480,30 @@ The loop stops when a round answers nobody (waking no one, another run would fin
 asleep), or when the frame's budget of instructions or its `frame_time` is spent. It has no limit
 of its own and needs none: a script cannot ask a question without spending instructions on the
 asking, so the budget the frame already had bounds the rounds.
+
+**A read costs no frame, except at the tail of a frame that ran out of time** (since
+2026-09-20). The answering is measured against `frame_time` too, not only the runs of the VM:
+after every answer the tick looks at the clock, and once the frame time is up the questions it
+has not reached are put off to the next frame, where they are taken **before** anything that
+frame asks. So the promise is exact:
+
+* A script whose question is reached inside the frame time reads the value in the line that
+  asked for it, as it always did.
+* A script whose question was still in the queue when the time ran out reads it in the same
+  line, on the **next** frame. Nothing is lost, nothing is asked twice, and a question that is
+  put off is not put off again in favour of one asked later — the order is first in, first out
+  across frames as well as within one.
+* Which scripts those are is not a matter of who asked first but of where the round ended: a
+  thousand tasks that all park on a read in the same round are answered in the order they parked
+  in, and the frame time decides where the line is drawn.
+
+This is what makes `frame_time` a bound on the tick rather than a suggestion: with three
+thousand scripts reading and asking, a `frame_time` of 8 ms used to give a tick of 14.9 ms and
+one of 1 ms a tick of 3.3 ms (the whole round was answered whatever the clock said); the same
+runs now give 8.3 ms and 1.4 ms. What a tick can still pass `frame_time` by is in the rustdoc of
+the field and under "Time" below — the short of it is one answer, plus whatever the VM's own
+notice of the deadline costs. The measurements are in
+`docs/worklog/2026-09-20-frame-time-as-a-limit.md`.
 
 Nothing of the world crosses into the VM to make this work. A native is handed `&mut Vm` and
 nothing else, exactly as before; the world and the VM are two arguments of one function of
@@ -763,11 +797,44 @@ has too):
 | `ScriptWorld` field | default | what it does |
 |---|---|---|
 | `budget` | 200,000 instructions | checked between timeslices, as before; **zero pauses the scripts** |
-| `frame_time` | 8 ms | the running timeslice is cut short once the frame's scripts have taken this long |
+| `frame_time` | 8 ms | the tick's bound: the running timeslice is cut short once the frame's scripts have taken this long, and the answering stops there too |
 | `overrun` | 50 ms | a script that cannot be switched out — inside a native waiting for a block, `sort { }` or `Array.new(1) { loop { } }` — gets `Task::Overrun` past this, and the frame comes back |
 
 All three are fields of `ScriptWorld<M>`, so an app with a second VM has a second set of them and
 nothing adds the two together: the worst case per frame is the sum ("Two VMs in one app").
+
+**`frame_time` bounds the tick, and here is what it does not cover.** A tick is a loop — run the
+ready tasks, answer what they parked on, run them again — and until 2026-09-20 the clock was
+looked at only at the head of a round, so a round that had parked three thousand tasks then made
+three thousand answers however late it was. Now the answering is measured against the same
+clock. What is still outside the number, which is to say by how much a tick can pass it:
+
+* **One answer.** A late tick still makes one answer of rubevy's own kinds and one of the
+  game's, because the run of the VM before them may have used the whole frame time by itself,
+  and a tick that answered nobody would leave every task parked on its question for ever (a
+  script with no `sleep` and no question in it does exactly that to the others; `tests/frame_time.rs`
+  is that test). The overshoot is the dearest single answer: a couple of microseconds for a
+  component or resource read, longer for `Rubevy.find`, whatever the game wrote for an
+  `answer_in_tick` closure.
+* **The VM's own notice of the deadline.** `Vm::task_run_limits` is handed what is left of the
+  frame and comes back when it is gone, but not to the nanosecond: with three thousand tasks
+  waiting, a tick whose scripts ask *nothing at all* still takes about 2.9 ms under a
+  `frame_time` of 1 ms. That overshoot is inside the VM's scheduler — every push and every wake
+  walks the waiting tasks — and rubevy cannot shorten it from the outside; it is on SabiRuby's
+  list. At a few hundred tasks it is not there at all.
+* **A second VM**, as above: nothing adds the two `frame_time`s together.
+* **Everything in the frame that is not the tick.** Starting the scripts of new entities
+  (`Vm::load` and a `task_spawn` an entity), carrying out their commands, the writes at the end
+  of the frame, and what the game publishes to them are all systems of their own.
+
+The numbers above are of one machine on one day (`docs/worklog/2026-09-20-frame-time-as-a-limit.md`,
+which has the before-and-after table); what they are on yours is what the instruments say.
+
+**`Time<Virtual>` is readable by name.** Bevy's `TimePlugin` registers its four `Time`s, so a
+script can read the game's clock as an ordinary resource — `Rubevy.resource("Time<Virtual>")`,
+and `"Time<()>"` for the default one ("Resources by name"). `$rubevy` is still the cheap way to
+ask what frame it is; the resource is there when a script wants what the *game* calls time,
+including a pause the game made with `Time<Virtual>`.
 
 **Pausing.** `world.budget = 0` is the pause: the VM checks the budget at the head of its own
 loop, so not one instruction runs. While it is zero the plugin also stops moving mruby-task's
