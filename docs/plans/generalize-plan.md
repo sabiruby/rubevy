@@ -241,7 +241,9 @@ rubevy を触ったあとの **`web/build.sh` + Playwright の確認**（共通 
 | R3 | 実行中 |
 | R4〜R5 | 未着手。計測を伴うので 1 本ずつ |
 | R8 | **済み**（2026-09-20、`generalize` の `52bfe7b`）。`Rubevy.resource(:Score)`（tick の中で返る、無ければ nil）と `Rubevy.set_resource(:Score, { points: 8.0 })`（名前を挙げた分だけ、フレーム末尾）。ジェネリックは型引数ごと綴る（`"Time<Virtual>"`。`Time` は `Time<()>` で、`:Time` は nil）。Rust の公開 API は 0 個増、依存の追加なし、unsafe 0、新しい数 0。R0 の 3 件も直した（warn のコロン 18 か所、tuple 変種の書きの文書、型の登録は `reflect_auto_register` feature だと確かめて `host-api.md` を差し替え — `bevy_time` / `bevy_pbr` のように手で登録するプラグインも残る）。109 passed（着手前 101）、wasm の lib ビルド可。読み 1 回: component 2.38〜2.45 µs / resource 2.24〜2.66 µs（静かな機械、3 回。差はぶれの中。止めているのは命令の予算で、75 命令と 69 命令）。記録は `docs/worklog/2026-09-20-resources-by-name.md` |
-| R9〜R10 | 未着手（R9 の前に著者判断 3 つ: 拒まれた書きを知る口、ズームの向き、答え手のいない問い） |
+| R9 | 未着手（R3〜R5 の後）。**著者判断済み（2026-09-20）**: (1) `zoom 2` は 2 倍に寄る（大きく見える）。2D は `scale`、3D は `fov` に直して同じ意味にする。(2) **拒まれた書きをスクリプトから読める口を足す** — component と resource の両方、直前のフレームに拒まれた書きの一覧。(3) 答え手のいない問いは、投げっぱなしでキューを返す形で始める |
+| R10 | 未着手 |
+| 取り込み | **2026-09-20、著者「取り込みも push も今やってよい」**: R0・R1・R2・R6・R8 を main に取り込み（merge `fa1b7e3`、CHANGELOG に SHA）、push 済み（`33d851a`）。sabiruby は `declare` を main に取り込み（`944b72b`）push 済み — `HostStore::take` の「返さずに閉じる」使い方は、著者判断で rustdoc に 1 段落足して認めた（VM のコードは無変更）。crates.io への公開はしていない（R7 の rubevy 側はそれを待つ）。以後もレビュー済みの段階から順に取り込んで push する |
 
 VM 側に残るもの（sabiruby、未計画）: キューごとの待ち手リスト・sleep 期限のヒープ・タスクが自分のいるキューを覚える（待ちタスクの O(N)）、`ireps` の解放。
 
@@ -253,7 +255,7 @@ VM 側に残るもの（sabiruby、未計画）: キューごとの待ち手リ�
 | 日付・段階 | 気づいた点 | どこ | 属する先 | 状況（計画に足した／著者判断待ち／見送り・理由） |
 |---|---|---|---|---|
 | 09-20 R0 | enum の書きが失敗したときの warn が `not written whole: : the fields of …` とコロンで始まる（component 直下では `path` が空） | `src/reflect.rs:460-462` ほか `:449` `:456` `:486` `:489` | rubevy（表示のバグ） | 計画に足す: R8 のついでに直す |
-| 09-20 R0 | 書きが拒まれたことがスクリプトから分からない（`warn!` だけ、`Entity#set` は渡した値を返す）。カメラ層で変種が想定と違うと `zoom` が黙って効かない | `src/lib.rs:2124-2127`、`src/prelude.rb:40-43` | rubevy（口の設計） | **著者判断待ち**: 「最後の書きの問題」を読める口を足すか。R9 の前に |
+| 09-20 R0 | 書きが拒まれたことがスクリプトから分からない（`warn!` だけ、`Entity#set` は渡した値を返す）。カメラ層で変種が想定と違うと `zoom` が黙って効かない | `src/lib.rs:2124-2127`、`src/prelude.rb:40-43` | rubevy（口の設計） | **著者判断済み（09-20）: 足す**。R9 の最初に、component と resource の両方を見る形で |
 | 09-20 R0 | `host-api.md` に tuple 変種の書きの規則が無い（Array でしか書けない）。読みの表も struct 変種と一括り | `docs/host-api.md:422-436` | rubevy（文書と実物のずれ） | 計画に足す: R8 で 1 文 |
 | 09-20 R0 | `host-api.md` の「`DefaultPlugins` does it」: bevy 0.19.1 の `bevy_camera` / `bevy_transform` に `register_type` は無く、登録しているのは `reflect_auto_register` feature。どちらが効いているかは未確認 | `docs/host-api.md:406-408` | rubevy（文書、小） | 計画に足す: R8 で確かめて直す。games は `DefaultPlugins` なので F0 でも確かめる |
 | 09-20 R0 | repo に rustfmt の設定が無く、`cargo fmt --check` が既存コードで落ちる。担当が `cargo fmt` を走らせると無関係な差分が出る | repo の根 | repo の作法 | **著者判断待ち**: 設定を置くか「fmt は使わない」と書くか。それまで担当には「`cargo fmt` を走らせない」と伝える |
@@ -267,7 +269,7 @@ VM 側に残るもの（sabiruby、未計画）: キューごとの待ち手リ�
 | 09-20 R1 | 計測器の P=1 の列には計器の値段（`Instant::now()` 2 回、100〜1300 ns）がそのまま乗る | `examples/factory_events.rs`（未コミットの計測器） | rubevy（R5 の材料） | 計画に足す: R5 で常設するとき、1 フレームぶんをまとめて測って割るか、P=1 を出さない |
 | 09-20 R1 | `Subscription.entity` が `Option<Entity>` なのに `None` は作られない（作る場所は `Rubevy.subscribe` の 1 か所で、エンティティが無ければ `ArgumentError`） | `src/lib.rs` の `Subscription` | rubevy（型が緩い、非公開） | 見送り（非公開の型。R3 が同じ場所を触るとき、ついでに直してよい） |
 | 09-20 R1 | `ScriptWorld::publish` の rustdoc は前から「誰も購読していない名前には何も積まれないので自由に publish してよい」と書いていた。R1 の前は、その「自由に」が購読の総数ぶんかかっていた。文書のほうが先に正しかった例 | `src/lib.rs` の `publish` の rustdoc | 本の素材 | book の findings に写す |
-| 09-20 R8 | **書きが拒まれたことが分からない問題が 2 か所になった**（component と resource。どちらも `warn!` だけで Ruby には nil） | `src/lib.rs` の `apply_component_writes` / `apply_resource_writes` | rubevy（口の設計） | **著者判断待ち**（R0 の同じ行と 1 つの判断）。足すなら両方を見る形で |
+| 09-20 R8 | **書きが拒まれたことが分からない問題が 2 か所になった**（component と resource。どちらも `warn!` だけで Ruby には nil） | `src/lib.rs` の `apply_component_writes` / `apply_resource_writes` | rubevy（口の設計） | **著者判断済み（09-20）: 足す**（R0 の同じ行と 1 つの判断）。R9 の最初に |
 | 09-20 R8 | `reflect_cache` / `resource_cache` は、型が登録し直されると古いまま（ホットリロードや mod のロード順で起きうる。普通のゲームでは起きない） | `src/lib.rs` | rubevy（既存の性質） | 見送り。R10 でキャッシュの寿命を rustdoc に 1 行 |
 | 09-20 R8 | resource の読みは `$rubevy`（frame / delta / time）と役割が重なる。どちらを勧めるか | `docs/host-api.md` | 計画書（R10 の範囲） | 計画に足す: R10 で `$rubevy` のキーを棚卸しするときに書く |
 | 09-20 R8 | `host-api.md` の「Time」節が `Time<Virtual>` を名前で読めることを知らない | `docs/host-api.md` | 文書 | 計画に足す: R4 がこの節を書き直すときに 1 行 |
@@ -280,6 +282,6 @@ VM 側に残るもの（sabiruby、未計画）: キューごとの待ち手リ�
 | 09-20 R7 | **キーワードを 1 つも書かない宣言（`item :iron_plate`）は `define_fn` では受けられない**（引数の数が固定。`src/convert.rs:440`）。`define_closure` で 1〜2 個を受ける。調査の「`(Symbol, Serde<T>)` で受けられる」は半分だけ正しかった | 調査 §2、計画 3.7 | 計画書の前提 | `Declarations` が吸収済み。rubevy 側の example はこの口を使うので影響なし |
 | 09-20 R7 | 複数行に分けた宣言のエラー行は**最後の行**（SEND 命令の行番号）。「宣言の頭」ではなく閉じる行を指す | sabiruby の行番号の持ち方 | 本の素材／rubevy の文書 | R7 の rubevy 側の節に 1 行。book repo の findings に写す |
 | 09-20 R7 | `Vm::backtrace(Some(mid))` はネイティブ名を先頭に足すが、例外が抱える `Exception#backtrace` には入らない（mruby は C フレームを直下の Ruby フレームに置く） | sabiruby `src/vm.rs:2570-2574`、`:2589-2600` | VM（小さな食い違い） | **著者判断待ち**（VM 本体の話） |
-| 09-20 R7 | `HostStore::take` を「返さない」使い方（番号を手放さず値だけ取り上げる）は rustdoc が想定していない（「借りた側が `restore` する」）。今回の `Declarations::take` はこの使い方 | sabiruby `src/host_store.rs:124-138` | VM（rustdoc）／今回の設計の前提 | **著者判断待ち**: この使い方を認めて rustdoc に書くか、host store に「取り出して閉じる」口を足すか |
+| 09-20 R7 | `HostStore::take` を「返さない」使い方（番号を手放さず値だけ取り上げる）は rustdoc が想定していない（「借りた側が `restore` する」）。今回の `Declarations::take` はこの使い方 | sabiruby `src/host_store.rs:124-138` | VM（rustdoc）／今回の設計の前提 | **著者判断済み（09-20）: 使い方を認めて rustdoc に書く**。sabiruby `c38f0e2`（コード無変更）、main に取り込み push 済み |
 | 09-20 R7 | `tools/check_no_std.sh` は VM の lib しか見ていない。`sabiruby-serde` も `no_std` なのに対象外 | sabiruby `tools/check_no_std.sh:5-6` | sabiruby（確認の網） | **著者判断待ち**（小。対象に足すだけ） |
-| 09-20 R0 | ズームの向き（`zoom 2` は寄るのか引くのか）と、2D は `scale`・3D は `fov` という数の違い | R9 の設計 | rubevy（Ruby 層） | **著者判断待ち**（R9 の前） |
+| 09-20 R0 | ズームの向き（`zoom 2` は寄るのか引くのか）と、2D は `scale`・3D は `fov` という数の違い | R9 の設計 | rubevy（Ruby 層） | **著者判断済み（09-20）**: `zoom 2` は 2 倍に寄る。2D は `scale`、3D は `fov` に直して同じ意味に |
