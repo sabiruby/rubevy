@@ -19,6 +19,7 @@ command behind and the `drain_commands` system carries it out later in the same 
 | `Rubevy.move_to x, y, z` | the script's own entity is moved |
 | `Rubevy.set_position entity, x, y, z` | any entity is moved |
 | `entity[:Transform] = hash` | the fields the Hash names are written over that component |
+| `Rubevy.set_resource :Score, hash` | the fields the Hash names are written over that resource |
 
 ## What an entity is, on the Ruby side
 
@@ -404,12 +405,20 @@ Rubevy.find(:Npc)               # every entity with that component, as Rubevy::E
 ```
 
 **What a type has to do to be there.** `#[derive(Reflect)]`, `#[reflect(Component)]`, and
-`app.register_type::<T>()`. Bevy's own types are registered by the app — `DefaultPlugins` does
-it, and `MinimalPlugins` does not, so `examples/components.rs` names `Transform` itself (in
-bevy 0.19 even `TransformPlugin` only propagates transforms; the automatic registration is
-bevy's `reflect_auto_register` feature, which this crate does not turn on). A type nobody
-registered is not an error on the Ruby side: the component reads as `nil`, `has?` answers
-`false`, and it is not in `components`.
+`app.register_type::<T>()`. A type nobody registered is not an error on the Ruby side: the
+component reads as `nil`, `has?` answers `false`, and it is not in `components`.
+
+**Where Bevy's own types come from is a feature, not a plugin** (checked against bevy 0.19.1 on
+2026-09-20). `bevy_transform`, `bevy_camera`, `bevy_sprite`, `bevy_ui`, `bevy_input` and
+`bevy_window` contain no `register_type` call at all any more; what registers their types is
+bevy's `reflect_auto_register` feature, which puts every `Reflect` type in the build into the
+registry `App::default()` starts with (`bevy_app-0.19.1/src/app.rs:113-120`). It is part of
+bevy's `default_app` feature and so of bevy's default features, which is why a game built on
+`DefaultPlugins` finds `Transform` there — and why rubevy's own tests do not: this crate takes
+bevy with `default-features = false`, so `examples/components.rs` names `Transform` itself. A
+few plugins do still register by hand: `TimePlugin` registers the four `Time`s
+(`bevy_time-0.19.1/src/lib.rs:76-79`), which is why `Time<Virtual>` is reachable by name under
+`MinimalPlugins` with the feature off (`tests/resources.rs`).
 
 **What a value looks like.**
 
@@ -420,7 +429,8 @@ registered is not an error on the Ruby side: the component reads as `nil`, `has?
 | tuple struct, tuple, array, list, set | Array |
 | map | Hash |
 | enum, unit variant | the variant's name as a Symbol (`:Hidden`) |
-| enum, tuple or struct variant | a one-entry Hash, `{Srgba: {red: …}}` |
+| enum, struct variant | a one-entry Hash whose value is a **Hash** of the fields, `{Srgba: {red: …}}` |
+| enum, tuple variant | a one-entry Hash whose value is an **Array** of the fields, `{Orthographic: [{scale: 1.0}]}` |
 | numbers, `bool`, String, `char` | the Ruby ones |
 | `Entity` | a `Rubevy::Entity` object, not a number |
 | anything else opaque | nil |
@@ -434,6 +444,16 @@ value handed to it, and a Ruby Hash says nothing about types, so a tuple or stru
 only have its fields written while it is already the current one. A field that cannot take what
 it was given is logged with its path (`translation.x: takes a number`) and skipped; the rest of
 the write still happens.
+
+**A variant's fields are written in the shape the read answers**, and the two variants differ:
+a *struct* variant takes the Hash of names, a *tuple* variant takes the Array —
+`cam[:Projection] = { Orthographic: [ { scale: 2.5 } ] }` zooms a 2D camera, where the outer
+one-entry Hash names the variant, the Array is `Projection::Orthographic(..)`'s one positional
+field, and the inner Hash is an ordinary partial write of the `OrthographicProjection` struct
+(`near`, `far`, `scaling_mode` and the rest keep their values). A tuple variant's field
+**cannot be named**: `{ Orthographic: { "0" => … } }` is refused with `no such field`, because a
+tuple variant's fields have no names in bevy_reflect, not even `"0"`. `tests/camera.rs` holds
+both shapes, and `docs/worklog/2026-09-20-camera-from-ruby.md` is where it was worked out.
 
 **A read costs no frame** (since 2026-09-17). `e[:Transform]` is still `Rubevy.ask` under a nicer
 name, and the task is still parked on a queue while the question is out — but the question is
@@ -478,10 +498,10 @@ The measurements are in `docs/worklog/2026-09-17-sync-reads.md`, and `tests/sche
 the frames from the script's own side — zero for these, one for the questions the game answers,
 in the same file.
 
-The four kinds rubevy answers itself — `component.get`, `component.has`, `components`,
-`entities.with` — never reach `ScriptWorld::take_requests`: they are sorted out where the
-request is made, so a game's answering system sees only its own. A game that wants those names
-picks others.
+The five kinds rubevy answers itself — `component.get`, `component.has`, `components`,
+`entities.with`, `resource.get` — never reach `ScriptWorld::take_requests`: they are sorted out
+where the request is made, so a game's answering system sees only its own. A game that wants
+those names picks others.
 
 **Why a read can wait inside `[]`.** Short as the wait is now, the task really is parked in the
 middle of `[]`, and that took something of the VM. mrbc folds a one-argument `[]` into
@@ -494,6 +514,46 @@ can be parked in. `e[:Transform]` is the spelling; `e.get(:Transform)` is the sa
 because spelling the round trip out reads better where it matters. The Ruby side of all this is
 `src/prelude.rb`, compiled to `.mrb` and run when the VM starts, so a script has these without
 requiring anything.
+
+## Resources by name
+
+A resource is read and written the way a component is, with the entity left out of it:
+
+```ruby
+s = Rubevy.resource(:Score)              # {points: 7.0, best: 12.0}, or nil
+Rubevy.set_resource(:Score, { points: s[:points] + 1.0 })   # `best` is not named, so it stays
+```
+
+Everything the section above says about values holds here — the same table of what a struct, a
+`Vec3`, an enum or an `Entity` looks like, the same partial write, the same path in the warning
+when a field cannot take what it was given. **A read costs no frame**: `Rubevy.resource` is
+answered inside the tick that asked it, out of the same `&World`, in the same gap between two
+runs of the VM as `e[:Transform]`. **A write lands at the end of the frame**
+(`apply_resource_writes`, right after `apply_component_writes`), so a read after a write in the
+same tick answers the old value — read, decide, write, as everywhere else.
+
+**What a type has to do to be there.** `#[derive(Resource, Reflect)]`, **`#[reflect(Resource)]`**,
+and `app.register_type::<T>()`. The `#[reflect(Resource)]` is what makes the difference between
+a resource and a component here: in Bevy 0.19 a resource *is* a component, kept on an entity of
+its own, and `ReflectResource` carries no functions at all — it is the type's own word that it
+is a resource. rubevy asks for that word, so `Rubevy.resource(:Transform)` is `nil` even though
+`Transform` is registered and really is on entities. Four things are `nil` and none of them is
+an error: a type nobody registered, a type that is not a resource, a resource nothing has
+inserted into the world yet, and a name of no type at all.
+
+**The name is the short type path**, exactly as a component's is — `Score`, and the whole path
+(`my_game::Score`) where two types share the short one. A **generic** type carries its
+parameters in that name, and a defaulted parameter is written out rather than left off: bevy's
+`Time` is `Time<()>`, so `Rubevy.resource("Time<()>")` finds it and `Rubevy.resource(:Time)`
+does not. `Rubevy.resource("Time<Virtual>")` is the one a game usually wants. Names with `<` in
+them need quoting on the Ruby side (`"Time<Virtual>"` or `:"Time<Virtual>"`); a String and a
+Symbol are the same thing to the call.
+
+A game answers nothing for this: `resource.get` is one of the kinds rubevy answers itself, so it
+never reaches `ScriptWorld::take_requests`. `tests/resources.rs` is the whole of it, including a
+second VM under a name tag reading and writing the app's one resource, and
+`tests/read_cost.rs::a_resource_read_beside_a_component_read` is the `#[ignore]`d instrument
+that says what the extra lookup costs on the machine it is run on.
 
 ## Events
 

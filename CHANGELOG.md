@@ -6,6 +6,34 @@ ones those documents carry, and nothing is estimated.
 
 ## Unreleased
 
+* **Resources by name** (R8 of `docs/plans/generalize-plan.md`, on branch `generalize`; the
+  merge's commit goes here when the branch comes in —
+  `docs/worklog/2026-09-20-resources-by-name.md`). `Rubevy.resource(:Score)` reads a resource as
+  a Hash of its fields and `Rubevy.set_resource(:Score, { points: 8.0 })` writes the fields it
+  names — the component road with the entity left out of it, and the same rules throughout: the
+  read is answered inside the tick that asked it (no frame), the write lands at the end of the
+  frame (`apply_resource_writes`, beside `apply_component_writes`), an unreachable name is `nil`
+  rather than an error, and the game never sees the question. A type is reachable with
+  `#[derive(Resource, Reflect)]`, `#[reflect(Resource)]` and `register_type`: in Bevy 0.19 a
+  resource *is* a component on an entity of its own, so `ReflectResource` — a marker with no
+  functions at all — is taken as the type's word that it is a resource, and
+  `Rubevy.resource(:Transform)` is `nil`. Names are the component's names, so a generic type
+  carries its parameters (`"Time<Virtual>"`, and `Time` is `Time<()>`). `tests/resources.rs`
+  (8 tests, including a second VM under a name tag) and the `#[ignore]`d
+  `tests/read_cost.rs::a_resource_read_beside_a_component_read`, which measured the two reads at
+  the same 2.2–2.7 µs and the Ruby of the asking 6 instructions apart. Nothing was added to
+  `[dependencies]`; the public Rust API is unchanged.
+
+* **Three things R0 wrote down, fixed** (same branch and worklog). A write refused at the top of
+  a component no longer reports itself with a stray colon (`was not written whole: : the fields
+  of …`): `src/reflect.rs` now leaves the prefix off where there is no path inside the value, as
+  `join` always did. `docs/host-api.md` says how a tuple variant's fields are written (the Array
+  the read answers, never by name) and splits the two enum rows of the read table. And the claim
+  that `DefaultPlugins` registers Bevy's own types is replaced by what the sources say: in bevy
+  0.19.1 it is the `reflect_auto_register` feature, part of bevy's default features and off in
+  this crate, while a few plugins (`TimePlugin`) still register by hand — which is what
+  `tests/resources.rs` reads `Time<Virtual>` under `MinimalPlugins` to show.
+
 * **The entry points both sample games had written by hand** (R6 of
   `docs/plans/generalize-plan.md`, on branch `generalize`; the merge's commit goes here when the
   branch comes in — `docs/worklog/2026-09-20-shared-entry-points.md`). Five of them, for a game

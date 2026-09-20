@@ -17,7 +17,8 @@
 //! | map | Hash |
 //! | set | Array |
 //! | enum, unit variant | the variant's name as a Symbol (`:Hidden`) |
-//! | enum, tuple or struct variant | a one-entry Hash, `{Srgba: {red: …}}` |
+//! | enum, struct variant | a one-entry Hash whose value is a Hash of the fields, `{Srgba: {red: …}}` |
+//! | enum, tuple variant | a one-entry Hash whose value is an **Array** of the fields, `{Orthographic: [{scale: 1.0}]}` |
 //! | opaque | Float, Integer, true/false, String, or a `Rubevy::Entity` — see [`opaque_to_ruby`] |
 //! | anything else | nil |
 //!
@@ -25,7 +26,9 @@
 //! is left as it was — which is what makes reading a component, changing one number and
 //! writing it back cost one round trip rather than two. An Array applied to a struct goes by
 //! position, which is how `[1.0, 2.0, 3.0]` reaches a `Vec3`. A Symbol switches an enum to
-//! that (unit) variant. A value of a kind the field cannot take is reported, not applied.
+//! that (unit) variant. The fields of a *tuple* variant are written by the same Array the read
+//! answers and cannot be named — a tuple variant's fields have no names in bevy_reflect, not
+//! even `"0"`. A value of a kind the field cannot take is reported, not applied.
 
 use bevy::prelude::*;
 use bevy::reflect::enums::{DynamicEnum, DynamicVariant, VariantType};
@@ -325,7 +328,7 @@ fn apply_at(
     problems: &mut Vec<String>,
 ) {
     if depth > MAX_DEPTH {
-        problems.push(format!("{path}: too deep"));
+        problems.push(at(path, "too deep"));
         return;
     }
     let deeper = depth + 1;
@@ -340,7 +343,7 @@ fn apply_at(
             RubyData::Map(entries) => {
                 for (k, v) in entries {
                     let Some(name) = k.as_name() else {
-                        problems.push(format!("{path}: a field name must be a Symbol or a String"));
+                        problems.push(at(path, "a field name must be a Symbol or a String"));
                         continue;
                     };
                     let here = join(path, name);
@@ -360,7 +363,7 @@ fn apply_at(
                     }
                 }
             }
-            _ => problems.push(format!("{path}: a struct takes a Hash or an Array")),
+            _ => problems.push(at(path, "a struct takes a Hash or an Array")),
         },
         ReflectMut::TupleStruct(t) => match value {
             RubyData::List(items) => {
@@ -375,7 +378,7 @@ fn apply_at(
             // a newtype (`struct Hp(f32)`) takes the number on its own as well
             other => match t.field_mut(0) {
                 Some(f) => apply_at(f, other, &join(path, "0"), deeper, problems),
-                None => problems.push(format!("{path}: takes an Array")),
+                None => problems.push(at(path, "takes an Array")),
             },
         },
         ReflectMut::Tuple(t) => match value {
@@ -388,7 +391,7 @@ fn apply_at(
                     }
                 }
             }
-            _ => problems.push(format!("{path}: a tuple takes an Array")),
+            _ => problems.push(at(path, "a tuple takes an Array")),
         },
         ReflectMut::Array(a) => match value {
             RubyData::List(items) => {
@@ -400,7 +403,7 @@ fn apply_at(
                     }
                 }
             }
-            _ => problems.push(format!("{path}: an array takes an Array")),
+            _ => problems.push(at(path, "an array takes an Array")),
         },
         // A List could be grown from Ruby, but that needs a value of the element's type to
         // push and reflection alone does not make one. What is here is what can be done
@@ -415,10 +418,10 @@ fn apply_at(
                     }
                 }
             }
-            _ => problems.push(format!("{path}: a list takes an Array")),
+            _ => problems.push(at(path, "a list takes an Array")),
         },
         ReflectMut::Opaque(o) => apply_opaque(o, value, path, problems),
-        _ => problems.push(format!("{path}: this kind of value is not written from Ruby")),
+        _ => problems.push(at(path, "this kind of value is not written from Ruby")),
     }
 }
 
@@ -447,18 +450,19 @@ fn apply_enum(
             }
             let variant = DynamicEnum::new(name.clone(), DynamicVariant::Unit);
             if let Err(e) = dest.try_apply(&variant) {
-                problems.push(format!("{path}: {e}"));
+                problems.push(at(path, e));
             }
         }
         RubyData::Map(entries) if entries.len() == 1 => {
             let (k, v) = &entries[0];
             let Some(name) = k.as_name() else {
-                problems.push(format!("{path}: a variant must be named by a Symbol"));
+                problems.push(at(path, "a variant must be named by a Symbol"));
                 return;
             };
             if name != current {
-                problems.push(format!(
-                    "{path}: the fields of {name} cannot be written while the value is {current}"
+                problems.push(at(
+                    path,
+                    format!("the fields of {name} cannot be written while the value is {current}"),
                 ));
                 return;
             }
@@ -483,10 +487,10 @@ fn apply_enum(
                         }
                     }
                 }
-                _ => problems.push(format!("{path}: a variant's fields are a Hash or an Array")),
+                _ => problems.push(at(path, "a variant's fields are a Hash or an Array")),
             }
         }
-        _ => problems.push(format!("{path}: an enum takes a Symbol or a one-entry Hash")),
+        _ => problems.push(at(path, "an enum takes a Symbol or a one-entry Hash")),
     }
 }
 
@@ -500,7 +504,7 @@ fn apply_opaque(
         ($($t:ty),*) => { $(if let Some(x) = dest.try_downcast_mut::<$t>() {
             match value.as_f64() {
                 Some(n) => { *x = n as $t; return }
-                None => { problems.push(format!("{path}: takes a number")); return }
+                None => { problems.push(at(path, "takes a number")); return }
             }
         })* };
     }
@@ -513,7 +517,7 @@ fn apply_opaque(
     if let Some(s) = dest.try_downcast_mut::<String>() {
         match value {
             RubyData::Text(t) | RubyData::Sym(t) => *s = t.clone(),
-            _ => problems.push(format!("{path}: takes a String")),
+            _ => problems.push(at(path, "takes a String")),
         }
         return;
     }
@@ -522,15 +526,27 @@ fn apply_opaque(
             RubyData::Entity(x) => *e = *x,
             RubyData::Int(bits) => match Entity::try_from_bits(*bits as u64) {
                 Some(x) => *e = x,
-                None => problems.push(format!("{path}: not an entity")),
+                None => problems.push(at(path, "not an entity")),
             },
-            _ => problems.push(format!("{path}: takes a Rubevy::Entity")),
+            _ => problems.push(at(path, "takes a Rubevy::Entity")),
         }
         return;
     }
-    problems.push(format!("{path}: this type is not written from Ruby"));
+    problems.push(at(path, "this type is not written from Ruby"));
 }
 
 fn join(path: &str, name: &str) -> String {
     if path.is_empty() { name.to_string() } else { format!("{path}.{name}") }
+}
+
+/// A problem, with the path inside the value in front of it — and with nothing in front of it
+/// where there is no path.
+///
+/// The path is empty exactly at the top: the value the script wrote *is* the component or the
+/// resource, and its name is already in the line the caller logs
+/// (`Projection was not written whole: …`). Putting `{path}: ` there unconditionally is what
+/// made that line read `not written whole: : the fields of Perspective cannot …`, as if a name
+/// had gone missing. [`join`] has always had the same rule for the same reason.
+fn at(path: &str, what: impl core::fmt::Display) -> String {
+    if path.is_empty() { what.to_string() } else { format!("{path}: {what}") }
 }
