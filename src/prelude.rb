@@ -106,6 +106,30 @@ module Rubevy
 
     alias shift pop
     alias deq pop
+
+    # How many messages this subscription has lost because the queue was full when the game
+    # published them, counting from the start. The oldest go first, so a count that has moved
+    # since the last read says "there is a hole between what I read last and what I read now" —
+    # which `pop` itself cannot say, because a dropped message leaves nothing behind.
+    #
+    # The limit is the VM's (`ScriptWorld::queue_limit`, 64 unless the game changed it) or this
+    # subscription's own (`Rubevy.subscribe(:belt, limit: 512)`). A script that falls behind can
+    # ask for a bigger queue, read more often, or simply say how much it missed:
+    #
+    #   loop do
+    #     item = belt.pop
+    #     missed = belt.dropped
+    #     Rubevy.log "missed #{missed - @seen}" if missed > @seen
+    #     @seen = missed
+    #     handle item
+    #   end
+    #
+    # The host writes it on this very object (`@rubevy_dropped`, `DROPPED_IVAR` in src/lib.rs),
+    # which is why it is nil until the first message is dropped.
+    def dropped
+      n = @rubevy_dropped
+      n.nil? ? 0 : n
+    end
   end
 end
 

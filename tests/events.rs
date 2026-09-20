@@ -56,6 +56,20 @@ fn run(app: &mut App, src: &str) -> Entity {
     app.world_mut().spawn(Script::new(script)).id()
 }
 
+/// The same, compiled with the line table (`mrbc -g`), which is what an `Exception#backtrace`
+/// is made of: `Options::default()` leaves the DBG section out, and a program with no line
+/// table has nothing to say about where it raised.
+fn run_with_lines(app: &mut App, src: &str) -> Entity {
+    let opts = sabiruby_compiler::Options {
+        filename: "t.rb".into(),
+        debug_info: true,
+        ..Default::default()
+    };
+    let bytes = sabiruby_compiler::compile(src.as_bytes(), &opts).expect("compiles");
+    let script = app.world_mut().resource_mut::<Assets<MrbAsset>>().add(MrbAsset { bytes });
+    app.world_mut().spawn(Script::new(script)).id()
+}
+
 /// The frames it takes for a script to reach its first `Rubevy.ask("ready")` and be answered.
 fn until_ready(app: &mut App) {
     for _ in 0..20 {
@@ -240,6 +254,164 @@ fn the_oldest_messages_are_dropped_when_nobody_reads() {
     let r = asked(&app, "kept").expect("the script woke");
     assert_eq!(r.num(0), Some(ScriptWorld::QUEUE_LIMIT as f64), "the queue is capped");
     assert_eq!(r.num(1), Some(36.0), "and it is the newest 64 that are kept, not the oldest");
+}
+
+/// What overflowed used to happen in silence — no log, no counter, nothing either side could
+/// see. Now the VM counts what it dropped (`ScriptWorld::dropped`, for a game's HUD) and each
+/// queue counts its own (`Rubevy::Subscription#dropped`, for the script whose stream has the
+/// hole in it), and the two agree where there is one subscription.
+#[test]
+fn what_overflowed_is_counted_for_the_vm_and_for_the_subscription() {
+    let mut app = app();
+    run(
+        &mut app,
+        r#"
+          q = Rubevy.subscribe(:tick)
+          Rubevy.ask("ready").pop
+          sleep 0.01                       # the host fills the queue while this waits
+          Rubevy.ask("lost", q.size, q.dropped, q.pop).pop
+        "#,
+    );
+    until_ready(&mut app);
+    assert_eq!(app.world().resource::<ScriptWorld>().dropped(), 0, "nothing has been published");
+
+    {
+        let mut world = app.world_mut().resource_mut::<ScriptWorld>();
+        for i in 0..100 {
+            world.publish(None, "tick", Answer::Num(i as f64));
+        }
+    }
+    let over = 100 - ScriptWorld::QUEUE_LIMIT;
+    assert_eq!(
+        app.world().resource::<ScriptWorld>().dropped(),
+        over as u64,
+        "the host's own count, which it may read without asking the script anything"
+    );
+
+    frames(&mut app, 25);
+    let r = asked(&app, "lost").expect("the script woke");
+    assert_eq!(r.num(0), Some(ScriptWorld::QUEUE_LIMIT as f64), "the queue is capped");
+    assert_eq!(r.num(1), Some(over as f64), "and the script can see how many it missed");
+    assert_eq!(r.num(2), Some(over as f64), "the oldest kept is the first one not dropped");
+}
+
+/// The limit is a field of the VM, not a constant: a game that publishes more than sixty-four of
+/// something a frame can say so, and what a script is handed in one frame moves with it. The
+/// default is still what the constant says, so nothing moves for an app that sets nothing.
+#[test]
+fn the_vms_queue_limit_moves_what_a_script_is_handed() {
+    let mut app = app();
+    assert_eq!(
+        app.world().resource::<ScriptWorld>().queue_limit,
+        ScriptWorld::QUEUE_LIMIT,
+        "the field starts at the constant"
+    );
+    app.world_mut().resource_mut::<ScriptWorld>().queue_limit = 250;
+    run(
+        &mut app,
+        r#"
+          q = Rubevy.subscribe(:tick)
+          Rubevy.ask("ready").pop
+          sleep 0.01
+          Rubevy.ask("lost", q.size, q.dropped, q.pop).pop
+        "#,
+    );
+    until_ready(&mut app);
+
+    {
+        let mut world = app.world_mut().resource_mut::<ScriptWorld>();
+        for i in 0..300 {
+            world.publish(None, "tick", Answer::Num(i as f64));
+        }
+    }
+    frames(&mut app, 25);
+
+    let r = asked(&app, "lost").expect("the script woke");
+    assert_eq!(r.num(0), Some(250.0), "the queue holds what the field says, not sixty-four");
+    assert_eq!(r.num(1), Some(50.0), "so only the first fifty of three hundred were dropped");
+    assert_eq!(r.num(2), Some(50.0));
+    assert_eq!(app.world().resource::<ScriptWorld>().dropped(), 50);
+}
+
+/// A stream a script knows is heavy asks for its own queue, and one it only samples may ask for
+/// a smaller one than the VM's. Two subscriptions of one script, filed under one name, each keep
+/// their own count of what they lost.
+#[test]
+fn a_subscription_may_ask_for_a_limit_of_its_own() {
+    let mut app = app();
+    run(
+        &mut app,
+        r#"
+          sampled = Rubevy.subscribe(:tick, limit: 3)
+          whole   = Rubevy.subscribe(:tick)
+          Rubevy.ask("ready").pop
+          sleep 0.01
+          Rubevy.ask("both", sampled.size, sampled.dropped, whole.size, whole.dropped).pop
+        "#,
+    );
+    until_ready(&mut app);
+
+    {
+        let mut world = app.world_mut().resource_mut::<ScriptWorld>();
+        for i in 0..10 {
+            world.publish(None, "tick", Answer::Num(i as f64));
+        }
+    }
+    frames(&mut app, 25);
+
+    let r = asked(&app, "both").expect("the script woke");
+    assert_eq!(r.num(0), Some(3.0), "the one that asked for three holds three");
+    assert_eq!(r.num(1), Some(7.0), "and lost the other seven");
+    assert_eq!(r.num(2), Some(10.0), "the one that asked for nothing is under the VM's 64");
+    assert_eq!(r.num(3), Some(0.0), "so it lost nothing");
+    assert_eq!(
+        app.world().resource::<ScriptWorld>().dropped(),
+        7,
+        "the VM's count is the messages dropped, over every subscription"
+    );
+}
+
+/// A limit that is not a count of messages is refused where the script wrote it, with the line
+/// it wrote it on — not taken as something else and not ignored. So is a keyword that is not
+/// `limit:`, because a subscription that quietly keeps the default is the kind of mistake that
+/// is found frames later.
+#[test]
+fn a_limit_that_is_not_a_count_is_an_argument_error() {
+    let mut app = app();
+    run_with_lines(
+        &mut app,
+        r##"
+          def refused
+            yield
+            "nothing was raised"
+          rescue ArgumentError => e
+            "#{e.message} @ #{e.backtrace.first}"
+          end
+          zero    = refused { Rubevy.subscribe(:tick, limit: 0) }
+          decimal = refused { Rubevy.subscribe(:tick, limit: 2.5) }
+          typo    = refused { Rubevy.subscribe(:tick, limt: 4) }
+          plain   = refused { Rubevy.subscribe(:tick, 4) }
+          Rubevy.ask("refused", zero, decimal, typo, plain).pop
+        "##,
+    );
+    frames(&mut app, 25);
+
+    let r = asked(&app, "refused").expect("the script reached the question");
+    let zero = r.text(0).unwrap_or("");
+    assert!(zero.starts_with("subscribe: limit: takes a whole number"), "zero: {zero}");
+    assert!(zero.contains("not 0"), "the message shows what was asked for: {zero}");
+    assert!(zero.contains("t.rb:"), "raised in the script's own frame, so it has its line: {zero}");
+    let decimal = r.text(1).unwrap_or("");
+    assert!(decimal.contains("not 2.5"), "a Float is not a count of messages: {decimal}");
+    let typo = r.text(2).unwrap_or("");
+    assert!(typo.starts_with("subscribe: unknown keyword: limt"), "typo: {typo}");
+    let plain = r.text(3).unwrap_or("");
+    assert!(plain.starts_with("subscribe takes the name"), "a bare number is not a limit: {plain}");
+    assert_eq!(
+        app.world().resource::<ScriptWorld>().subscriptions(),
+        0,
+        "nothing that was refused left a subscription behind"
+    );
 }
 
 /// Subscriptions are filed by name (`HostState::subscriptions`), so this is the shape of that

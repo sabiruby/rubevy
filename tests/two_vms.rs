@@ -426,6 +426,64 @@ fn a_published_message_stays_inside_its_own_vm() {
     assert_eq!(marks.b, vec![0.0, 9.0], "the second VM's own subscriber missed its message");
 }
 
+/// The queue limit and the dropped count are the VM's own, as the budget is. A game that runs a
+/// second VM for mods can hold the mods to a short queue and give its own scripts a long one,
+/// and what each VM has dropped is a number about that VM — which is the point of putting it on
+/// `ScriptWorld` rather than in a static.
+#[test]
+fn each_vm_has_its_own_queue_limit_and_its_own_dropped_count() {
+    const LISTENER: &str = r#"
+      hits = Rubevy.subscribe(:hit)
+      Rubevy.ask("ready", 0.0)
+      sleep 0.2                    # long enough that the host fills the queue while it waits
+      Rubevy.ask("held", hits.size)
+      Rubevy.ask("lost", hits.dropped)
+    "#;
+
+    let mut app = app();
+    app.world_mut().resource_mut::<ScriptWorld<A>>().queue_limit = 4;
+    // B is left at the default, so this also says that setting one VM's field left the other's
+    // where it was
+    assert_eq!(
+        app.world().resource::<ScriptWorld<B>>().queue_limit,
+        ScriptWorld::QUEUE_LIMIT,
+        "the second VM still starts at the constant"
+    );
+
+    start_a(&mut app, LISTENER, "listener.rb");
+    start_b(&mut app, LISTENER, "listener.rb");
+    frames(&mut app, 15);
+    {
+        let marks = app.world().resource::<Marks>();
+        assert_eq!(marks.a, vec![0.0], "the first VM's script reached its subscribe");
+        assert_eq!(marks.b, vec![0.0], "the second VM's script reached its subscribe");
+    }
+
+    for i in 0..10 {
+        app.world_mut().resource_mut::<ScriptWorld<A>>().publish(None, "hit", Answer::Num(i as f64));
+        app.world_mut().resource_mut::<ScriptWorld<B>>().publish(None, "hit", Answer::Num(i as f64));
+    }
+    assert_eq!(app.world().resource::<ScriptWorld<A>>().dropped(), 6, "ten into a queue of four");
+    assert_eq!(
+        app.world().resource::<ScriptWorld<B>>().dropped(),
+        0,
+        "ten into a queue of sixty-four is nothing dropped, and the other VM's six are not here"
+    );
+
+    // the scripts are asleep; run until both have woken and reported, rather than guessing at
+    // how many two-millisecond frames a fifth of a second is
+    for _ in 0..200 {
+        frames(&mut app, 1);
+        let marks = app.world().resource::<Marks>();
+        if marks.a.len() >= 3 && marks.b.len() >= 3 {
+            break;
+        }
+    }
+    let marks = app.world().resource::<Marks>();
+    assert_eq!(marks.a, vec![0.0, 4.0, 6.0], "the short-queued VM held four and lost six");
+    assert_eq!(marks.b, vec![0.0, 10.0, 0.0], "the other held all ten and lost none");
+}
+
 /// Each VM answers its own scripts' component reads, in its own tick, and both of them inside
 /// the frame the read was made in.
 ///

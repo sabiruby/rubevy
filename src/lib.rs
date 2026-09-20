@@ -277,7 +277,9 @@ pub struct ScriptStats {
 
 /// Marks an entity whose script has ended, so that [`ScriptEnded`] is sent once and the task
 /// is let go of once. The [`ScriptTask`] stays, which is what keeps the script from starting
-/// again.
+/// again — and where there is no task because the script never started (its `.mrb` would not
+/// load), this marker alone keeps it from being started over and over: the system that turns a
+/// [`Script`] into a task passes over an entity that carries it.
 ///
 /// It carries the name tag of its VM for the same reason [`ScriptTask`] does. One entity may
 /// hold a `Script<A>` and a `Script<B>` at once — two scripts of two VMs on one thing — and an
@@ -325,6 +327,18 @@ impl<M> Clone for ScriptDone<M> {
 
 impl<M> Copy for ScriptDone<M> {}
 
+/// Marks an entity whose script could not be **started** — the `.mrb` would not load, or the VM
+/// would not spawn the task — as against one that ran and ended. Both carry [`ScriptDone`]; only
+/// this one is worth trying again when the asset changes ([`retry_failed_scripts`]), which is
+/// the whole reason the two are told apart.
+///
+/// It is not part of the crate's API. What a game sees of a script that could not start is the
+/// [`ScriptEnded`] it was sent, the same as for one that ran and raised.
+#[derive(Component)]
+struct ScriptStartFailed<M = ()> {
+    _m: PhantomData<fn() -> M>,
+}
+
 /// **Gives an entity another script**: the running one is stopped and `script` takes its place.
 ///
 /// ```no_run
@@ -367,6 +381,11 @@ pub enum ScriptStatus {
 
 /// Emitted when a script's task runs to its end, with the value it answered
 /// (or the exception it did not handle, which mruby-task makes the result).
+///
+/// **A script that never started ends this way too**: a `.mrb` that will not load is a
+/// [`ScriptStatus::Failed`] whose value is what the VM said was wrong with it, sent once for
+/// that entity. It is the same ending because it is the same news — this entity has no script
+/// running — and a game that already shows an ending shows this one without being changed.
 ///
 /// One message type per VM (`ScriptEnded<Mods>`), so a reader of the first VM's endings is not
 /// woken by the second's.
@@ -770,6 +789,31 @@ pub struct ScriptWorld<M = ()> {
     /// block, `sort { }` or `Array.new { loop { } }` — gets `Task::Overrun` rather than holding
     /// the frame. `None`: no such limit.
     pub overrun: Option<std::time::Duration>,
+    /// How many messages a subscriber's queue holds in this VM before the oldest is dropped —
+    /// the default for every `Rubevy.subscribe` that does not ask for one of its own
+    /// (`Rubevy.subscribe(:belt, limit: 512)`).
+    ///
+    /// It is read where a message is published, not where a script subscribes, so changing it
+    /// moves every standing subscription that did not name its own — and there is one number,
+    /// not a copy of it per subscriber to keep in step. A limit of its own is the subscription's
+    /// for as long as it stands.
+    ///
+    /// **Where the default comes from.** 64, which is [`ScriptWorld::QUEUE_LIMIT`] and what this
+    /// was before it could be changed at all. It is **not a measured number**: the record that
+    /// chose it (`docs/worklog/2026-09-15-events.md`) gives a qualitative reason only — "enough
+    /// for a script that reads its queue every few frames, and small enough that a script that
+    /// never reads costs nothing to speak of". What one reader can actually take in a frame, and
+    /// what a waiting message costs in memory, were measured on 2026-09-20 and are in
+    /// `docs/worklog/2026-09-20-overflow-and-limits.md` beside the sum that a default could be
+    /// derived from; whether the default should move from 64 is the app's call, which is what
+    /// this field is for.
+    ///
+    /// Zero is not refused here, and what it means is "the newest and nothing else": room is
+    /// made before the message is pushed, so the queue is emptied and the one that arrived is
+    /// left. A script that asks for a limit of its own is refused anything below one
+    /// (`ArgumentError`), because a script writing `limit: 0` has miscounted rather than asked
+    /// for that.
+    pub queue_limit: usize,
     /// Ticks not yet handed to the scheduler (frame times shorter than a tick).
     tick_remainder: f32,
     /// What scripts asked the game for and are waiting on (`Rubevy.ask`).
@@ -862,6 +906,25 @@ pub struct ScriptWorld<M = ()> {
     /// is what makes an editor that applies the same text twice — or applies a change and takes
     /// it back — cost nothing the second time.
     programs: std::collections::HashMap<Box<[u8]>, sabiruby::object::IrepId>,
+    /// Every program this VM could **not** load, by the same key [`ScriptWorld::programs`] uses,
+    /// to what the VM said was wrong with it.
+    ///
+    /// A `.mrb` that will not load is not a passing condition: it is a truncated download, a file
+    /// written by another version's compiler, a game that saved bytes that were never bytecode.
+    /// `start_scripts` used to answer one by logging and moving on, which meant it met the same
+    /// broken program again on the next frame, and the next — a parse and a line in the log per
+    /// entity per frame, for as long as the entity existed. Now the first meeting is the only
+    /// one that parses and the only one that speaks; what every later entity of the same program
+    /// gets is the message out of here.
+    ///
+    /// **There is no limit on it and it needs none**, for the reason [`ScriptWorld::programs`]
+    /// has none: the key is the program itself, so this can only grow when a game makes a
+    /// *distinct* program that will not load, and it then holds one copy of those bytes — less
+    /// than the `MrbAsset` they came from costs, and less than what a program that *does* load
+    /// costs (an irep the VM never gives back). A cap would be a number with nothing behind it,
+    /// and whatever fell out of the cap would go back to being parsed once a frame for ever.
+    /// [`ScriptWorld::broken_programs`] is how a game watches it.
+    broken: std::collections::HashMap<Box<[u8]>, String>,
     /// Which VM this is, as a type. Nothing reads it; what it does is keep the resources of two
     /// VMs apart, and with them their tasks, requests and components.
     _m: PhantomData<fn() -> M>,
@@ -910,6 +973,7 @@ impl<M: 'static> ScriptWorld<M> {
             budget: 200_000,
             frame_time: Some(std::time::Duration::from_millis(8)),
             overrun: Some(std::time::Duration::from_millis(50)),
+            queue_limit: QUEUE_LIMIT,
             tick_remainder: 0.0,
             requests: Vec::new(),
             reflect_requests: Vec::new(),
@@ -924,8 +988,58 @@ impl<M: 'static> ScriptWorld<M> {
             freed_entities,
             release,
             programs: std::collections::HashMap::new(),
+            broken: std::collections::HashMap::new(),
             _m: PhantomData,
         })
+    }
+
+    /// **Gives the VM another [`Host`](sabiruby::Host) and tells it where `require` looks**,
+    /// which are one act and not two.
+    ///
+    /// ```no_run
+    /// # use bevy::prelude::*;
+    /// # use rubevy::{EmbeddedHost, ScriptWorld};
+    /// # static RUBY_FILES: &[(&str, &str)] = &[];
+    /// fn embed_the_scripts(mut world: ResMut<ScriptWorld>) {
+    ///     world.require_from(EmbeddedHost::new(RUBY_FILES), &["ruby"]);
+    /// }
+    /// # fn build(app: &mut App) {
+    /// app.add_systems(Startup, embed_the_scripts);
+    /// # }
+    /// ```
+    ///
+    /// [`RubevyPlugin`] puts a host that reads the asset directory on the VM and
+    /// `["{asset_root}/scripts", "{asset_root}"]` on its load path, and a game that replaces the
+    /// host has to replace the
+    /// load path too: the paths a host can answer are the host's own, and the plugin's are the
+    /// asset directory's. `vm.set_host(..)` on its own leaves the VM asking the new host for
+    /// `assets/scripts/helper.rb` — a path a table of embedded files does not hold — and the
+    /// script gets a `LoadError` naming a file the game can see is right there. Nothing in the
+    /// types says so, and because the host that gets replaced is usually the browser's, it is a
+    /// thing that happens **in a browser only**, where the log is a console nobody is reading.
+    ///
+    /// So this is the pair under one name. The two calls it makes are still there
+    /// (`world.vm.set_host`, `world.vm.set_load_path`) and still do what they did — a game that
+    /// wants only one of them writes that one — and this is the way to write both.
+    ///
+    /// **Call it at `Startup`**, for the reason everything on [`ScriptWorld::vm`] is called at
+    /// `Startup`: a script that has already run has already done its `require`s.
+    ///
+    /// `load_path` replaces the load path, it is not added to it, and the entries are what the
+    /// VM joins with the name a script wrote (`"ruby"` + `"helper"` + `".rb"`). An empty slice
+    /// leaves `require` with nowhere to look but the name as written.
+    ///
+    /// The host is also what `eval` compiles through
+    /// ([`Host::compile`](sabiruby::Host::compile)), so this is where a browser's compiler
+    /// arrives as well ([`EmbeddedHost::compile_with`]).
+    pub fn require_from(
+        &mut self,
+        // `Send + Sync` are `Host`'s own supertraits, so the bound is `Host` and nothing else
+        host: impl sabiruby::Host + 'static,
+        load_path: &[&str],
+    ) {
+        self.vm.set_host(Box::new(host));
+        self.vm.set_load_path(load_path);
     }
 
     /// The irep of the program in `bytes`, loading it the first time this VM sees it.
@@ -939,13 +1053,31 @@ impl<M: 'static> ScriptWorld<M> {
     /// the VM writes to an irep is the throwaway one a `Binding` wraps a scope in,
     /// `ext_binding.rs`) — and a string literal is copied out of the pool each time it is
     /// reached, so two tasks of one program cannot reach each other through it.
-    fn irep_of(&mut self, bytes: &[u8]) -> Result<sabiruby::object::IrepId, VmError> {
+    ///
+    /// **A program that will not load is remembered too** ([`ScriptWorld::broken`]), and the
+    /// `Err` is what the VM said about it. `name` is only for the log: a broken program is said
+    /// to be broken **once**, here, where it is met for the first time — every entity that comes
+    /// to the same bytes afterwards is handed the same message without a parse and without a
+    /// second line in the log.
+    fn irep_of(&mut self, bytes: &[u8], name: &str) -> Result<sabiruby::object::IrepId, String> {
         if let Some(&irep) = self.programs.get(bytes) {
             return Ok(irep);
         }
-        let irep = self.vm.load(bytes)?;
-        self.programs.insert(bytes.into(), irep);
-        Ok(irep)
+        if let Some(message) = self.broken.get(bytes) {
+            return Err(message.clone());
+        }
+        match self.vm.load(bytes) {
+            Ok(irep) => {
+                self.programs.insert(bytes.into(), irep);
+                Ok(irep)
+            }
+            Err(e) => {
+                let message = self.vm.describe_error(&e);
+                error!("rubevy: {name} failed to load: {message}");
+                self.broken.insert(bytes.into(), message.clone());
+                Err(message)
+            }
+        }
     }
 
     /// How many distinct programs this VM has loaded for its scripts.
@@ -956,6 +1088,16 @@ impl<M: 'static> ScriptWorld<M> {
     /// to give an irep back, so each **new** text is one more, for the life of the app.
     pub fn loaded_programs(&self) -> usize {
         self.programs.len()
+    }
+
+    /// How many distinct programs this VM has tried to load and could not.
+    ///
+    /// The pair to [`ScriptWorld::loaded_programs`], and the same kind of number: one per
+    /// program, however many entities met it. It is worth watching for the same reason — this
+    /// VM keeps the bytes of each of them so that it never parses one twice — and in a game
+    /// whose `.mrb` files are files on a disk, it is zero or it is a bug in the build.
+    pub fn broken_programs(&self) -> usize {
+        self.broken.len()
     }
 
     /// What a script has spent and where it is, for a HUD or a debugger panel. The task comes
@@ -1206,8 +1348,12 @@ impl<M: 'static> ScriptWorld<M> {
     ///
     /// **A queue that nobody reads.** A script parked on something else — or one that is
     /// simply slower than the game — is not made to keep up. Each queue holds
-    /// [`Self::QUEUE_LIMIT`] messages; past that the oldest is dropped so that the newest is
-    /// there. A script that wakes late gets the last 64 things that happened, not the first 64.
+    /// [`ScriptWorld::queue_limit`] messages, or whatever that subscription asked for
+    /// (`Rubevy.subscribe(:belt, limit: 512)`); past that the oldest is dropped so that the
+    /// newest is there. A script that wakes late gets the last few things that happened, not the
+    /// first few. What was dropped is counted rather than lost in silence:
+    /// [`ScriptWorld::dropped`] for the VM, `Rubevy::Subscription#dropped` for the one script
+    /// whose stream has the hole in it.
     pub fn publish(&mut self, entity: Option<Entity>, name: &str, payload: Answer) {
         let entity_class = self.entity_class;
         self.publish_value(entity, name, move |vm| answer_value(vm, payload.clone(), entity_class));
@@ -1221,51 +1367,114 @@ impl<M: 'static> ScriptWorld<M> {
         name: &str,
         mut build: impl FnMut(&mut Vm) -> Value,
     ) {
+        // the VM's default, resolved here and not where the script subscribed, so that an app
+        // moving `queue_limit` moves every subscription that did not ask for one of its own
+        let default_limit = self.queue_limit;
         // One lookup: what it costs to publish a name is what that name's subscribers cost, and
         // a name nobody subscribed to costs the lookup alone — not a walk of every subscription
-        // in the VM, which is what this used to be
-        let queues: Vec<ObjId> = match self.vm.host_state::<HostState>() {
+        // in the VM, which is what this used to be.
+        //
+        // The limit rides along as a `u32` so that the pair is eight bytes and the list a
+        // publisher builds stays the size it was: a thousand subscribers of one name is a
+        // thousand of these on every message, and `usize` would have made each one sixteen bytes
+        // for a number that cannot reach four billion (a queue of four billion messages is not
+        // one any machine holds, so the saturating cast can never bind in practice).
+        let queues: Vec<(ObjId, u32)> = match self.vm.host_state::<HostState>() {
             Some(state) => match state.subscriptions.get(name) {
                 Some(subs) => subs
                     .iter()
-                    .filter(|s| entity.is_none() || s.entity == entity)
-                    .map(|s| s.queue)
+                    .filter(|s| entity.is_none() || Some(s.entity) == entity)
+                    .map(|s| (s.queue, s.limit.unwrap_or(default_limit).min(u32::MAX as usize) as u32))
                     .collect(),
                 None => return,
             },
             None => return,
         };
-        for queue in queues {
-            self.make_room(queue);
+        let mut dropped: u64 = 0;
+        for (queue, limit) in queues {
+            dropped += self.make_room(queue, limit as usize);
             let value = build(&mut self.vm);
             if let Err(e) = self.vm.task_queue_push(queue, value) {
                 let message = self.vm.describe_error(&e);
                 error!("rubevy: could not publish {name}: {message}");
             }
         }
+        // once for the whole message rather than once per subscriber: reaching the host state is
+        // a downcast, and a name a thousand scripts listen for would have paid for it a thousand
+        // times over for one number
+        if dropped > 0
+            && let Some(state) = self.vm.host_state_mut::<HostState>()
+        {
+            state.dropped = state.dropped.saturating_add(dropped);
+        }
     }
 
-    /// Drops the oldest messages until there is room for one more.
+    /// Drops the oldest messages until there is room for one more, and counts what it dropped.
     ///
     /// This runs on every published message, so it asks the VM rather than the script's Ruby:
     /// `Vm::task_queue_len` and `Vm::task_queue_try_pop` read the queue's own Array, where
     /// `size` and `__pop_try(true)` each put a call on the stack to do the same thing.
-    fn make_room(&mut self, queue: ObjId) {
-        loop {
-            let n = match self.vm.task_queue_len(queue) {
-                Ok(n) => n,
-                Err(_) => return,
-            };
-            if n < QUEUE_LIMIT {
-                return;
+    ///
+    /// What it drops is counted twice over, because the two readers are different people: the
+    /// VM's own total ([`ScriptWorld::dropped`]) is for the game, which wants to know that its
+    /// scripts are falling behind at all; the count on the queue object (`@rubevy_dropped`, read
+    /// back by `Rubevy::Subscription#dropped` in `src/prelude.rb`) is for the script, which
+    /// wants to know that **its** stream has a hole in it — "I am 40 belt movements behind" is a
+    /// thing a script can act on, and before this it could not be seen at all. The counter is on
+    /// the queue rather than in the host state because the queue is what the script holds, and
+    /// because it goes away exactly when the subscription does.
+    ///
+    /// It answers with what it dropped so that [`ScriptWorld::publish_value`] can add the VM's
+    /// own total once for the whole message instead of once for every subscriber.
+    ///
+    /// **What the counting costs.** Nothing at all while nothing is dropped — the early return
+    /// is the common case. A message that *is* dropped pays the two instance-variable calls,
+    /// which look their name up as a string each time, and that came to about 12 ns a message,
+    /// or 10–14% of what publishing into a full queue costs (measured 2026-09-20, before and
+    /// after, on a quiet machine: `docs/worklog/2026-09-20-overflow-and-limits.md`). A game
+    /// that is keeping up pays none of it.
+    fn make_room(&mut self, queue: ObjId, limit: usize) -> u64 {
+        let mut dropped: u64 = 0;
+        // an `Err` is a queue this VM cannot read, which ends the loop as a full one does
+        while let Ok(n) = self.vm.task_queue_len(queue) {
+            if n < limit {
+                break;
             }
-            // `None` is an empty queue, which cannot happen while `n >= QUEUE_LIMIT`; stopping
-            // on it is what keeps this loop finite whatever the queue turns out to be
+            // `None` is an empty queue, which cannot happen while `n >= limit` and `limit >= 1`;
+            // stopping on it is what keeps this loop finite whatever the queue turns out to be,
+            // and it is also what ends it when `limit` is zero
             match self.vm.task_queue_try_pop(queue) {
-                Ok(Some(_)) => {}
-                _ => return,
+                Ok(Some(_)) => dropped += 1,
+                _ => break,
             }
         }
+        if dropped == 0 {
+            return 0;
+        }
+        let had = match self.vm.ivar_get(queue, DROPPED_IVAR) {
+            Value::Int(n) if n >= 0 => n as u64,
+            _ => 0,
+        };
+        // saturating because the ivar is read back as a Ruby Integer: a count that ran past
+        // `i64::MAX` would come back negative, and a wrong number is worse than a stuck one
+        let total = had.saturating_add(dropped).min(i64::MAX as u64);
+        self.vm.ivar_set(queue, DROPPED_IVAR, Value::Int(total as i64));
+        dropped
+    }
+
+    /// How many published messages this VM has dropped, over all its subscriptions, since it
+    /// started.
+    ///
+    /// A queue that is full drops its oldest to make room ([`ScriptWorld::queue_limit`]), and
+    /// before this that happened in silence — no log, no counter, nothing a game could put on a
+    /// HUD. A number that is climbing says either that the scripts are behind or that the limit
+    /// is too small for what the game publishes; which of the two it is, is what
+    /// `Rubevy::Subscription#dropped` says on the script's side, subscription by subscription.
+    ///
+    /// It counts messages, not queues: one publish to a name a thousand full queues listen for
+    /// is a thousand. It never goes down, and a subscription ending does not take its share out.
+    pub fn dropped(&self) -> u64 {
+        self.vm.host_state::<HostState>().map(|s| s.dropped).unwrap_or(0)
     }
 
     /// The `Rubevy::Entity` class, for a host that builds a value of its own inside
@@ -1307,7 +1516,7 @@ impl<M: 'static> ScriptWorld<M> {
         // goes out of the map, so publishing to it is a miss again
         state.subscriptions.retain(|_name, subs| {
             subs.retain(|s| {
-                if s.entity == Some(entity) {
+                if s.entity == entity {
                     dropped.push((s.seq, s.queue));
                     false
                 } else {
@@ -1330,21 +1539,30 @@ impl<M: 'static> ScriptWorld<M> {
     }
 }
 
-/// How many messages a subscriber's queue holds before the oldest is dropped.
+/// The **default** for how many messages a subscriber's queue holds before the oldest is
+/// dropped — what [`ScriptWorld::queue_limit`] starts at.
 ///
 /// A queue with no limit is a leak with a slow fuse: a script that subscribes and then waits on
 /// something else would hold every message the game ever sent. 64 is enough for a script that
 /// reads its queue every few frames, and small enough that a script that never reads costs
-/// nothing to speak of.
+/// nothing to speak of — which is the whole of the reason it is 64
+/// (`docs/worklog/2026-09-15-events.md`; nothing was measured to arrive at it).
 ///
-/// The same number for every VM, so it is one constant and not one per name tag.
+/// The same starting number for every VM, so it is one constant and not one per name tag. What
+/// each VM actually holds is its own field, and what one subscription holds may be its own again
+/// (`Rubevy.subscribe(:belt, limit: 512)`).
 const QUEUE_LIMIT: usize = 64;
 
 impl ScriptWorld<()> {
-    /// The queue limit above, under the name a host reads it by. It is on
+    /// The default queue limit above, under the name a host reads it by. It is on
     /// the first VM's type rather than on every one of them because a constant of a tagged type
     /// would have to be written `ScriptWorld::<()>::QUEUE_LIMIT` by the apps that have one VM —
-    /// and the number is the same for all of them anyway.
+    /// and the number every VM starts at is the same anyway.
+    ///
+    /// **This is the default, not the limit.** What a VM drops messages by is the field
+    /// [`ScriptWorld::queue_limit`], which an app may set to anything and a subscription may
+    /// override for itself; a host that compares against this constant is comparing against the
+    /// number nobody has changed.
     pub const QUEUE_LIMIT: usize = QUEUE_LIMIT;
 }
 
@@ -1414,6 +1632,14 @@ struct HostState {
     /// [`Subscription::seq`] comes from. A counter, not a limit: nothing is refused when it
     /// grows, and a `u64` of them is more than a running game can ask for.
     subscriptions_made: u64,
+    /// How many published messages this VM has dropped for want of room, over every
+    /// subscription it has ever had ([`ScriptWorld::dropped`]).
+    ///
+    /// It is here rather than on [`ScriptWorld`] because the one place that drops a message is
+    /// [`ScriptWorld::make_room`], which is already holding the `Vm` to reach the queue — and
+    /// because a subscription's own count lives on its queue object, so the two counters are
+    /// written in the same breath.
+    dropped: u64,
 }
 
 /// One `Rubevy.subscribe(:hit)`: the queue it answered with, and whose script it belongs to.
@@ -1423,10 +1649,23 @@ struct HostState {
 /// `&mut Vm`. The name it listens for is the key it is filed under, not a field.
 #[derive(Debug, Clone)]
 struct Subscription {
-    /// The entity the subscribing script is attached to, where it has one. A message sent to
-    /// an entity reaches only the subscriptions of that entity's scripts.
-    entity: Option<Entity>,
+    /// The entity the subscribing script is attached to. A message sent to an entity reaches
+    /// only the subscriptions of that entity's scripts.
+    ///
+    /// Not an `Option`: the one place a subscription is made is the `Rubevy.subscribe` native,
+    /// and it refuses a task with no entity (`ArgumentError`) — a subscription with no entity
+    /// would never be let go of, since letting go of one is what `unsubscribe(entity)` does.
+    /// The `Option` on the publishing side is a different thing and stays: `None` there means
+    /// "everyone", not "nobody's".
+    entity: Entity,
     queue: ObjId,
+    /// The limit this subscription asked for (`Rubevy.subscribe(:belt, limit: 512)`), or `None`
+    /// to follow the VM's [`ScriptWorld::queue_limit`].
+    ///
+    /// `None` rather than a copy of the VM's number taken when the script subscribed, so that
+    /// there is one place the default lives and an app that changes it mid-game changes what
+    /// every ordinary subscription holds.
+    limit: Option<usize>,
     /// Which `Rubevy.subscribe` in this VM this was, counting from the first.
     ///
     /// Within one name the order the subscribers were asked in is the order they sit in, so
@@ -1722,7 +1961,14 @@ impl<M: 'static> Plugin for RubevyPlugin<M> {
             )
             .add_systems(
                 Update,
-                (start_scripts::<M>, deliver_answers::<M>, release_values::<M>)
+                // `retry_failed_scripts` is before `start_scripts` so that an asset changed on
+                // the frame before is tried again on this one and not the next
+                (
+                    retry_failed_scripts::<M>,
+                    start_scripts::<M>,
+                    deliver_answers::<M>,
+                    release_values::<M>,
+                )
                     .chain()
                     .in_set(RubevySet::<M>::deliver()),
             )
@@ -1750,22 +1996,49 @@ impl<M: 'static> Plugin for RubevyPlugin<M> {
 /// the name is not one a script would write by accident.
 const ENTITY_IVAR: &str = "@rubevy_entity";
 
+/// The instance variable a subscription's queue carries its dropped count in, written by
+/// [`ScriptWorld::make_room`] and read back by `Rubevy::Subscription#dropped` (`src/prelude.rb`).
+///
+/// An ordinary `@ivar` on the queue object, as [`ENTITY_IVAR`] is on the task: the collector
+/// reaches it through the object that holds it, it goes when the subscription goes, and a script
+/// may read it directly if it would rather not call the method.
+const DROPPED_IVAR: &str = "@rubevy_dropped";
+
+/// The [`Script`]s of this VM that are not running and have not ended: what [`start_scripts`]
+/// looks at each frame.
+///
+/// It is a `type` for the same reason [`RunningTasks`] is — a query of three things filtered by
+/// two is a mouthful in a signature — and the three and the two are: the entity, its script, and
+/// whether it is one that failed to start before ([`ScriptStartFailed`], which is taken off when
+/// it does start); no task, and not ended.
+type PendingScripts<'w, 's, M> = Query<
+    'w,
+    's,
+    (Entity, &'static Script<M>, Has<ScriptStartFailed<M>>),
+    (Without<ScriptTask<M>>, Without<ScriptDone<M>>),
+>;
+
 /// Turns every [`Script`] whose asset has arrived into a task.
+///
+/// A script that **cannot** be turned into one — the bytes will not load, or the VM will not
+/// spawn the task — ends here instead: a [`ScriptEnded`] of [`ScriptStatus::Failed`] carrying
+/// what went wrong, and a [`ScriptDone`] so that this is said once ([`give_up`]).
 fn start_scripts<M: 'static>(
     mut commands: Commands,
     assets: Res<Assets<MrbAsset>>,
     mut world: ResMut<ScriptWorld<M>>,
-    pending: Query<(Entity, &Script<M>), Without<ScriptTask<M>>>,
+    mut ended: MessageWriter<ScriptEnded<M>>,
+    pending: PendingScripts<M>,
 ) {
-    for (entity, script) in &pending {
+    for (entity, script, had_failed) in &pending {
         let Some(asset) = assets.get(&script.source) else { continue };
         let name = script.name.clone().unwrap_or_else(|| format!("{entity}"));
         // the program is loaded once however many entities run it (`ScriptWorld::irep_of`);
         // what is per-entity is the task, below
-        let irep = match world.irep_of(&asset.bytes) {
+        let irep = match world.irep_of(&asset.bytes, &name) {
             Ok(i) => i,
-            Err(e) => {
-                error!("rubevy: {name} failed to load: {}", world.vm.describe_error(&e));
+            Err(message) => {
+                give_up(&mut commands, &mut ended, entity, message);
                 continue;
             }
         };
@@ -1777,8 +2050,78 @@ fn start_scripts<M: 'static>(
                 // the task carries its entity, which is what `Rubevy.entity` answers
                 vm.ivar_set(task, ENTITY_IVAR, Value::Int(entity.to_bits() as i64));
                 commands.entity(entity).insert(ScriptTask::<M> { task, _m: PhantomData });
+                // it started this time: whatever went wrong before is over, and the mark that
+                // said so must not be left on the entity for a later asset change to act on
+                if had_failed {
+                    commands.entity(entity).remove::<ScriptStartFailed<M>>();
+                }
             }
-            Err(e) => error!("rubevy: {name} failed to start: {}", vm.describe_error(&e)),
+            Err(e) => {
+                // unlike a program that will not load, this is the VM's answer to *this* task
+                // (no room for another context, say), so it is one entity's news and is said
+                // per entity
+                let message = vm.describe_error(&e);
+                error!("rubevy: {name} failed to start: {message}");
+                give_up(&mut commands, &mut ended, entity, message);
+            }
+        }
+    }
+}
+
+/// Ends a script that never started: the entity is told once, and marked so that
+/// [`start_scripts`] does not come back to it every frame.
+///
+/// The ending is the one every other script gets — a [`ScriptEnded`] with
+/// [`ScriptStatus::Failed`] and, as its value, what the VM said. A game that shows the ending of
+/// a script shows this one with nothing added, which is the point of using the ending it already
+/// had rather than a message of its own.
+///
+/// [`ScriptStartFailed`] is what makes it a *pause* rather than a full stop: an asset that
+/// changes takes both marks off again ([`retry_failed_scripts`]).
+fn give_up<M: 'static>(
+    commands: &mut Commands,
+    ended: &mut MessageWriter<ScriptEnded<M>>,
+    entity: Entity,
+    message: String,
+) {
+    ended.write(ScriptEnded { entity, status: ScriptStatus::Failed, value: message, _m: PhantomData });
+    commands
+        .entity(entity)
+        .insert((ScriptDone::<M>::for_vm(), ScriptStartFailed::<M> { _m: PhantomData }));
+}
+
+/// Takes the mark off a script that could not start, when the asset it names is changed.
+///
+/// A `.mrb` that would not load is worth trying again the moment it is another `.mrb`, and that
+/// is what an editor's Apply, a `cargo` rebuild picked up by the asset server's hot reload, or a
+/// download that finished properly the second time all are. Two ways an asset can change reach
+/// this: [`AssetEvent::Modified`], which is the same handle with other bytes, and
+/// [`replace_script`], which is another handle altogether and takes the [`ScriptDone`] off
+/// itself.
+///
+/// It reads the events of **every** `MrbAsset`, not only this VM's, because that is the only
+/// form they come in; what is per-VM is the query, so the failed scripts of the VM named `M` are
+/// the only ones it can touch.
+fn retry_failed_scripts<M: 'static>(
+    mut commands: Commands,
+    mut changed: MessageReader<AssetEvent<MrbAsset>>,
+    failed: Query<(Entity, &Script<M>), With<ScriptStartFailed<M>>>,
+) {
+    let changed: Vec<AssetId<MrbAsset>> = changed
+        .read()
+        .filter_map(|e| match e {
+            AssetEvent::Modified { id } => Some(*id),
+            _ => None,
+        })
+        .collect();
+    if changed.is_empty() {
+        return;
+    }
+    // a `Vec` and not a set: what is in it is the assets that changed in one frame, and what it
+    // is searched for is one lookup per script that is already known to be broken
+    for (entity, script) in &failed {
+        if changed.contains(&script.source.id()) {
+            commands.entity(entity).remove::<ScriptStartFailed<M>>().remove::<ScriptDone<M>>();
         }
     }
 }
@@ -2616,12 +2959,18 @@ fn install_host_api(vm: &mut Vm, release: ReleaseQueue) -> ObjId {
     // `hits = Rubevy.subscribe(:hit)` — a `Task::Queue` the game pushes messages onto
     // (`ScriptWorld::publish`). It is the same kind of queue `Rubevy.ask` answers on, so a
     // script waits on it the same way, in this task or in one of its own.
+    //
+    // `Rubevy.subscribe(:belt, limit: 512)` says how many messages this one queue holds before
+    // the oldest is dropped, where the VM's own `ScriptWorld::queue_limit` is not what this
+    // stream wants. Keywords reach a native as a trailing Hash (SabiRuby's `native_call_args`),
+    // so that is what is read here.
     vm.define_closure(sc, "subscribe", move |vm, _s, a, _b| {
         let name = match a.first() {
             Some(Value::Sym(s)) => vm.sym_name(*s),
             Some(v) => String::from_utf8_lossy(&vm.as_string(*v)?).into_owned(),
             None => return Err(vm.raise_arg("subscribe needs what to listen for")),
         };
+        let limit = subscribe_limit(vm, a.get(1).copied())?;
         // A subscription belongs to an entity's script: that is who a message addressed to an
         // entity reaches, and it is what says when to let the queue go. A task a script made
         // with `Task.new` has the entity of the task that made it (`src/prelude.rb`), so it may
@@ -2656,7 +3005,7 @@ fn install_host_api(vm: &mut Vm, release: ReleaseQueue) -> ObjId {
                     .subscriptions
                     .entry(name)
                     .or_default()
-                    .push(Subscription { entity: Some(entity), queue, seq });
+                    .push(Subscription { entity, queue, seq, limit });
             }
             // no host state is no plugin; let go of the queue rather than leave it rooted
             None => vm.gc_unregister(queue),
@@ -2670,6 +3019,53 @@ fn install_host_api(vm: &mut Vm, release: ReleaseQueue) -> ObjId {
         Ok(Value::Nil)
     });
     entity_class
+}
+
+/// The `limit:` of a `Rubevy.subscribe`, or `None` where the script did not ask for one and the
+/// VM's [`ScriptWorld::queue_limit`] is what it gets.
+///
+/// `arg` is whatever followed the name. A native is handed its caller's keywords as a trailing
+/// Hash, so `Rubevy.subscribe(:belt, limit: 512)` and `Rubevy.subscribe(:belt, {limit: 512})`
+/// arrive here as the same thing — and so does a positional Hash, which is why anything that is
+/// not a Hash is refused rather than ignored.
+///
+/// Everything refused is an `ArgumentError` raised from the script's own frame, so a script that
+/// rescues it reads the line it wrote in its `backtrace` — where the program was compiled with a
+/// line table (`mrbc -g`, `sabiruby_compiler::Options::debug_info`; without one a backtrace has
+/// nothing to say, which is not this call's doing). A limit below one is refused because
+/// the queue would then hold only the newest message; a keyword that is not `limit:` is refused
+/// because Ruby refuses one, and because a silently ignored `limt:` is a subscription that
+/// quietly keeps the default.
+fn subscribe_limit(vm: &mut Vm, arg: Option<Value>) -> Result<Option<usize>, VmError> {
+    let Some(arg) = arg else { return Ok(None) };
+    let Some(entries) = vm.hash_entries(arg) else {
+        return Err(vm.raise_arg("subscribe takes the name to listen for and keywords (limit:)"));
+    };
+    let mut limit = None;
+    for (key, value) in entries {
+        let name = match key {
+            Value::Sym(s) => vm.sym_name(s),
+            other => match vm.str_bytes(other) {
+                Some(b) => String::from_utf8_lossy(b).into_owned(),
+                None => String::from("?"),
+            },
+        };
+        if name != "limit" {
+            return Err(vm.raise_arg(&format!("subscribe: unknown keyword: {name}")));
+        }
+        match value {
+            // one and up: a queue that holds nothing would drop every message but the newest,
+            // which is not what a script asking for a small queue means
+            Value::Int(n) if n >= 1 => limit = Some(n as usize),
+            _ => {
+                let shown = vm.inspect_str(value).unwrap_or_else(|_| String::from("?"));
+                return Err(vm.raise_arg(&format!(
+                    "subscribe: limit: takes a whole number of messages, one or more, not {shown}"
+                )));
+            }
+        }
+    }
+    Ok(limit)
 }
 
 /// The entity of the task the scheduler is running, as `Entity::to_bits`.
