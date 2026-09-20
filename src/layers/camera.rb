@@ -200,6 +200,16 @@ module Rubevy
     # behind a camera should follow — a game that wants it smoothed writes a task of its own with
     # `move_to`, and this one is the plain case.
     #
+    # It sleeps and does not wait on `Rubevy.next_frame`, although that would be exactly one move
+    # a frame. Two reasons, both about what `every` is: a time all the way down (a follower that
+    # waited on frames when it was handed 0 and on seconds otherwise would be two things under
+    # one name), and the cheaper of the two waits — `sleep 0` is 14 instructions the VM settles
+    # by itself against 62 and a round trip for `next_frame`, and a follower runs every frame for
+    # as long as it follows. The two wake on the same frames at any frame rate a game runs at
+    # (the clock moves in ticks of 4 ms, so only past about 250 Hz does `sleep 0` skip one). A
+    # script that needs the promise rather than the habit writes its own task with
+    # `Rubevy.each_frame` and `move_to`.
+    #
     # `offset` is where the camera sits relative to the target: `[dx, dy]`, which leaves the
     # camera's own z alone (in 2D that is the drawing order and not a place; in 3D it is the
     # height the camera was put at), or `[dx, dy, dz]`, which puts the camera dz from the

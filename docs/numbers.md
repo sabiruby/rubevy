@@ -12,6 +12,11 @@
 
 以後、rubevy に数を足す変更は、この表に 1 行足すことを含む。
 
+**R11（2026-09-20）で足した名前**: `RESERVED_KINDS` に `frame.next`（§4。数ではなく名前で、
+分類は (a)）。R11 が足した**数は 1 つも無い** — `Rubevy.next_frame` に上限も既定値も無く、
+待ち行列の長さを縛るのは既にある `budget` と `frame_time` である（`docs/worklog/2026-09-20-next-frame.md`）。
+§8 の集計の 44 件は **45 件**になる（(a) が 8 → 9）。
+
 ---
 
 ## 0. 読み方
@@ -112,7 +117,7 @@ R3 が測ったのは次の 2 つで、**どちらも 64 を指していない**
 |---|---|---|---|---|---|
 | `ENTITY_IVAR` | `src/lib.rs:2458` | `@rubevy_entity` | `src/prelude.rb`（`Task.new` が子タスクに写す）、`docs/host-api.md`（スクリプトが自分で書いてよいと案内している） | `Rubevy.entity` / `ask` / `subscribe` が「エンティティが無い」と言う | *理由のみ*: 「a script would not write it by accident」（`:2405`） |
 | `DROPPED_IVAR` | `src/lib.rs:2469` | `@rubevy_dropped` | `src/prelude.rb` の `Subscription#dropped` | 落とした件数が常に 0 に見える | *理由のみ*: `ENTITY_IVAR` に揃えた（`:2415-2418`） |
-| `RESERVED_KINDS` の 6 つ | `src/lib.rs:2942` | `component.get` / `component.has` / `components` / `entities.with` / `resource.get` / `writes.rejected` | `src/prelude.rb` の `Rubevy.ask(...)` | 問いが rubevy ではなくゲームの `take_requests` に渡り、誰も答えずスクリプトが永久に park する | *理由のみ*: 綴りの約束（`:2885-2891`）。点区切りにした理由はどこにも無い |
+| `RESERVED_KINDS` の 7 つ | `src/lib.rs`（`RESERVED_KINDS`） | `component.get` / `component.has` / `components` / `entities.with` / `frame.next` / `resource.get` / `writes.rejected` | `src/prelude.rb` の `Rubevy.ask(...)` | 問いが rubevy ではなくゲームの `take_requests` に渡り、誰も答えずスクリプトが永久に park する | *理由のみ*: 綴りの約束（`drain_commands` のコメント）。点区切りにした理由はどこにも無い。**R11 で `frame.next` を足して 6 → 7**（`Rubevy.next_frame`。予約 kind の中で唯一 `answer_reflect_requests` が答えず、次の tick の頭で答える） |
 | `$rubevy` とそのキー | `src/lib.rs:2818` | `$rubevy`、`:frame` / `:delta` / `:time` | 全スクリプト、`src/layers/camera.rb:291` | スクリプトが読むものが nil になる | **引用**: `4c1e89f`「`$rubevy` (`:frame`, `:delta`, `:time`) replaces `$frame`/`$delta`」 |
 | `ENTITY_TAG` | `src/lib.rs:3563` | 1 | `set_on_free` の判定と `data_new` の作成 | **名前であって大きさではない**。どの数でもよいが、両方が同じでなければ別種の Data をエンティティと取り違える。`pub` なのは、ホストが自分の Data に別の番号を選べるようにするため | **不明**（なぜ 1 か。ただし「どの数でもよい」ので、不明であることが問題にならない唯一の行） |
 | `AS_ARRAY` の 5 型 | `src/reflect.rs:65` | `glam::Vec2` / `Vec3` / `Vec3A` / `Vec4` / `Quat` | bevy_reflect の型パス | 読みの形が変わり、`tf[:translation][0]` が書けなくなる | **引用**: bevy_reflect 0.19 がこれらを struct として綴っているという事実（`bevy_reflect/src/impls/glam.rs`）。表であって調整値ではない |

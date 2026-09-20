@@ -6,6 +6,31 @@ ones those documents carry, and nothing is estimated.
 
 ## Unreleased
 
+* **A script can wait for the next frame** (R11 of `docs/plans/generalize-plan.md`, on branch
+  `generalize`; the merge's commit goes here when the branch comes in —
+  `docs/worklog/2026-09-20-next-frame.md`, `docs/host-api.md`). `Rubevy.next_frame` parks the task
+  until the next frame and answers that frame's number — the Integer `$rubevy[:frame]` carries —
+  and `Rubevy.each_frame { |dt| … }` is the loop around it. Until now the only wait a script had
+  was `sleep`, which is a length of real time on a clock that moves in whole ticks of 4 ms: at the
+  frame rates a game runs at `sleep 0` does come back on the next frame, but it is a habit and not
+  a promise, and every game that wanted one pass a script a frame wrote the machinery itself (the
+  garden of rubevy_games answers a question of its own, once a frame, from a system).
+  The task is woken at the **head** of the next tick, before the first run of the VM, so the line
+  after it sees that frame's `$rubevy` and writes into that frame's writes — a write is readable
+  one `next_frame` later. A paused VM (`budget = 0`) wakes nobody, for the reason its clock does
+  not move either; where the `frame_time` cannot wake everybody, the rest are woken first on the
+  frame after, and `FrameStats::carried_reflect` counts them while they are behind. It is one of
+  rubevy's own kinds (`"frame.next"`, the seventh in `RESERVED_KINDS`), so a game never sees the
+  question and cannot answer it with something else.
+  Measured with the `#[ignore]`d instruments in `tests/next_frame.rs`: one `next_frame` costs 62
+  instructions of the frame's budget against 14 for a `sleep 0` (which the VM settles by itself),
+  and a thousand tasks that each wake every frame cost about 2.5 ms of tick and 56,000
+  instructions. `Rubevy::Camera#follow` therefore keeps its `sleep`: the two wake on the same
+  frames at any frame rate a game runs at, and `every` stays a length of time throughout.
+  `Rubevy.rejected_writes` is unchanged — it still holds what the last frame that wrote refused,
+  because a script that waits with `sleep` may be two or three frames late — but what a script
+  can now do is wait one frame exactly and read its own refusals there.
+
 * **What R9's first readers walked into** (R10 of `docs/plans/generalize-plan.md`, merged in `06a9d32` —
   `docs/worklog/2026-09-20-numbers-inventory.md`, `docs/host-api.md`). Four small things the
   camera layer and the entry points left behind, and the documents that were missing beside
