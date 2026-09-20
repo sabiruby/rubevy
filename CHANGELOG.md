@@ -6,6 +6,36 @@ ones those documents carry, and nothing is estimated.
 
 ## Unreleased
 
+* **`frame_time` is a limit on the tick, not only on the runs of the VM inside it** (R4 of
+  `docs/plans/generalize-plan.md`, on branch `generalize`; the merge's commit goes here when the
+  branch comes in — `docs/worklog/2026-09-20-frame-time-as-a-limit.md`). A tick is a loop — run
+  the ready tasks, answer what they parked on, run them again — and the clock was looked at only
+  at the head of a round. The answering itself was not measured against anything, so a round that
+  had parked three thousand tasks made three thousand answers however late the frame already was:
+  with three thousand scripts, a `frame_time` of 8 ms gave a tick of 14.9 ms and one of 1 ms gave
+  3.3 ms, two to four times what the app asked for. Now the tick looks at the clock after every
+  answer and puts what it has not reached to the next frame, down the road the leftovers of a
+  spent frame already took — in order, and taken **before** anything the next frame asks, so a
+  question that is put off is not put off again. The same runs now give **8.3 ms** and
+  **1.4 ms**. The clock is the one the VM itself was given (`clock_ns`, Bevy's `Instant`, which a
+  browser has), and it is read only by an app that set a `frame_time`: with `frame_time = None`
+  nothing about this happens and every question of the round is answered as before (measured:
+  no change outside the run-to-run spread).
+  **What a script pays for it** is one frame, for the questions left at the tail of a frame that
+  ran out: `e[:Transform]` still answers in the line that asked it, except there. **What a tick
+  can still pass `frame_time` by** is written down rather than glossed — one answer (a late tick
+  always makes one, or a run of the VM that spent the whole frame time would leave every task
+  parked for ever), the VM's own notice of the deadline (three thousand tasks that ask nothing at
+  all still take 2.9 ms under a 1 ms `frame_time`, inside SabiRuby's scheduler), a second VM, and
+  the systems of the frame that are not the tick. The rustdoc of the field and `docs/host-api.md`
+  ("Components by name", "Answering inside the tick", "Time") say all of it, and the "Time"
+  section now also says that a game can read `Time<Virtual>` by name.
+  **How often the clock is looked at was measured, not chosen**: one read of it is 16.7 ns on the
+  machine of the day against 2.2–2.4 µs for one answer, so looking after every answer costs under
+  a percent of an answer and nothing measurable in a frame — which is why this stage adds **no
+  new number** to the crate. 140 tests pass (135 before), no dependency was added, there is no
+  `unsafe` and the public API is unchanged.
+
 * **The four small things the first users of the shared entry points found** (R6b of
   `docs/plans/generalize-plan.md`, on branch `generalize`; the merge's commit goes here when the
   branch comes in — `docs/worklog/2026-09-20-entry-point-followups.md`). R6 gave both sample games
