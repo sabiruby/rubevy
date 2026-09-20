@@ -6,6 +6,34 @@ ones those documents carry, and nothing is estimated.
 
 ## Unreleased
 
+* **A script can ask what became of a write the world would not take** (before R9 of
+  `docs/plans/generalize-plan.md`, on branch `generalize`; the merge's commit goes here when the
+  branch comes in — `docs/worklog/2026-09-20-rejected-writes.md`).
+  A write lands at the end of the frame, so `e[:X] = hash` has always answered the hash it was
+  handed whether the world took it or not, and what the host had to say about a refusal — the
+  type is not registered, the entity has no such component, the enum is in another variant, a
+  field cannot take what it was given — it said to its log, where no script can read it. The
+  camera work of R0 found this twice over: a `zoom` into the wrong variant of `Projection`
+  changes nothing and says nothing. Now a frame's refusals are kept and answered:
+  **`Rubevy.rejected_writes`** hands a script an Array of `{entity:, name:, reason:}` for the
+  writes **it** made — the entity of the task that asked is what says which those are, and
+  `entity` is what was written *to*, nil for a resource — and **`ScriptWorld::rejected_writes()
+  -> &[RejectedWrite]`** is the host's wider view, every script's, each carrying `by` beside
+  `on`. The `warn!` is unchanged and carries the same sentence, because a game's log is where a
+  game already looks.
+  **The list is one frame's worth, and it is replaced by the next frame that writes** rather
+  than emptied by every frame: a script cannot ask to be woken on the very next one (`sleep 0`
+  waits for the VM's clock, which moves in whole ticks of 4 ms), so a list that lasted one frame
+  would usually be gone before the script that wrote could look at it. It has **no limit and
+  needs none** — a write costs instructions, so the frame's `budget` bounds the count: 33
+  instructions each, some six thousand under the default budget, measured by
+  `tests/rejected_writes.rs::what_one_rejected_write_costs`, which also shows the budget doing
+  the bounding (a script asked for 1,100 and its last frame held 524). It is deliberately **not**
+  in `FrameStats`: every number there is one the tick already had, and the writes are applied in
+  two systems after the tick. Nothing was added to the crate's dependencies, there is no
+  `unsafe`, and the whole of it is `tests/rejected_writes.rs` (7 tests and one `#[ignore]`d
+  instrument) with the section "A write the world would not take" in `docs/host-api.md`.
+
 * **What a frame's tick came to, and two instruments that measure what a machine carries** (R5 of
   `docs/plans/generalize-plan.md`, merged in `3e215c1` — `docs/worklog/2026-09-20-frame-stats.md`, `docs/verification/scale.md`).
   A game could ask what one script had spent (`ScriptWorld::stats`) and nothing at all about the

@@ -532,8 +532,9 @@ The measurements are in `docs/worklog/2026-09-17-sync-reads.md`, and `tests/sche
 the frames from the script's own side — zero for these, one for the questions the game answers,
 in the same file.
 
-The five kinds rubevy answers itself — `component.get`, `component.has`, `components`,
-`entities.with`, `resource.get` — never reach `ScriptWorld::take_requests`: they are sorted out
+The six kinds rubevy answers itself — `component.get`, `component.has`, `components`,
+`entities.with`, `resource.get`, `writes.rejected` — never reach `ScriptWorld::take_requests`:
+they are sorted out
 where the request is made, so a game's answering system sees only its own. A game that wants
 those names picks others.
 
@@ -588,6 +589,59 @@ never reaches `ScriptWorld::take_requests`. `tests/resources.rs` is the whole of
 second VM under a name tag reading and writing the app's one resource, and
 `tests/read_cost.rs::a_resource_read_beside_a_component_read` is the `#[ignore]`d instrument
 that says what the extra lookup costs on the machine it is run on.
+
+## A write the world would not take (`Rubevy.rejected_writes`)
+
+A write lands at the end of the frame, so there is nothing to answer where it is made:
+`e[:X] = hash` gives back the hash it was handed, whether the world took it or not. Until the
+next frame there is nothing to say — and what the host had to say, it said to its log. So the
+refusals of a frame's writes are kept, and a script reads its own on a later frame:
+
+```ruby
+cam[:Projection] = { Orthographic: [ { scale: 2.0 } ] }
+sleep 0                                    # the clock moves, and the write has landed or not
+Rubevy.rejected_writes.each do |w|
+  Rubevy.log "#{w[:name]} on #{w[:entity].inspect}: #{w[:reason]}"
+end
+```
+
+| key | what it is |
+|---|---|
+| `:entity` | the `Rubevy::Entity` the component was on, or **nil** for a resource write |
+| `:name` | the type as the script spelled it (`"Projection"`, `"my_game::Hp"`) |
+| `:reason` | the sentence the log carries, with the path inside the value where there is one (`translation.x: takes a number`) |
+
+**Its own, and not everybody's.** A script is answered the writes *it* made — the entity of the
+task that asked is what says which those are, and a task a script makes with `Task.new` carries
+its maker's entity, so a script's second task counts as the same script. `:entity` is what was
+written *to*, which is not the same thing: a script may write another entity's component, and it
+is still that script's write. A task with no entity at all is answered an empty Array. The host's
+side, `ScriptWorld::rejected_writes() -> &[RejectedWrite]`, is the wider one — every script's,
+each carrying `by` (who wrote) beside `on` (what was written to).
+
+**What is in it** is a refusal and not a mishap: a type nobody registered, an entity without that
+component, a resource nothing has inserted, an enum in another variant than the one the value
+names, a field that cannot take what it was given. A write to an entity that was despawned in
+the meantime is **not** in it — there was nothing left to refuse — and that case makes no line
+in the log either, so the list and the log say the same things.
+
+**One frame's worth.** The list holds what one frame's writes refused, and the next frame in
+which the scripts write anything replaces the lot. It is not emptied by every frame on purpose:
+a script cannot ask to be woken on the very next one (`sleep 0` waits for the VM's clock, which
+moves in whole ticks of 4 ms), so a list that lasted one frame would usually be gone before the
+script that wrote could look at it. Holding it until the scripts next write is the soonest
+anything in it could be out of date.
+
+**It has no limit and needs none.** A script cannot write without spending instructions on the
+writing, so the frame's `budget` already bounds how many refusals a frame can make: 33
+instructions each in the narrowest loop that can make one, which is some six thousand under the
+default budget (`tests/rejected_writes.rs::what_one_rejected_write_costs`, an `#[ignore]`d
+instrument — the count is of the VM and not of the machine).
+
+**The log is unchanged.** Every refusal still makes the `warn!` it always made, because a game's
+log is where a game already looks; this is for the script, which could not see the log.
+`tests/rejected_writes.rs` is the whole of it and
+`docs/worklog/2026-09-20-rejected-writes.md` is how it was decided.
 
 ## Events
 

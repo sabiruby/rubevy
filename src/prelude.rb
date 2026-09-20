@@ -77,6 +77,36 @@ module Rubevy
     ask("resource.get", name.to_s).pop
   end
 
+  # The writes **this script** made that the world would not take, as an Array of Hashes —
+  # `{entity: Rubevy::Entity or nil, name: "Projection", reason: "…"}`, newest last, and empty
+  # where every write landed.
+  #
+  # They are of one frame: the last one in which the scripts of this VM wrote anything at all.
+  # The next frame that writes replaces the lot, so this is read after a write and before the
+  # next — which is not "the very next frame", because a script cannot ask to be woken on one
+  # (`sleep 0` waits for the VM's clock to move, and it moves in ticks of 4 ms).
+  #
+  # A write is applied after this frame's scripts have run, so nothing can be answered where it
+  # is made: `e[:X] = hash` gives back the hash it was handed, whatever becomes of it. The news
+  # is a frame old by the time there is any news at all, and this is where it arrives:
+  #
+  #   cam[:Projection] = { Orthographic: [ { scale: 2.0 } ] }
+  #   sleep 0                                        # the next frame, and the write has landed
+  #   Rubevy.rejected_writes.each { |w| Rubevy.log "#{w[:name]}: #{w[:reason]}" }
+  #
+  # `entity` is what was written to (nil for a resource — `Rubevy.set_resource`), which is not
+  # who wrote it: a script may write another entity's component, and it is the writer this
+  # answers for. Only this script's own are here; the host sees every script's
+  # (`ScriptWorld::rejected_writes`). A task with no entity at all is answered an empty Array.
+  #
+  # What lands here is a refusal and not a mishap: a type nobody registered, an entity without
+  # that component, a variant of an enum that is not the one the value is in, a field that
+  # cannot take what it was given. A write to an entity that was despawned in the meantime is
+  # **not** here — there was nothing left to write to.
+  def self.rejected_writes
+    ask("writes.rejected").pop
+  end
+
   # Raised in whatever is waiting on a subscription's queue when the subscription ends: the
   # script's entity was despawned, its `ScriptTask` was taken away, or its own task ran off its
   # end. Nothing will ever be published to that queue again, so a `pop` that answered would be
