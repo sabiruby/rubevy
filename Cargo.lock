@@ -2833,6 +2833,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rubevy-build"
+version = "0.0.1"
+
+[[package]]
 name = "rustc-hash"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

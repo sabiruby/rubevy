@@ -6,6 +6,34 @@ ones those documents carry, and nothing is estimated.
 
 ## Unreleased
 
+* **The entry points both sample games had written by hand** (R6 of
+  `docs/plans/generalize-plan.md`, on branch `generalize`; the merge's commit goes here when the
+  branch comes in — `docs/worklog/2026-09-20-shared-entry-points.md`). Five of them, for a game
+  that compiles a player's Ruby itself:
+  * `Program::new(prelude, name, body, tail)` builds one program out of a prelude and an author's
+    file and says how far down that pushed the author's first line. The number is counted off the
+    text that really went in front, so it is right whether or not the prelude ended with a newline
+    (both games' `prelude.lines().count() + 2` assumed it did).
+  * `in_the_authors_lines(message, prelude_lines, prelude_name)` takes the prelude back off the
+    line numbers a compiler reported — the author's own line, the prelude by name when the error
+    is in it, the line past the end for the `tail`, and a message with no place in it handed back
+    whole. It reads text and compiles nothing, and `tests/source.rs` checks it against what
+    `sabiruby_compiler` really prints and against the same message under the name a browser's
+    bridge gives it (`playground.rb`).
+  * `replace_script(&mut commands, entity, script)` is the swap both games wrote by hand:
+    `ScriptTask` off, `ScriptDone` off, the new `Script` in.
+  * `EmbeddedHost` serves `require` out of tables built into the binary — `&[(&str, &str)]` of
+    source, `&[(&str, &[u8])]` of `.mrb` — which is the only `require` a browser can have. What
+    compiles a `.rb` is given with `compile_with` (a page's own compiler) and otherwise is the
+    crate's, which is now shared with `FileHost` so the two cannot disagree.
+  * `rubevy-build`, a second package in this repository (std only, no dependencies), is the build
+    script that writes those tables. The repository is a workspace for it; `cargo test` and
+    `cargo package` at the root are unchanged and `Cargo.lock` gains four lines.
+
+  `docs/host-api.md` has the two new sections and `Replacing and removing a script` now names the
+  function. `src/` gained no dependency and nothing a browser lacks
+  (`tests/no_wasm_unsupported.rs`); the public API only grew.
+
 * **A camera driven from Ruby, with nothing added to the crate** (R0 of
   `docs/plans/generalize-plan.md`, on branch `generalize`; the merge's commit goes here when the
   branch comes in — `docs/worklog/2026-09-20-camera-from-ruby.md`). `Camera2d`, `Camera3d` and `Projection` are

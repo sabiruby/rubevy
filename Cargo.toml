@@ -1,3 +1,15 @@
+# One repository, two packages: the crate itself and `rubevy-build`, the build-script helper
+# that puts a game's `.rb` files into its binary. The helper is std only and depends on nothing
+# — it is a *build*-dependency of a game, and a build-dependency on rubevy would build Bevy a
+# second time on the build machine.
+#
+# `cargo test` here is still this package's tests and nothing else (a workspace whose root is a
+# package works on the root package by default); `cargo test --workspace` runs the helper's too.
+# `cargo package` leaves the nested package out of the `.crate`, and the helper is published
+# separately if it is ever published at all.
+[workspace]
+members = [".", "rubevy-build"]
+
 [package]
 name = "rubevy"
 version = "0.0.1"

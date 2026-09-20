@@ -72,7 +72,12 @@
 //! the sum of the VMs' [`ScriptWorld::frame_time`]s. `docs/host-api.md` has
 //! the section, and `examples/two_vms.rs` the working app.
 
+mod embed;
 mod reflect;
+mod source;
+
+pub use crate::embed::{CompileFn, EmbeddedHost};
+pub use crate::source::{in_the_authors_lines, Program};
 
 use bevy::asset::{io::Reader, Asset, AssetApp, AssetLoader, LoadContext};
 use bevy::diagnostic::FrameCount;
@@ -319,6 +324,40 @@ impl<M> Clone for ScriptDone<M> {
 }
 
 impl<M> Copy for ScriptDone<M> {}
+
+/// **Gives an entity another script**: the running one is stopped and `script` takes its place.
+///
+/// ```no_run
+/// # use bevy::prelude::*;
+/// # use rubevy::{replace_script, MrbAsset, Script};
+/// fn reload(mut commands: Commands, entity: Entity, compiled: Handle<MrbAsset>) {
+///     replace_script(&mut commands, entity, Script::new(compiled).with_name("brain.rb"));
+/// }
+/// ```
+///
+/// It is the three lines both sample games wrote by hand whenever an editor applied a change or a
+/// file was reloaded: take the [`ScriptTask`] off (whose removal hook terminates the task in the
+/// VM and closes what it had subscribed to), take the [`ScriptDone`] marker off if the old script
+/// had run to its end, and insert the new [`Script`], which the plugin turns into a task on the
+/// next frame. Leaving any of the three out is a bug that does not look like one: without the
+/// removal the old task goes on running, still carrying the entity, so the thing has two scripts
+/// driving it and only one of them is visible.
+///
+/// Which VM this is comes from the `script`, so `replace_script(&mut commands, e,
+/// Script::<Mods>::for_vm(h))` replaces a script of the VM named `Mods` and leaves the first VM's
+/// script on the same entity alone.
+///
+/// A question the old script had already asked may still be answered once — the [`Request`] was
+/// taken before the swap — and no new one is asked (`tests/replace.rs`). To **stop** a script
+/// instead of replacing it, remove its [`ScriptTask`] or despawn the entity; there is nothing
+/// else to do.
+pub fn replace_script<M: 'static>(commands: &mut Commands, entity: Entity, script: Script<M>) {
+    commands
+        .entity(entity)
+        .remove::<ScriptTask<M>>()
+        .remove::<ScriptDone<M>>()
+        .insert(script);
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScriptStatus {
@@ -1287,22 +1326,40 @@ fn take_commands(vm: &mut Vm) -> Vec<HostCommand> {
 /// no filesystem at all, is served nothing (`tests/no_wasm_unsupported.rs`).
 struct FileHost;
 
+/// Ruby source to a RITE binary with the reference compiler, which is only in a build with the
+/// `ruby-source` feature.
+///
+/// Both of the crate's own hosts answer `compile` with this when they were given nothing else —
+/// [`FileHost`], and an [`EmbeddedHost`] without a [`compile_with`](EmbeddedHost::compile_with) —
+/// so that a build without the feature says the same thing whichever of them is installed.
+#[cfg(feature = "ruby-source")]
+pub(crate) fn reference_compile(
+    src: &[u8],
+    opts: &sabiruby::EvalOptions,
+) -> Result<Vec<u8>, String> {
+    let o = sabiruby_compiler::Options {
+        filename: opts.filename.into(), debug_info: opts.debug_info, ..Default::default()
+    };
+    sabiruby_compiler::compile_eval(src, &o, opts.line, opts.scopes).map_err(|e| {
+        match e.diagnostics.iter().find(|d| d.kind.is_error()) {
+            Some(d) => d.message.clone(),
+            None => String::from("compile error"),
+        }
+    })
+}
+
+/// The same in a build without the feature: there is no compiler to ask.
+#[cfg(not(feature = "ruby-source"))]
+pub(crate) fn reference_compile(
+    _src: &[u8],
+    _opts: &sabiruby::EvalOptions,
+) -> Result<Vec<u8>, String> {
+    Err(String::from("rubevy was built without the `ruby-source` feature: require a .mrb, or `eval` is unavailable"))
+}
+
 impl sabiruby::Host for FileHost {
-    #[cfg(feature = "ruby-source")]
     fn compile(&mut self, src: &[u8], opts: &sabiruby::EvalOptions) -> Result<Vec<u8>, String> {
-        let o = sabiruby_compiler::Options {
-            filename: opts.filename.into(), debug_info: opts.debug_info, ..Default::default()
-        };
-        sabiruby_compiler::compile_eval(src, &o, opts.line, opts.scopes).map_err(|e| {
-            match e.diagnostics.iter().find(|d| d.kind.is_error()) {
-                Some(d) => d.message.clone(),
-                None => String::from("compile error"),
-            }
-        })
-    }
-    #[cfg(not(feature = "ruby-source"))]
-    fn compile(&mut self, _src: &[u8], _opts: &sabiruby::EvalOptions) -> Result<Vec<u8>, String> {
-        Err(String::from("rubevy was built without the `ruby-source` feature: require a .mrb, or `eval` is unavailable"))
+        reference_compile(src, opts)
     }
     fn read_file(&mut self, path: &str) -> Option<Vec<u8>> {
         std::fs::read(path).ok() // wasm: native-only — a browser has no filesystem to read from

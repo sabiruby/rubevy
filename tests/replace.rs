@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::prelude::*;
-use rubevy::{Answer, MrbAsset, RubevyPlugin, Script, ScriptDone, ScriptTask, ScriptWorld};
+use rubevy::{replace_script, Answer, MrbAsset, RubevyPlugin, Script, ScriptDone, ScriptTask, ScriptWorld};
 
 /// Requests seen per kind, so far.
 #[derive(Resource, Default)]
@@ -78,6 +78,41 @@ fn a_replaced_script_stops() {
     let seen = app.world().resource::<Seen>();
     assert_eq!(seen.old, before, "the replaced script keeps asking");
     assert!(seen.new > 0, "the new script runs");
+}
+
+/// The same swap through the crate's own entry point, which is what a game writes: both sample
+/// games had the three lines above copied into them, and one of the two is a reload button.
+/// `Commands` rather than `&mut World`, because that is where a game stands when a button was
+/// pressed.
+#[test]
+fn replace_script_is_the_same_swap() {
+    let mut app = app();
+    let (old, new) = {
+        let mut assets = app.world_mut().resource_mut::<Assets<MrbAsset>>();
+        (
+            assets.add(compile("loop { Rubevy.ask('old').pop }")),
+            assets.add(compile("loop { Rubevy.ask('new').pop }")),
+        )
+    };
+    let entity = app.world_mut().spawn(Script::new(old)).id();
+    frames(&mut app, 10);
+    assert!(app.world().resource::<Seen>().old > 0, "the first script runs");
+
+    let mut queue = bevy::ecs::world::CommandQueue::default();
+    let mut commands = Commands::new(&mut queue, app.world());
+    replace_script(&mut commands, entity, Script::new(new).with_name("second"));
+    queue.apply(app.world_mut());
+
+    frames(&mut app, 3);
+    let before = app.world().resource::<Seen>().old;
+    frames(&mut app, 20);
+    let seen = app.world().resource::<Seen>();
+    assert_eq!(seen.old, before, "the replaced script keeps asking");
+    assert!(seen.new > 0, "the new script runs");
+    // the task really is another one, under the name the new `Script` was given
+    let task = *app.world().entity(entity).get::<ScriptTask>().expect("a task again");
+    let stats = app.world().resource::<ScriptWorld>().stats(&task);
+    assert!(!stats.finished);
 }
 
 #[test]

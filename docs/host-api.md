@@ -879,6 +879,25 @@ A game reloads a script by removing the entity's `ScriptTask` and inserting a ne
 ends one by despawning the entity. Either way `ScriptTask`'s `on_remove` hook terminates the task
 in the VM (`Task#terminate`) and lets the collector have it.
 
+**Replacing is `replace_script`**, which is those lines under a name:
+
+```rust
+use rubevy::{replace_script, Script};
+
+replace_script(&mut commands, entity, Script::new(compiled).with_name("brain.rb"));
+```
+
+It takes the `Script` rather than a handle, so the new script's name and priority are set the way
+they are set anywhere else, and the VM it belongs to comes from the `Script`'s own name tag
+(`Script::<Mods>::for_vm(h)` replaces a script of the VM named `Mods` and leaves the first VM's
+script on the same entity alone). What it does is take the `ScriptTask` off, take the `ScriptDone`
+marker off in case the old script had already ended — without that, an entity whose script ran to
+its end could never be given another one — and insert the new `Script`. Both sample games had
+those three lines copied into them, and it is a reload button in each.
+
+**Stopping** a script is still just removing its `ScriptTask` or despawning the entity: there is
+no function for it because there is nothing else to do.
+
 Before that hook the task was only forgotten by the ECS: it stayed in the scheduler's queues and
 kept running, still carrying its entity, so a reloaded robot had two brains asking for the same
 body — the old one invisible, since nothing showed it any more. `tests/replace.rs` checks both
@@ -895,6 +914,116 @@ report is rubevy_games' garden). With a VM that has the 2026-09-17 scheduler fix
 the frame it is in and no more: `tests/restart_burst.rs` replaces ten such scripts in one frame
 and checks that an eleventh, untouched, keeps running on every frame after it. Against a VM
 without the fix that test fails, which is what it is there for.
+
+## A script the game compiles itself (`Program`, `in_the_authors_lines`)
+
+A game whose scripts are `.mrb` files on disk needs none of this: Bevy's asset server reads them
+and `Script::new(handle)` runs them. A game that lets a **player** write Ruby — an editor panel, a
+file the player is invited to change — compiles that text itself, and then meets two things both
+sample games wrote by hand.
+
+The first is that the player's file is not the whole program. A game of this kind has a **prelude**
+in front of it: the DSL the player writes in, the methods the game will call back. The two are
+compiled as one program, which is why neither needs a `require` and why the player's file may call
+the prelude's methods at the top level.
+
+```rust
+use rubevy::Program;
+
+let program = Program::new(&prelude, "brain.rb", &players_text, "run");
+// program.source        — hand this to whatever compiler this build has
+// program.prelude_lines — how far down that pushed the player's first line
+```
+
+The second is that every line number the compiler then reports is a line of *that* program.
+rubevy_games' garden reported `beetle.rb:600` for something its author had written on line 118,
+and its sibling sabibots still reports numbers 295 lines too far down. `in_the_authors_lines` puts
+them back:
+
+```rust
+use rubevy::in_the_authors_lines;
+
+match compile(&program.source) {                      // the game's own compiler; see below
+    Ok(bytes) => { /* … */ }
+    Err(message) => {
+        let shown = in_the_authors_lines(&message, program.prelude_lines, "prelude.rb");
+        // "brain.rb:118:19: syntax error, unexpected '<'; …"
+    }
+}
+```
+
+It works on the **text**, and rubevy compiles nothing here. Both compilers a game can have print
+`FILE:LINE:COL: message`, one diagnostic to a line — `sabiruby_compiler::Diagnostic`'s `Display`,
+"as `mrbc` prints it" — and in a browser the compiler is a function the page defines, which is
+handed a source and nothing else, so it prints the same thing with the file always called
+`playground.rb`. So the only thing to find in a line is the `:LINE:COL:` in it, and the first one
+on the line is the only one that can be it; what is in front of it is a file name, which may have
+colons of its own.
+
+Three things come back (`tests/source.rs` has each, with the real compiler's real message):
+
+| where the compiler pointed | what is shown |
+|---|---|
+| past the prelude | the author's own line: `n - prelude_lines` |
+| past the author's last line (the `tail`) | the line after the file's end, which is where the program's last statement is |
+| inside the prelude | the prelude's name and the line it really is — not a number the author cannot find, and not a negative one |
+| nowhere (`compile error`, a missing file) | the message, whole |
+
+`prelude_lines` is counted off the text that really went in front, so it is right whether or not
+the prelude ended with a newline of its own, and it is the same number a panel showing a script's
+frames subtracts from the line the VM reports (rubevy_games' `VmInspector::fill`).
+
+## `require` out of the binary (`EmbeddedHost`, `rubevy-build`)
+
+`require` reads the asset directory with `std::fs` (`FileHost`), and a browser has no filesystem:
+a page is served a wasm module and whatever it fetches, and none of that is a path. `EmbeddedHost`
+is the same road with a table in place of the directory.
+
+```rust
+use rubevy::{EmbeddedHost, ScriptWorld};
+
+// what the build script wrote
+include!(concat!(env!("OUT_DIR"), "/ruby_files.rs"));   // pub static RUBY_FILES: &[(&str, &str)]
+
+fn embed_the_scripts(mut world: ResMut<ScriptWorld>) {
+    world.vm.set_host(Box::new(
+        EmbeddedHost::new(RUBY_FILES).compile_with(|src, opts| page_compile(src, opts)),
+    ));
+    world.vm.set_load_path(&["ruby"]);
+}
+app.add_systems(Startup, embed_the_scripts);
+```
+
+The paths in the table are the paths a script requires: the VM joins a load path and the name the
+script wrote (`"ruby"` + `"helper"` + `".rb"`) and the host looks that text up, so the keys are
+paths relative to the crate with `/` in them. A leading `./` is taken off first.
+
+**A `.mrb` needs no compiler**: `with_binaries` takes a table of bytes, the VM sees the RITE magic
+and runs them, and a build with neither the `ruby-source` feature nor a `compile_with` can still
+`require` one. A `.rb` is source, so it needs a compiler, and `compile_with` is where a browser's
+comes from — there is no C build in a page, and what the playground publishes is a function the
+page defines. The closure has `Host::compile`'s own shape, because that is who calls it; a caller
+that cannot honour the options' `line` and `scopes` (a browser bridge cannot: it is given a
+source) may ignore them, and then `require` works and `eval` of a string that reads its caller's
+locals does not. Without a `compile_with` the crate's own answer is used, which is the reference
+compiler with the `ruby-source` feature and the same refusal `FileHost` gives without it.
+
+**The table is the build script's** — `rubevy-build`, the second package in this repository:
+
+```rust
+// build.rs
+fn main() {
+    rubevy_build::Embed::new("ruby").write();
+}
+```
+
+It walks `ruby/` for `.rb` files and writes `OUT_DIR/ruby_files.rs`: a `pub static RUBY_FILES` of
+`(relative path, include_str!(absolute path))`, sorted, with a `cargo:rerun-if-changed` for the
+directory and for every file in it. The name of the static, the file, the extensions and whether
+they are text or bytes (`include_bytes!`, for `.mrb`) are all settable; the defaults are what both
+sample games' build scripts wrote, which were the same 35 lines to the byte. It is **std and
+nothing else** on purpose: a build-dependency is built for the build machine, and a build script
+that named rubevy would build Bevy a second time for every game that embeds a script.
 
 ## Further reading
 
