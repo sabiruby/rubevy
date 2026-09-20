@@ -232,7 +232,11 @@ rubevy を触ったあとの **`web/build.sh` + Playwright の確認**（共通 
 
 | 段階 | 状況 |
 |---|---|
-| R0〜R10 | 未着手（2026-09-20、計画のみ） |
+| R0 | **済み**（2026-09-20、ブランチ `generalize` の `bf45bde`、`src/` 無変更）。3 つとも書ける: `Rubevy.find(:Camera2d)`、`cam[:Transform] =`、ズームは `cam[:Projection] = { Orthographic: [ { scale: 2.5 } ] }`（変種名の Hash → tuple 変種なので **Array** → 中の struct への部分書き）。通らない形 3 つもテストにした: 変種の切り替え、tuple 変種のフィールドを名前で書く、同じ tick の 2 回のズーム（書きはフレーム末尾）。`tests/camera.rs` 6 件、全体 70 passed。記録は `docs/worklog/2026-09-20-camera-from-ruby.md` |
+| R6 | 実行中（計測が無いので R1〜R5 より先に回す。games の S2 がこれを待っている） |
+| R7 | sabiruby 側（`sabiruby-serde`）を実行中。rubevy 側の節と example は R6 の後 |
+| R1〜R5 | 未着手。計測を伴うので、機械が静かになってから 1 本ずつ |
+| R8〜R10 | 未着手 |
 
 VM 側に残るもの（sabiruby、未計画）: キューごとの待ち手リスト・sleep 期限のヒープ・タスクが自分のいるキューを覚える（待ちタスクの O(N)）、`ireps` の解放。
 
@@ -243,4 +247,10 @@ VM 側に残るもの（sabiruby、未計画）: キューごとの待ち手リ�
 
 | 日付・段階 | 気づいた点 | どこ | 属する先 | 状況（計画に足した／著者判断待ち／見送り・理由） |
 |---|---|---|---|---|
-| — | まだ無し | | | |
+| 09-20 R0 | enum の書きが失敗したときの warn が `not written whole: : the fields of …` とコロンで始まる（component 直下では `path` が空） | `src/reflect.rs:460-462` ほか `:449` `:456` `:486` `:489` | rubevy（表示のバグ） | 計画に足す: R8 のついでに直す |
+| 09-20 R0 | 書きが拒まれたことがスクリプトから分からない（`warn!` だけ、`Entity#set` は渡した値を返す）。カメラ層で変種が想定と違うと `zoom` が黙って効かない | `src/lib.rs:2124-2127`、`src/prelude.rb:40-43` | rubevy（口の設計） | **著者判断待ち**: 「最後の書きの問題」を読める口を足すか。R9 の前に |
+| 09-20 R0 | `host-api.md` に tuple 変種の書きの規則が無い（Array でしか書けない）。読みの表も struct 変種と一括り | `docs/host-api.md:422-436` | rubevy（文書と実物のずれ） | 計画に足す: R8 で 1 文 |
+| 09-20 R0 | `host-api.md` の「`DefaultPlugins` does it」: bevy 0.19.1 の `bevy_camera` / `bevy_transform` に `register_type` は無く、登録しているのは `reflect_auto_register` feature。どちらが効いているかは未確認 | `docs/host-api.md:406-408` | rubevy（文書、小） | 計画に足す: R8 で確かめて直す。games は `DefaultPlugins` なので F0 でも確かめる |
+| 09-20 R0 | repo に rustfmt の設定が無く、`cargo fmt --check` が既存コードで落ちる。担当が `cargo fmt` を走らせると無関係な差分が出る | repo の根 | repo の作法 | **著者判断待ち**: 設定を置くか「fmt は使わない」と書くか。それまで担当には「`cargo fmt` を走らせない」と伝える |
+| 09-20 R0 | 誰も答えない `Rubevy.ask(...).pop` は永久に park する。任意の Ruby 層の `world_at` に答え手がいないときの振る舞いが決まらない | `Rubevy.ask` | rubevy（口の設計） | R9 は「投げっぱなしでキューを返す」で始める。答え手の有無を聞ける口は**著者判断待ち** |
+| 09-20 R0 | ズームの向き（`zoom 2` は寄るのか引くのか）と、2D は `scale`・3D は `fov` という数の違い | R9 の設計 | rubevy（Ruby 層） | **著者判断待ち**（R9 の前） |
