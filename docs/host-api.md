@@ -975,6 +975,36 @@ the frame it is in and no more: `tests/restart_burst.rs` replaces ten such scrip
 and checks that an eleventh, untouched, keeps running on every frame after it. Against a VM
 without the fix that test fails, which is what it is there for.
 
+## One program, one irep
+
+A hundred entities running one `.mrb` load it **once**. The plugin keeps every program it has
+loaded, by the bytes of the program itself, and `start_scripts` looks there before it asks the VM
+to load anything; `Vm::task_spawn` takes an irep, so the hundred tasks are spawned from that one
+copy. `ScriptWorld::loaded_programs()` is how many distinct programs this VM holds.
+
+The key is the program and not the handle it arrived in, because a game that compiles a player's
+Ruby itself adds a **new** asset every time (`Assets::add` hands out a fresh id, and both sample
+games compile once per script *and once per creature*). Two assets with the same bytes are one
+program; a program that changed is other bytes, so it misses the table and is loaded — there is
+nothing to invalidate, and no window in which a reloaded file could be started with the code it
+had before. `tests/shared_irep.rs` checks both directions, including a file replaced under its own
+handle the way the asset server replaces one.
+
+What it is worth, measured on 2026-09-20 with the survey's instrument (`taskset -c 2`, release):
+three thousand entities of one 294-byte `.mrb` used to leave the VM holding 6000 ireps and now
+leave it holding 2, the frame they all start in went from 7.56 ms to 5.11 ms (1.86 → 0.91 ms at a
+thousand entities), and resident memory at the start went from 2.21 kB an entity to 1.46 kB. What
+is left of the starting cost is `Vm::task_spawn` — a context and a stack for each script, which
+they do not share.
+
+**An irep is never given back.** SabiRuby 0.5.2 has no way to drop one — nothing in the crate
+removes from `Vm::ireps` — so every *new* text a game starts a script from is one more irep for
+the life of the app. That is not something rubevy can fix from the outside, and the table is what
+keeps it from being worse: applying the same text again, or applying a change and taking it back,
+costs nothing the second time. A game with an editor that applies a change every few seconds for
+an hour should know the number it is spending; a game whose scripts are files on disk spends it
+once each.
+
 ## A script the game compiles itself (`Program`, `in_the_authors_lines`)
 
 A game whose scripts are `.mrb` files on disk needs none of this: Bevy's asset server reads them

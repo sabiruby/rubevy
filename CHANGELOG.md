@@ -6,6 +6,36 @@ ones those documents carry, and nothing is estimated.
 
 ## Unreleased
 
+* **One program, one irep** (R2 of `docs/plans/generalize-plan.md`, on branch `generalize`; the
+  merge's commit goes here when the branch comes in —
+  `docs/worklog/2026-09-20-one-irep-per-program.md`). `start_scripts` used to hand `Vm::load` the
+  bytes of every `Script` it turned into a task, so a thousand entities running one `.mrb` put a
+  thousand copies of the same instructions in the VM (the survey of 2026-09-20 measured 2.2 kB
+  and 2.5 µs an entity). The plugin now keeps the programs it has loaded, by the bytes of the
+  program itself, and spawns every task of one program from the one irep — which is all
+  `Vm::task_spawn` ever needed, and needs nothing of SabiRuby that was not already there. The key
+  is the program and not the asset it arrived in because a game that compiles a player's Ruby
+  adds a new asset every time, and garden compiles a species' file again for every animal born
+  into it; the key is the whole program and not a hash of it so that two different programs can
+  never meet in the table. Measured with the survey's own instrument on the machine and settings
+  of `docs/worklog/2026-09-20-factory-survey.md` (`taskset -c 2`, release, 90 frames × 3, before
+  and after taken the same day): the VM holds **2 ireps whatever the number of entities** where it
+  used to hold two per entity (6000 at three thousand), the frame all of them start in goes
+  1.86 → 0.91 ms at a thousand and 7.56 → 5.11 ms at three thousand, and resident memory at the
+  start goes 2.21 → 1.46 kB an entity (three thousand entities of a 294-byte `.mrb`: 28.9 → 26.3 MB,
+  and 49.1 → 47.1 MB once they have run). The steady frame time is unchanged, which the code says
+  too — after the starting frame `start_scripts` walks an empty query. The survey's "2.2 kB an
+  entity, the copy of the irep" turns out to have been the irep *and* the task: 0.75 kB of it was
+  the irep, and that is the part this gives back.
+  Nothing in the public API changed except one addition, `ScriptWorld::loaded_programs()`, and
+  nothing was added to `[dependencies]`. `tests/shared_irep.rs` (6 tests) checks that a hundred
+  entities load one program once, that the same text in another asset is the same irep, that two
+  tasks of one irep cannot reach each other through its string literals, and that a replaced or
+  reloaded asset runs its new text. What it cannot fix is that **SabiRuby has no way to give an
+  irep back** (0.5.2 never removes from `Vm::ireps`), so a game that applies a *new* text over and
+  over still spends one program's ireps each time; the table is what keeps applying the *same*
+  text again from costing anything, and `docs/host-api.md` says so.
+
 * **Subscriptions are filed by name** (R1 of `docs/plans/generalize-plan.md`, on branch
   `generalize`; the merge's commit goes here when the branch comes in —
   `docs/worklog/2026-09-20-subscription-index.md`). `ScriptWorld::publish` used to walk every

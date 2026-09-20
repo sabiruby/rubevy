@@ -832,6 +832,36 @@ pub struct ScriptWorld<M = ()> {
     /// The objects of dropped [`Arg::Value`]s, waiting for a sweep with the `Vm`
     /// ([`ScriptWorld::release_dropped_values`]). The `Rubevy.ask` native holds the other end.
     release: ReleaseQueue,
+    /// Every program this VM has loaded, by **the bytes of the program itself**, to the irep
+    /// `Vm::load` made of it ([`ScriptWorld::irep_of`]).
+    ///
+    /// `start_scripts` used to hand `Vm::load` the bytes of every [`Script`] it turned into a
+    /// task, so a thousand entities running one `.mrb` put a thousand copies of the same
+    /// instructions in the VM. `Vm::task_spawn` takes an irep, and an irep is read-only while
+    /// it runs, so one copy is enough for all of them.
+    ///
+    /// **Why the bytes and not the `AssetId`.** A game that compiles a player's Ruby itself adds
+    /// a *new* asset every time — `Assets::add` hands out a fresh id — and both sample games do
+    /// it once per script *and once per creature*: garden compiles the same species' file again
+    /// for every animal born into it (`garden/src/main.rs`, `give_mind`). Keyed by asset id,
+    /// those thousand creatures would still be a thousand ireps. Keyed by what the program *is*,
+    /// they are one.
+    ///
+    /// The key is the whole program and not a hash of it, so two different programs can never
+    /// meet in it: a hash collision in the map is settled by comparing the bytes, as it is in
+    /// any `HashMap`, and the worst a collision can cost is the comparison. The price is one
+    /// copy of each distinct program's bytes — **once**, where the irep it saves cost that much
+    /// again for every entity (measured 2026-09-20 with three thousand entities of a 294-byte
+    /// `.mrb`: 2.21 kB of resident memory an entity when each loaded its own, 1.46 kB when they
+    /// shared one).
+    ///
+    /// Nothing is ever taken out of it, and nothing needs to be: a program that changed is other
+    /// bytes, so it misses and is loaded. What that leaves behind is the irep of the version
+    /// before it, and **SabiRuby has no way to drop an irep** (0.5.2: nothing in the crate ever
+    /// removes from `Vm::ireps`), so the VM would keep it whether this map did or not. Keeping it
+    /// is what makes an editor that applies the same text twice — or applies a change and takes
+    /// it back — cost nothing the second time.
+    programs: std::collections::HashMap<Box<[u8]>, sabiruby::object::IrepId>,
     /// Which VM this is, as a type. Nothing reads it; what it does is keep the resources of two
     /// VMs apart, and with them their tasks, requests and components.
     _m: PhantomData<fn() -> M>,
@@ -893,8 +923,39 @@ impl<M: 'static> ScriptWorld<M> {
             entity_class,
             freed_entities,
             release,
+            programs: std::collections::HashMap::new(),
             _m: PhantomData,
         })
+    }
+
+    /// The irep of the program in `bytes`, loading it the first time this VM sees it.
+    ///
+    /// This is what keeps a thousand entities running one `.mrb` to one copy of it
+    /// ([`ScriptWorld::programs`] says why the bytes are the key). A caller gets the same
+    /// `IrepId` back for the same program however many times it asks, and `Vm::task_spawn` may
+    /// be given that id once per task: an irep is read-only while it runs — the VM keeps no
+    /// inline cache, no counter and no debug state in one (SabiRuby 0.5.2, `VmIrep` is the
+    /// instructions, the pool, the symbols, the line table and nothing besides; the one place
+    /// the VM writes to an irep is the throwaway one a `Binding` wraps a scope in,
+    /// `ext_binding.rs`) — and a string literal is copied out of the pool each time it is
+    /// reached, so two tasks of one program cannot reach each other through it.
+    fn irep_of(&mut self, bytes: &[u8]) -> Result<sabiruby::object::IrepId, VmError> {
+        if let Some(&irep) = self.programs.get(bytes) {
+            return Ok(irep);
+        }
+        let irep = self.vm.load(bytes)?;
+        self.programs.insert(bytes.into(), irep);
+        Ok(irep)
+    }
+
+    /// How many distinct programs this VM has loaded for its scripts.
+    ///
+    /// One per program and not one per script: the scripts of one `.mrb` share its irep. It is
+    /// also the number of ireps that the starting of scripts has left in the VM, which is the
+    /// number to watch where a game applies a player's edits over and over — the VM has no way
+    /// to give an irep back, so each **new** text is one more, for the life of the app.
+    pub fn loaded_programs(&self) -> usize {
+        self.programs.len()
     }
 
     /// What a script has spent and where it is, for a HUD or a debugger panel. The task comes
@@ -1699,14 +1760,16 @@ fn start_scripts<M: 'static>(
     for (entity, script) in &pending {
         let Some(asset) = assets.get(&script.source) else { continue };
         let name = script.name.clone().unwrap_or_else(|| format!("{entity}"));
-        let vm = &mut world.vm;
-        let irep = match vm.load(&asset.bytes) {
+        // the program is loaded once however many entities run it (`ScriptWorld::irep_of`);
+        // what is per-entity is the task, below
+        let irep = match world.irep_of(&asset.bytes) {
             Ok(i) => i,
             Err(e) => {
-                error!("rubevy: {name} failed to load: {}", vm.describe_error(&e));
+                error!("rubevy: {name} failed to load: {}", world.vm.describe_error(&e));
                 continue;
             }
         };
+        let vm = &mut world.vm;
         match vm.task_spawn(irep, script.priority, Some(&name)) {
             Ok(task) => {
                 // the entity holds the task, so the collector must not take it
