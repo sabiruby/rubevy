@@ -7,8 +7,7 @@ ones those documents carry, and nothing is estimated.
 ## Unreleased
 
 * **`frame_time` is a limit on the tick, not only on the runs of the VM inside it** (R4 of
-  `docs/plans/generalize-plan.md`, on branch `generalize`; the merge's commit goes here when the
-  branch comes in — `docs/worklog/2026-09-20-frame-time-as-a-limit.md`). A tick is a loop — run
+  `docs/plans/generalize-plan.md`, merged in `270b316` — `docs/worklog/2026-09-20-frame-time-as-a-limit.md`). A tick is a loop — run
   the ready tasks, answer what they parked on, run them again — and the clock was looked at only
   at the head of a round. The answering itself was not measured against anything, so a round that
   had parked three thousand tasks made three thousand answers however late the frame already was:
