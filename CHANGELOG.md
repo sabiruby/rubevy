@@ -7,8 +7,7 @@ ones those documents carry, and nothing is estimated.
 ## Unreleased
 
 * **The four small things the first users of the shared entry points found** (R6b of
-  `docs/plans/generalize-plan.md`, on branch `generalize`; the merge's commit goes here when the
-  branch comes in — `docs/worklog/2026-09-20-entry-point-followups.md`). R6 gave both sample games
+  `docs/plans/generalize-plan.md`, merged in `7de5ca2` — `docs/worklog/2026-09-20-entry-point-followups.md`). R6 gave both sample games
   one place for the code they had each written by hand; using it turned up four things, and all
   four are additions — no name and no meaning changed.
   **`ScriptWorld::require_from(host, load_path)`** is the host and the load path as one act.
@@ -45,8 +44,7 @@ ones those documents carry, and nothing is estimated.
   `unsafe` and no new number in the crate.
 
 * **A queue that overflowed says so, and how much it holds is the app's to say** (R3 of
-  `docs/plans/generalize-plan.md`, on branch `generalize`; the merge's commit goes here when the
-  branch comes in — `docs/worklog/2026-09-20-overflow-and-limits.md`). A subscriber's queue held
+  `docs/plans/generalize-plan.md`, merged in `7de5ca2` — `docs/worklog/2026-09-20-overflow-and-limits.md`). A subscriber's queue held
   sixty-four messages and dropped its oldest past that, in silence and at a number nothing could
   change: `QUEUE_LIMIT` was a `const`, and what it dropped left no log, no counter and nothing a
   script could notice — a `pop` that skipped forty messages looks exactly like one that skipped
