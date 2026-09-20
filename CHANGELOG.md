@@ -37,8 +37,7 @@ ones those documents carry, and nothing is estimated.
   `unsafe` and the public API is unchanged.
 
 * **The four small things the first users of the shared entry points found** (R6b of
-  `docs/plans/generalize-plan.md`, on branch `generalize`; the merge's commit goes here when the
-  branch comes in — `docs/worklog/2026-09-20-entry-point-followups.md`). R6 gave both sample games
+  `docs/plans/generalize-plan.md`, merged in `7de5ca2` — `docs/worklog/2026-09-20-entry-point-followups.md`). R6 gave both sample games
   one place for the code they had each written by hand; using it turned up four things, and all
   four are additions — no name and no meaning changed.
   **`ScriptWorld::require_from(host, load_path)`** is the host and the load path as one act.
@@ -75,8 +74,7 @@ ones those documents carry, and nothing is estimated.
   `unsafe` and no new number in the crate.
 
 * **A queue that overflowed says so, and how much it holds is the app's to say** (R3 of
-  `docs/plans/generalize-plan.md`, on branch `generalize`; the merge's commit goes here when the
-  branch comes in — `docs/worklog/2026-09-20-overflow-and-limits.md`). A subscriber's queue held
+  `docs/plans/generalize-plan.md`, merged in `7de5ca2` — `docs/worklog/2026-09-20-overflow-and-limits.md`). A subscriber's queue held
   sixty-four messages and dropped its oldest past that, in silence and at a number nothing could
   change: `QUEUE_LIMIT` was a `const`, and what it dropped left no log, no counter and nothing a
   script could notice — a `pop` that skipped forty messages looks exactly like one that skipped
@@ -109,8 +107,7 @@ ones those documents carry, and nothing is estimated.
   dropped message, which is what reading and writing the count on the queue object costs. A game
   that is not overflowing pays none of it; a game that is overflowing pays it to find out.
 
-* **One program, one irep** (R2 of `docs/plans/generalize-plan.md`, on branch `generalize`; the
-  merge's commit goes here when the branch comes in —
+* **One program, one irep** (R2 of `docs/plans/generalize-plan.md`, merged in `fa1b7e3` —
   `docs/worklog/2026-09-20-one-irep-per-program.md`). `start_scripts` used to hand `Vm::load` the
   bytes of every `Script` it turned into a task, so a thousand entities running one `.mrb` put a
   thousand copies of the same instructions in the VM (the survey of 2026-09-20 measured 2.2 kB
@@ -139,8 +136,7 @@ ones those documents carry, and nothing is estimated.
   over still spends one program's ireps each time; the table is what keeps applying the *same*
   text again from costing anything, and `docs/host-api.md` says so.
 
-* **Subscriptions are filed by name** (R1 of `docs/plans/generalize-plan.md`, on branch
-  `generalize`; the merge's commit goes here when the branch comes in —
+* **Subscriptions are filed by name** (R1 of `docs/plans/generalize-plan.md`, merged in `fa1b7e3` —
   `docs/worklog/2026-09-20-subscription-index.md`). `ScriptWorld::publish` used to walk every
   standing subscription of the VM to find the ones listening for a name, so publishing cost the
   number of subscriptions whether anybody was listening or not: 228 ns a message at a thousand
@@ -158,8 +154,7 @@ ones those documents carry, and nothing is estimated.
   `tests/events.rs` gains one test for the shape the filing gives Ruby (one script listening for
   several names, and within a name the order it subscribed in).
 
-* **Resources by name** (R8 of `docs/plans/generalize-plan.md`, on branch `generalize`; the
-  merge's commit goes here when the branch comes in —
+* **Resources by name** (R8 of `docs/plans/generalize-plan.md`, merged in `fa1b7e3` —
   `docs/worklog/2026-09-20-resources-by-name.md`). `Rubevy.resource(:Score)` reads a resource as
   a Hash of its fields and `Rubevy.set_resource(:Score, { points: 8.0 })` writes the fields it
   names — the component road with the entity left out of it, and the same rules throughout: the
@@ -187,8 +182,7 @@ ones those documents carry, and nothing is estimated.
   `tests/resources.rs` reads `Time<Virtual>` under `MinimalPlugins` to show.
 
 * **The entry points both sample games had written by hand** (R6 of
-  `docs/plans/generalize-plan.md`, on branch `generalize`; the merge's commit goes here when the
-  branch comes in — `docs/worklog/2026-09-20-shared-entry-points.md`). Five of them, for a game
+  `docs/plans/generalize-plan.md`, merged in `fa1b7e3` — `docs/worklog/2026-09-20-shared-entry-points.md`). Five of them, for a game
   that compiles a player's Ruby itself:
   * `Program::new(prelude, name, body, tail)` builds one program out of a prelude and an author's
     file and says how far down that pushed the author's first line. The number is counted off the
@@ -215,8 +209,7 @@ ones those documents carry, and nothing is estimated.
   (`tests/no_wasm_unsupported.rs`); the public API only grew.
 
 * **A camera driven from Ruby, with nothing added to the crate** (R0 of
-  `docs/plans/generalize-plan.md`, on branch `generalize`; the merge's commit goes here when the
-  branch comes in — `docs/worklog/2026-09-20-camera-from-ruby.md`). `Camera2d`, `Camera3d` and `Projection` are
+  `docs/plans/generalize-plan.md`, merged in `fa1b7e3` — `docs/worklog/2026-09-20-camera-from-ruby.md`). `Camera2d`, `Camera3d` and `Projection` are
   ordinary `#[reflect(Component)]` types, so `Rubevy.find(:Camera2d)`, `cam[:Transform] =` and
   `cam[:Projection] = { Orthographic: [ { scale: 2.0 } ] }` already pan and zoom one. The new
   `examples/camera_from_ruby.rs` and `tests/camera.rs` say so and hold the shape of the write;
