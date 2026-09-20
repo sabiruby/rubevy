@@ -31,6 +31,35 @@ ones those documents carry, and nothing is estimated.
   because a script that waits with `sleep` may be two or three frames late — but what a script
   can now do is wait one frame exactly and read its own refusals there.
 
+* **The three things R10 left for R11** (on branch `generalize`; the merge's commit goes here when
+  the branch comes in — `docs/worklog/2026-09-20-r10-followups.md`, `docs/numbers.md` §9).
+  **`examples/how_many_scripts.rs` reads the defaults instead of copying them.** Its `default`
+  row wrote `200_000` and `8 ms` itself, and its name said so a third time, so the day a default
+  moved the row would have gone on calling itself `default(200k/8ms)` while measuring something
+  that was no longer the default. All four rows are now said against the `ScriptWorld` the plugin
+  built — five hundred times the default budget, an eighth of the default frame time, sixty
+  frames of deadline — and each row's name is made from the numbers it actually ran with. With
+  the defaults where they are the names are the same strings as before, so the tables in
+  `docs/verification/scale.md` can still be laid beside a new run. A count of scripts or a sleep
+  given on the command line is also measured now whether or not it is one of the listed ones
+  (`how_many_scripts 90 3 500 0.01`), and the "every one of them is an argument" line at the top
+  of both instruments has been made true.
+  **A write refused for being too deep now says so.** The Hash is read out of the VM before it is
+  applied, and that read stops at `max_depth` first, so what reached the write was an entry with
+  a nil key — and the refusal a script read was `b.c: a field name must be a Symbol or a String`,
+  which is about the nil and not about the boundary. The read now hands the write a value that
+  says where it stopped, and the sentence is
+  `b.c: deeper than max_depth (2), so nothing under it was read or written`, carrying the number
+  the app set (`ScriptWorld::set_max_depth`).
+  **`docs/host-api.md` says how to choose `budget` and `frame_time`** ("Time"): measure your own
+  game's instructions per millisecond with `FrameStats`, divide the share of the frame you mean
+  to give the scripts by the number of VMs to get `frame_time`, and set `budget` to what that
+  time buys at your rate — with the two measured rates that are on the record (about 32,800
+  instructions/ms for rubevy's read loop, about 9,300 for the garden's world rules) to show how
+  far apart two games can be, and with which of the two limits bites first as something to choose
+  rather than discover. **No default moved**, and the origins in `docs/numbers.md` still say
+  "unknown" where nobody wrote one down.
+
 * **What R9's first readers walked into** (R10 of `docs/plans/generalize-plan.md`, merged in `06a9d32` —
   `docs/worklog/2026-09-20-numbers-inventory.md`, `docs/host-api.md`). Four small things the
   camera layer and the entry points left behind, and the documents that were missing beside

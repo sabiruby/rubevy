@@ -70,17 +70,25 @@ struct Dial {
 
 // --- the numbers this instrument runs with, and where each of them comes from -----------------
 //
-// Every one of them is an argument (see `main`); these are the defaults, and each is the value
-// the survey of 2026-09-20 used, so that a run of this today can be laid beside the tables in
-// `docs/worklog/2026-09-20-factory-survey.md` and the three worklogs after it.
+// Each is the value the survey of 2026-09-20 used, so that a run of this today can be laid beside
+// the tables in `docs/worklog/2026-09-20-factory-survey.md` and the three worklogs after it.
+//
+// **Which of them an argument can move** (see `main`): the frames, the repeats, and the two the
+// table is made of — a count of scripts and a sleep, either one of the lists below or a number of
+// your own (`how_many_scripts 90 3 500 0.01` measures five hundred scripts, which is in neither
+// list). `SETTLE` and `FRAME` are not arguments: the first is worked out from the longest sleep
+// and the second is what makes `sleep` mean a number of frames at all. The limits of each row are
+// not arguments either, and two of the four are not numbers here at all — they are read from the
+// `ScriptWorld` the plugin built (`Limits`).
 
-/// Scripted entities per row. From the survey: 10 and 100 are what the two sample games run,
-/// 1000 is about where a 60 Hz frame is spent on this machine, and 3000 is past it on purpose.
+/// Scripted entities per row, where no count is given. From the survey: 10 and 100 are what the
+/// two sample games run, 1000 is about where a 60 Hz frame is spent on this machine, and 3000 is
+/// past it on purpose.
 const SCRIPTS: [usize; 5] = [10, 100, 300, 1000, 3000];
 
-/// Sleeps per row, in seconds. 0.004 is one of mruby-task's ticks (`TICK_UNIT_MS`, 4 ms), so a
-/// script that sleeps that long is ready again on the next frame of a 60 Hz app; 0.25 is about
-/// fifteen frames, which is the script that looks around now and then.
+/// Sleeps per row, in seconds, where none is given. 0.004 is one of mruby-task's ticks
+/// (`TICK_UNIT_MS`, 4 ms), so a script that sleeps that long is ready again on the next frame of
+/// a 60 Hz app; 0.25 is about fifteen frames, which is the script that looks around now and then.
 const SLEEPS: [f64; 2] = [0.004, 0.25];
 
 /// Measured frames per repeat. The survey's `factory_machines 90 3`.
@@ -249,15 +257,23 @@ fn paced_frames(app: &mut App, n: usize) -> Vec<Duration> {
 
 /// The sets of limits a row is measured under, which is how the table says *which* limit a row
 /// is spending.
+///
+/// **None of the four is written down as a pair of numbers.** Every one of them is said against
+/// the limits the plugin itself starts with, which are read off the `ScriptWorld` the app built
+/// ([`Defaults`]) — so the `default` row measures whatever the default is on the day it runs, and
+/// its name says which numbers those were. Writing `200_000` and `8 ms` here, as this did until
+/// R11, is a copy that stops being true the day a default moves: the row would go on calling
+/// itself `default(200k/8ms)` while measuring something that is no longer the default
+/// (`docs/numbers.md` §9-1).
 #[derive(Clone, Copy)]
 enum Limits {
-    /// the plugin's own defaults
+    /// the plugin's own defaults, whatever they are
     Default,
-    /// wide enough that neither limit can be what ended the frame: 100M instructions is five
-    /// hundred times the default, and no clock at all
+    /// wide enough that neither limit can be what ended the frame: five hundred times the default
+    /// budget, and no clock at all
     Generous,
-    /// the default budget with an eighth of the frame time: if the tick does not shrink with it,
-    /// what it is spending is not inside the answering
+    /// the default budget with an eighth of the default frame time: if the tick does not shrink
+    /// with it, what it is spending is not inside the answering
     Tight,
     /// `generous` with a clock that never comes due (a second of frame time against a frame that
     /// takes tens of milliseconds): the same work as `generous`, and the only difference between
@@ -266,35 +282,87 @@ enum Limits {
     Clocked,
 }
 
+/// The limits the plugin starts a `ScriptWorld` with, read from one rather than written down
+/// again here. Every row of the table is one of these two numbers, multiplied or divided.
+#[derive(Clone, Copy)]
+struct Defaults {
+    budget: u64,
+    frame_time: Option<Duration>,
+}
+
+impl Defaults {
+    /// Read off a `ScriptWorld` the plugin has just built, before anything has changed it.
+    fn of(app: &App) -> Defaults {
+        let scripts = app.world().resource::<ScriptWorld>();
+        Defaults { budget: scripts.budget, frame_time: scripts.frame_time }
+    }
+}
+
+/// `generous`'s budget, as a multiple of the default: the row is "no budget can be what ended
+/// this frame", and five hundred times is far past what any row here spends.
+const GENEROUS: u64 = 500;
+
+/// `tight`'s frame time, as a fraction of the default. An eighth, so that the row is unmistakably
+/// shorter than the default while still being a time a tick can do something in.
+const TIGHT: u32 = 8;
+
+/// `clocked`'s frame time as a multiple of [`FRAME`]: sixty frames, so that the deadline cannot
+/// come due inside a frame and what the row measures is the reading of the clock and not the
+/// deadline.
+const NEVER_DUE: u32 = 60;
+
 impl Limits {
-    fn name(self) -> &'static str {
+    /// What this row sets, worked out from the plugin's own defaults.
+    fn of(self, defaults: Defaults) -> (u64, Option<Duration>) {
         match self {
-            Limits::Default => "default(200k/8ms)",
-            Limits::Generous => "generous(100M/none)",
-            Limits::Tight => "tight(200k/1ms)",
-            Limits::Clocked => "clocked(100M/1s)",
+            Limits::Default => (defaults.budget, defaults.frame_time),
+            Limits::Generous => (defaults.budget * GENEROUS, None),
+            Limits::Tight => (defaults.budget, defaults.frame_time.map(|t| t / TIGHT)),
+            Limits::Clocked => (defaults.budget * GENEROUS, Some(FRAME * NEVER_DUE)),
         }
     }
 
-    fn apply(self, scripts: &mut ScriptWorld) {
-        match self {
-            Limits::Default => {
-                scripts.budget = 200_000;
-                scripts.frame_time = Some(Duration::from_millis(8));
-            }
-            Limits::Generous => {
-                scripts.budget = 100_000_000;
-                scripts.frame_time = None;
-            }
-            Limits::Tight => {
-                scripts.budget = 200_000;
-                scripts.frame_time = Some(Duration::from_millis(1));
-            }
-            Limits::Clocked => {
-                scripts.budget = 100_000_000;
-                scripts.frame_time = Some(Duration::from_secs(1));
-            }
+    /// The row's name, with the two numbers it actually ran with in it — `default(200k/8ms)`
+    /// while those are the defaults, and something else on the day they move.
+    fn name(self, defaults: Defaults) -> String {
+        let what = match self {
+            Limits::Default => "default",
+            Limits::Generous => "generous",
+            Limits::Tight => "tight",
+            Limits::Clocked => "clocked",
+        };
+        let (budget, frame_time) = self.of(defaults);
+        format!("{what}({}/{})", instructions(budget), clock(frame_time))
+    }
+
+    fn apply(self, defaults: Defaults, scripts: &mut ScriptWorld) {
+        let (budget, frame_time) = self.of(defaults);
+        scripts.budget = budget;
+        scripts.frame_time = frame_time;
+    }
+}
+
+/// An instruction count as a name reads it: `200k`, `100M`, and the number itself where it is
+/// neither.
+fn instructions(n: u64) -> String {
+    match n {
+        n if n >= 1_000_000 && n % 1_000_000 == 0 => format!("{}M", n / 1_000_000),
+        n if n >= 1_000 && n % 1_000 == 0 => format!("{}k", n / 1_000),
+        n => n.to_string(),
+    }
+}
+
+/// A frame time as a name reads it: `8ms`, `1s`, `250µs`, `none`. Whole seconds are printed as
+/// seconds because that is how `docs/verification/scale.md` names the `clocked` row, and a
+/// deadline of sixty frames is 1.00000002 s — the rounding is in the *name* and nowhere else.
+fn clock(t: Option<Duration>) -> String {
+    match t {
+        None => String::from("none"),
+        Some(t) if t.as_millis() >= 1000 && t.as_millis() % 1000 == 0 => {
+            format!("{}s", t.as_millis() / 1000)
         }
+        Some(t) if t.as_millis() > 0 => format!("{}ms", t.as_millis()),
+        Some(t) => format!("{}µs", t.as_micros()),
     }
 }
 
@@ -319,6 +387,9 @@ struct Run {
     worst_gap: u32,
     /// how many scripts never ran at all
     silent: usize,
+    /// the row's name, with the numbers it ran with in it. It is made here, and not in `main`,
+    /// because the defaults it is said against are the ones this app was built with.
+    limits: String,
 }
 
 fn one_run(scripts_n: usize, sleep_s: f64, frames: usize, limits: Limits, instrumented: bool) -> Run {
@@ -352,11 +423,14 @@ fn one_run(scripts_n: usize, sleep_s: f64, frames: usize, limits: Limits, instru
     // the frame in which `start_scripts` turns every `Script` into a task: one `task_spawn` an
     // entity, and one `Vm::load` for the program they share. The budget is zero, so not one
     // instruction of any script runs in it and the number is the starting and nothing else.
+    // the limits the plugin starts with, taken before anything here changes them: every row is
+    // said against these
+    let defaults = Defaults::of(&app);
     app.world_mut().resource_mut::<ScriptWorld>().budget = 0;
     let at = Instant::now();
     app.update();
     let start_frame = at.elapsed();
-    limits.apply(&mut app.world_mut().resource_mut::<ScriptWorld>());
+    limits.apply(defaults, &mut app.world_mut().resource_mut::<ScriptWorld>());
 
     // let them reach their loop before anything is counted
     paced_frames(&mut app, SETTLE);
@@ -407,6 +481,7 @@ fn one_run(scripts_n: usize, sleep_s: f64, frames: usize, limits: Limits, instru
         per_turn_max: per_turn.last().copied().unwrap_or(f64::NAN),
         worst_gap,
         silent,
+        limits: limits.name(defaults),
     }
 }
 
@@ -432,10 +507,11 @@ fn memory_of_one(scripts_n: usize, frames: usize) {
     for i in 0..scripts_n {
         app.world_mut().spawn((Script::new(asset.clone()), Dial { value: i as f32 }));
     }
+    let defaults = Defaults::of(&app);
     app.world_mut().resource_mut::<ScriptWorld>().budget = 0;
     app.update();
     let started = rss_kb();
-    Limits::Default.apply(&mut app.world_mut().resource_mut::<ScriptWorld>());
+    Limits::Default.apply(defaults, &mut app.world_mut().resource_mut::<ScriptWorld>());
     paced_frames(&mut app, frames);
     let running = rss_kb();
     println!(
@@ -458,8 +534,13 @@ fn main() {
     }
     let frames: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(FRAMES);
     let repeats: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(REPEATS);
-    let only: Option<usize> = args.get(3).and_then(|s| s.parse().ok());
-    let only_sleep: Option<f64> = args.get(4).and_then(|s| s.parse().ok());
+    // a count and a sleep given on the command line are measured whether or not they are in the
+    // lists: they *are* the table then. Passing a number the lists do not hold used to print
+    // nothing at all, which looks like a run that measured something.
+    let counts: Vec<usize> =
+        args.get(3).and_then(|s| s.parse().ok()).map_or_else(|| SCRIPTS.to_vec(), |n| vec![n]);
+    let sleeps: Vec<f64> =
+        args.get(4).and_then(|s| s.parse().ok()).map_or_else(|| SLEEPS.to_vec(), |s| vec![s]);
 
     println!("# scripts x sleep, {frames} measured frames paced to {FRAME:?}, {repeats} repeats");
     println!("# tick_* is measured from outside (two systems around RubevySet::Tick); stats_tick is rubevy's own (FrameStats::time_ns)");
@@ -469,14 +550,8 @@ fn main() {
          insn\tanswers\tcarried\tlongest_answer\tprograms\tframes_per_turn(min/med/max)\tworst_gap\tsilent"
     );
 
-    for scripts_n in SCRIPTS {
-        if only.is_some_and(|n| n != scripts_n) {
-            continue;
-        }
-        for sleep_s in SLEEPS {
-            if only_sleep.is_some_and(|s| s != sleep_s) {
-                continue;
-            }
+    for scripts_n in counts {
+        for sleep_s in sleeps.iter().copied() {
             // the last row of each block is the same script with the instrument taken out, so
             // that the two `default` rows say what asking `"woke"` every turn costs
             for (limits, instrumented) in [
@@ -496,7 +571,7 @@ fn main() {
                 println!(
                     "{scripts_n}\t{sleep_s}\t{}{}\t{:?}\t{:?}\t{:?}\t{:?} ({:?}..{:?})\t{:?}\t{:?}\t\
                      {}\t{}\t{}\t{}\t{}\t{:.1}/{:.1}/{:.1}\t{}\t{}",
-                    limits.name(),
+                    mid.limits,
                     if instrumented { "" } else { "+bare" },
                     mid.tick_median,
                     mid.tick_p95,

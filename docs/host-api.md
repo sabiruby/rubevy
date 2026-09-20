@@ -1092,6 +1092,66 @@ changed, and what its origin is or that there is none — and the two other sett
 `ScriptWorld` are there too: `queue_limit` ("How much a queue holds") and `max_depth`
 ("Components by name").
 
+### Choosing `budget` and `frame_time` for your game
+
+The defaults are a starting point with nothing behind them (the column above says so). These two
+numbers are a game's own, and there is a way to arrive at them that is not a feeling.
+
+**1. Measure what your scripts cost in instructions per millisecond.** It is not a property of
+rubevy, it is a property of what your scripts *do* — a loop that reads a component every turn and
+a loop that sorts arrays run at different rates — and both numbers you need are in `FrameStats`:
+
+```rust
+fn rate(scripts: Res<ScriptWorld>) {
+    let f = scripts.last_frame();
+    if f.time_ns > 0 {
+        info!("{:.0} instructions/ms", f.instructions as f64 / (f.time_ns as f64 / 1e6));
+    }
+}
+```
+
+Two measured rates, to show how far apart they can be:
+
+| what | rate | where it comes from |
+|---|---|---|
+| rubevy's own read loop (a script that does nothing but read a component) | **~32,800 instructions/ms** | 200,000 instructions in 6.10 ms, `docs/worklog/2026-09-17-sync-reads.md` §5.1 |
+| rubevy_games' garden, the world's rules at the garden's caps | **~9,300 instructions/ms** | measured in that game, `garden/src/main.rs` (`install_world_answers`) |
+
+Read the numbers your own game shows over a few hundred frames, not one.
+
+**2. Decide the share of the frame the scripts may have, and divide it by the number of VMs.**
+`frame_time` is per VM and nothing adds them together, so an app with two VMs and 4 ms each has
+given its scripts 8 ms of every frame. A worked example at 60 Hz: a frame is 16.7 ms, a game that
+means to spend a quarter of it on scripts has 4 ms, and one VM gets `frame_time = 4 ms` while two
+VMs get 2 ms each.
+
+**3. Set `budget` to what that time buys at your rate**, so that the two limits mean the same
+thing. At 9,300 instructions/ms, 4 ms is about 37,000 instructions. Which of the two then bites
+first is worth being deliberate about:
+
+* **The budget first** (the instruction count is the smaller of the two) is the way round the
+  garden chose for its world VM: `budget = 45_000` against a `frame_time` of 8 ms, which at that
+  game's rate is about 4.8 ms. Instructions are a fact about the *rules* and are the same number
+  on a machine several times slower, including a browser; milliseconds are a fact about the
+  machine. A game that wants its scripts to behave the same way everywhere makes the budget the
+  real limit and leaves the clock as a guard with room.
+* **The clock first** is what the defaults do for a game at the garden's rate: 200,000
+  instructions at 9,300/ms is some 21 ms, far past the default 8 ms, so what ends the frame is
+  the clock. That is the safer way round for a game running other people's scripts, where "this
+  frame must end" matters more than "every machine runs the same amount of Ruby".
+
+**`overrun` is not chosen the same way.** It is the net under the case neither of the other two
+can catch — a script inside a native that will not be switched out — so what it has to be is
+*larger than `frame_time`*, and how much larger is how long a frozen frame is worth waiting
+before the game gets it back.
+
+**What to watch afterwards.** `FrameStats` says which limit is doing the work: `instructions`
+reaching `budget` frame after frame is the budget biting, `time_ns` at `frame_time` with
+`instructions` under budget is the clock, and `carried_reflect` / `carried_in_tick` staying above
+zero says the tick cannot answer what the scripts are asking at all — more scripts than this
+frame time can serve. `examples/how_many_scripts.rs` is the instrument that shows all of it for a
+number of scripts you choose.
+
 **The VM's clock moves in whole ticks of 4 ms.** That is mruby-task's `MRB_TICK_UNIT`, asked for
 rather than copied (`Vm::task_tick_unit_ms`), and it is the grain of every `sleep` a script
 writes. It has two consequences worth knowing before writing one:

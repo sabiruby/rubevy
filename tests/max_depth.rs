@@ -163,14 +163,16 @@ fn a_shallower_setting_stops_a_write() {
     let seen = app.world().resource::<Seen>();
     let r = seen.0.first().expect("the script asked");
     assert_eq!(r.num(0), Some(1.0), "and the script was told: {:?}", r.text(1));
-    // The refusal names where the walk stopped. What it says there is a consequence of *which*
-    // of the two walks the limit bit first: the Hash is read out of the VM before it is applied
-    // to anything, and that read stops at the same depth — so the entry past the boundary
-    // arrives as a nil key and a nil value, and it is the nil key the write reports. The path
-    // is right, the sentence is about the nil.
-    assert!(
-        r.text(1).is_some_and(|t| t.starts_with("b.c: ")),
-        "the path it stopped at: {:?}",
-        r.text(1)
+    // The refusal names where the walk stopped **and why**. Which of the two walks the limit
+    // bit first is still what shapes it — the Hash is read out of the VM before it is applied to
+    // anything, and that read stops at the same depth, so the entry past the boundary arrives
+    // with neither a key nor a value — but what arrives is `RubyData::TooDeep` and not a nil, so
+    // the sentence is about the depth and carries the number the app set. Until R11 it read
+    // `b.c: a field name must be a Symbol or a String`, which is true of a nil and says nothing
+    // about the boundary (`docs/numbers.md` §9-3).
+    assert_eq!(
+        r.text(1),
+        Some("b.c: deeper than max_depth (2), so nothing under it was read or written"),
+        "the refusal says where it stopped and why"
     );
 }
