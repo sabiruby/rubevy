@@ -532,6 +532,16 @@ The measurements are in `docs/worklog/2026-09-17-sync-reads.md`, and `tests/sche
 the frames from the script's own side — zero for these, one for the questions the game answers,
 in the same file.
 
+**How deep a value is followed** is `ScriptWorld::max_depth()` / `set_max_depth()`, and the
+default is 16 levels below the component itself. Both directions use it: a field nested deeper
+reads as `nil`, and a Hash nested deeper is refused where it goes past — which a script sees in
+`Rubevy.rejected_writes`. Two things are behind having a limit at all: the point of this
+boundary is a Hash a script can read, and a cycle (a reflected `Map` that holds itself, a Ruby
+Hash that holds itself) would otherwise take the stack with it. Bevy's own components are far
+shallower than sixteen — a `Transform` is two — so an app that raises it is one whose *own*
+components go deeper, and what raising it costs is stack, since the walk is recursive. Where 16
+came from is unknown, and `docs/numbers.md` says so beside every other number rubevy holds.
+
 The six kinds rubevy answers itself — `component.get`, `component.has`, `components`,
 `entities.with`, `resource.get`, `writes.rejected` — never reach `ScriptWorld::take_requests`:
 they are sorted out
@@ -934,14 +944,30 @@ The instruction count cannot stop everything, so each frame also runs under time
 (`Vm::task_run_limits`, on a clock the plugin gives the VM — Bevy's `Instant`, which a browser
 has too):
 
-| `ScriptWorld` field | default | what it does |
-|---|---|---|
-| `budget` | 200,000 instructions | checked between timeslices, as before; **zero pauses the scripts** |
-| `frame_time` | 8 ms | the tick's bound: the running timeslice is cut short once the frame's scripts have taken this long, and the answering stops there too |
-| `overrun` | 50 ms | a script that cannot be switched out — inside a native waiting for a block, `sort { }` or `Array.new(1) { loop { } }` — gets `Task::Overrun` past this, and the frame comes back |
+| `ScriptWorld` field | default | what it does | where the default comes from |
+|---|---|---|---|
+| `budget` | 200,000 instructions | checked between timeslices, as before; **zero pauses the scripts** | **unknown** — it came in with the scheduler (`4c1e89f`) and nothing says how it was chosen. What it buys *is* measured: ~75 instructions a component read, 51 a message taken off a subscription, 33 a refused write |
+| `frame_time` | 8 ms | the tick's bound: the running timeslice is cut short once the frame's scripts have taken this long, and the answering stops there too | **unknown** — stated, not explained, in the commit that added it (`0d0662b`). It is about half of a 60 Hz frame, but nobody wrote that down |
+| `overrun` | 50 ms | a script that cannot be switched out — inside a native waiting for a block, `sort { }` or `Array.new(1) { loop { } }` — gets `Task::Overrun` past this, and the frame comes back | **unknown** — the same commit. What is on the record is only the *relation*: larger than `frame_time` on purpose, since this is the net under the case that one cannot catch |
 
 All three are fields of `ScriptWorld<M>`, so an app with a second VM has a second set of them and
 nothing adds the two together: the worst case per frame is the sum ("Two VMs in one app").
+`docs/numbers.md` is the whole of this for every number rubevy holds — what it is, where it is
+changed, and what its origin is or that there is none — and the two other settings on
+`ScriptWorld` are there too: `queue_limit` ("How much a queue holds") and `max_depth`
+("Components by name").
+
+**The VM's clock moves in whole ticks of 4 ms.** That is mruby-task's `MRB_TICK_UNIT`, asked for
+rather than copied (`Vm::task_tick_unit_ms`), and it is the grain of every `sleep` a script
+writes. It has two consequences worth knowing before writing one:
+
+* **`sleep 0` is not "the next frame".** It waits for the clock to *move*, and at 60 Hz a frame
+  is 16.7 ms, so the clock moves about four ticks a frame and `sleep 0` does come back on the
+  next frame. At 240 Hz a frame is 4.2 ms and it still does; below about 250 Hz there is no
+  frame the clock stands still through. What a script cannot say is "wake me on the very next
+  frame and no later" — `sleep 0.001` and `sleep 0.004` are the same wait.
+* **A script cannot count frames by sleeping.** `$rubevy[:frame]` is the frame number, and a
+  script that must see every frame reads that rather than assuming one `sleep` is one frame.
 
 **`frame_time` bounds the tick, and here is what it does not cover.** A tick is a loop — run the
 ready tasks, answer what they parked on, run them again — and until 2026-09-20 the clock was

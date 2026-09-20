@@ -6,6 +6,41 @@ ones those documents carry, and nothing is estimated.
 
 ## Unreleased
 
+* **Every number rubevy holds, written down — and the last one that could not be changed, made
+  settable** (R10 of `docs/plans/generalize-plan.md`, on branch `generalize`; the merge's commit
+  goes here when the branch comes in — `docs/numbers.md`,
+  `docs/worklog/2026-09-20-numbers-inventory.md`). The `const`s and the numeric literals of
+  `src/`, `rubevy-build/` and the two standing instruments were swept mechanically (33 `const`
+  declarations, 361 lines holding a literal) and the **44** that are numbers or fixed names
+  rather than indices, unit conversions and identities are now one table in `docs/numbers.md`:
+  what each is, where an app changes it, and where its default came from. Each line of that
+  table is also a paragraph in the rustdoc of the thing it is about, and the "Time" table in
+  `docs/host-api.md` has gained a column for it. **No default moved**, and the tests pass
+  unchanged on the defaults, which is what says so.
+  **`ScriptWorld::max_depth()` / `set_max_depth()`** is the one number that had no way to be
+  changed: how deep a value is followed across the boundary, `reflect::MAX_DEPTH` and 16 since
+  the reflection bridge was written. The default is still 16 and an ordinary component is
+  untouched; an app whose own components nest deeper now says so rather than reading nil, and
+  one that wants a shallower boundary says that. It is a pair of methods and not a `pub` field
+  because a write (`e[:X] = hash`) is read out of the VM by a **native**, which is handed
+  `&mut Vm` and nothing else — so the number lives in the VM's host state, in one place, which
+  is the same problem `queue_limit` had in the other direction. `tests/max_depth.rs` is the
+  default reading and writing four levels down and a shallower setting stopping both.
+  **Seven defaults have no recorded origin**, and the table says so rather than inventing one:
+  `budget` 200,000, `frame_time` 8 ms and `overrun` 50 ms (stated, never explained, in the two
+  commits that added them), `max_depth` 16, the `scripts` in the load path, and two of the
+  instruments'. Against that, four numbers turned out to be **quoted from elsewhere** and not
+  rubevy's at all — a script's default priority 128 and the clock's 4 ms tick are mruby-task's
+  (`MRB_TASK_PRIORITY_DEFAULT`, `MRB_TICK_UNIT`), `"assets"` is bevy's asset directory, and the
+  five types read as Arrays are bevy_reflect's. The tally's own finding: **not one of rubevy's
+  defaults was chosen by measuring.** What has been measured is what a default *buys* — 2,600
+  component reads in a frame's budget, 3,900 messages, 8.28 ms of tick — which is the material
+  for choosing, and `docs/numbers.md` keeps the two apart. `queue_limit` stays at **64** by the
+  author's decision, with the measured bounds around it (about 3,800–3,900 messages one
+  subscriber can read in a frame, and 16–335 bytes a waiting message) written where the
+  rustdoc used to imply a derivation there never was.
+  No dependency was added, there is no `unsafe`, and the public API grew by two methods.
+
 * **An optional Ruby layer, and the first one is a camera** (R9 of
   `docs/plans/generalize-plan.md`, merged in `57774f3` — `docs/worklog/2026-09-20-camera-layer.md`).
   rubevy carries Ruby it does not run: **`rubevy::layers::CAMERA`**, taken up by the app in one

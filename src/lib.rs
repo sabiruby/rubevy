@@ -149,6 +149,12 @@ impl AssetLoader for MrbLoader {
 pub struct Script<M = ()> {
     pub source: Handle<MrbAsset>,
     /// 0-255, 0 first (mruby-task's priority).
+    ///
+    /// The default is **128**, which is mruby-task's own `MRB_TASK_PRIORITY_DEFAULT` (SabiRuby
+    /// `src/builtins/ext_task.rs`, `PRIORITY_DEFAULT`) — quoted, not chosen here, and it is the
+    /// priority a task a script makes with `Task.new` gets too, so a child task runs level with
+    /// the script that made it unless one of them says otherwise. [`Script::with_priority`] is
+    /// how a script says so (`docs/numbers.md`).
     pub priority: u8,
     /// Shown in logs and answered by `Task#name`.
     pub name: Option<String>,
@@ -920,6 +926,16 @@ pub struct ScriptWorld<M = ()> {
     /// a debugger panel reading the VM sees a live frame count, and the host's questions are
     /// still taken and answered — they simply reach a script that is not running. Bevy's own
     /// `Time` is the game's to pause (`Time<Virtual>`); this is about the VM's scheduler.
+    ///
+    /// **Where the default of 200,000 comes from: unknown.** It came in with the scheduler
+    /// itself (`4c1e89f`, "v1: one VM, one task per script"), and neither that commit nor the
+    /// plan behind it says how it was chosen (`docs/numbers.md`). What it *buys* has been
+    /// measured since, and that is the way to decide what a game's own should be: a component
+    /// or resource read costs about 75 instructions, so the default is some 2,600 reads in a
+    /// frame (`docs/worklog/2026-09-17-sync-reads.md`); a message taken off a subscription is
+    /// 51, so about 3,900 of them (`docs/verification/scale.md`); a refused write is 33, so
+    /// about 6,000. What a game actually spends is
+    /// [`FrameStats::instructions`][`ScriptWorld::last_frame`].
     pub budget: u64,
     /// Time the scripts may take per frame, on the VM's clock (Bevy's `Instant`). `None`:
     /// instructions only, and the clock is not read at all.
@@ -963,10 +979,24 @@ pub struct ScriptWorld<M = ()> {
     /// nothing is asked twice, and a question that is put off is taken before anything the next
     /// frame asks, so it is not put off again. `docs/host-api.md` ("Components by name") is the
     /// long version and `docs/worklog/2026-09-20-frame-time-as-a-limit.md` the measurements.
+    ///
+    /// **Where the default of 8 ms comes from: unknown.** It and [`ScriptWorld::overrun`] came
+    /// in together (`0d0662b`, 2026-09-17), and the commit states the two numbers without
+    /// saying how they were chosen (`docs/numbers.md`). Eight is about half of a 60 Hz frame's
+    /// 16.7 ms, which is the shape a reader will read into it — but nobody wrote that down, and
+    /// a game with two VMs has two of these and nothing adds them together. What a tick
+    /// actually takes is [`FrameStats::time_ns`][`ScriptWorld::last_frame`], and
+    /// `examples/how_many_scripts.rs` is how to find out what this machine carries.
     pub frame_time: Option<std::time::Duration>,
     /// Past this, a script that cannot be switched out — it is inside a native waiting for a
     /// block, `sort { }` or `Array.new { loop { } }` — gets `Task::Overrun` rather than holding
     /// the frame. `None`: no such limit.
+    ///
+    /// **Where the default of 50 ms comes from: unknown** — the same commit as
+    /// [`ScriptWorld::frame_time`] (`0d0662b`), with the number stated and not explained
+    /// (`docs/numbers.md`). What *is* on the record is the relation: it is the larger of the
+    /// two on purpose, because this is the limit for the case the other one cannot reach — a
+    /// script the VM cannot switch out at all — and a frame that hits it has been lost already.
     pub overrun: Option<std::time::Duration>,
     /// How many messages a subscriber's queue holds in this VM before the oldest is dropped —
     /// the default for every `Rubevy.subscribe` that does not ask for one of its own
@@ -1803,6 +1833,41 @@ impl<M: 'static> ScriptWorld<M> {
             .unwrap_or(0)
     }
 
+    /// How deep a value is followed across the boundary in either direction, in levels below
+    /// the top one: a component read as a Hash, and a Hash written back over one.
+    ///
+    /// The default is 16. A value nested deeper than this reads as `nil` where it is too deep,
+    /// and a write into it says `too deep` in the sentence a refusal carries
+    /// ([`ScriptWorld::rejected_writes`]). Two things are behind having a limit at all: the
+    /// point of this boundary is a Hash a script can read, and a cycle — a reflected `Map` that
+    /// holds itself, a Ruby Hash that holds itself — would otherwise take the stack with it.
+    ///
+    /// **Where 16 comes from: unknown.** It came in with the reflection bridge itself
+    /// (`0cf047c`, 2026-09-15); nothing in the commit, the worklog or the plan behind it says
+    /// why sixteen (`docs/numbers.md`). Bevy's own components are far shallower — a `Transform`
+    /// is two levels — so an app raising it is an app whose *own* components go deeper, and it
+    /// is the app that knows that. What it costs to raise is stack: the walk is recursive, one
+    /// frame per level on each side.
+    ///
+    /// It is a pair of methods and not a `pub` field because the number has to be readable
+    /// inside a **native** (`e[:X] = hash` is read out of the VM by one, and a native is handed
+    /// `&mut Vm` and nothing else), so it is kept in the VM's own host state — one place, the
+    /// way [`ScriptWorld::queue_limit`] is one place for the other direction. Changing it takes
+    /// effect on the next read or write; nothing is remembered from before.
+    pub fn max_depth(&self) -> usize {
+        self.vm
+            .host_state::<HostState>()
+            .map(|s| s.max_depth)
+            .unwrap_or(reflect::DEFAULT_MAX_DEPTH)
+    }
+
+    /// Sets [`ScriptWorld::max_depth`].
+    pub fn set_max_depth(&mut self, depth: usize) {
+        if let Some(state) = self.vm.host_state_mut::<HostState>() {
+            state.max_depth = depth;
+        }
+    }
+
     /// Lets go of what an entity's script subscribed to. Called where a script's task ends and
     /// where its [`ScriptTask`] is removed: a queue nobody will ever read is a queue the game
     /// would keep filling.
@@ -1915,7 +1980,9 @@ fn enable_scheduler_gc(vm: &mut Vm) -> Result<(), String> {
 /// What this plugin keeps inside the VM (`Vm::set_host_state`), for the natives to reach
 /// through the `&mut Vm` they are given. One of these per VM, so two `App`s in one process
 /// have a queue each — which is why the tests may run in parallel.
-#[derive(Default)]
+///
+/// `Default` is written out rather than derived because one of the fields is a setting with a
+/// default of its own ([`HostState::max_depth`]), and a derive would start it at zero.
 struct HostState {
     /// The queue a native writes and [`drain_commands`] reads.
     commands: Vec<HostCommand>,
@@ -1945,6 +2012,26 @@ struct HostState {
     /// because a subscription's own count lives on its queue object, so the two counters are
     /// written in the same breath.
     dropped: u64,
+    /// How deep a value is followed across the boundary ([`ScriptWorld::max_depth`]).
+    ///
+    /// It lives here, in the VM, rather than as a `pub` field of [`ScriptWorld`] for the reason
+    /// [`ScriptWorld::queue_limit`] lives the other way round: the number has to be readable
+    /// where it is used, and a write (`e[:X] = hash`) is read out of the VM by a **native**,
+    /// which is handed `&mut Vm` and nothing else. A field on `ScriptWorld` would have to be
+    /// copied in here to be reachable, and then there would be two of it to keep in step.
+    max_depth: usize,
+}
+
+impl Default for HostState {
+    fn default() -> Self {
+        HostState {
+            commands: Vec::new(),
+            subscriptions: std::collections::HashMap::new(),
+            subscriptions_made: 0,
+            dropped: 0,
+            max_depth: reflect::DEFAULT_MAX_DEPTH,
+        }
+    }
 }
 
 /// One `Rubevy.subscribe(:hit)`: the queue it answered with, and whose script it belongs to.
@@ -1987,6 +2074,12 @@ fn push_command(vm: &mut Vm, c: HostCommand) {
     if let Some(state) = vm.host_state_mut::<HostState>() {
         state.commands.push(c);
     }
+}
+
+/// [`ScriptWorld::max_depth`] as a native sees it. A native is handed `&mut Vm` and nothing
+/// else, and this is where that setting is kept for exactly that reason.
+fn max_depth_of(vm: &Vm) -> usize {
+    vm.host_state::<HostState>().map(|s| s.max_depth).unwrap_or(reflect::DEFAULT_MAX_DEPTH)
 }
 
 fn take_commands(vm: &mut Vm) -> Vec<HostCommand> {
@@ -2199,6 +2292,14 @@ impl<M> std::hash::Hash for RubevySet<M> {
 /// ```
 pub struct RubevyPlugin<M = ()> {
     /// Where a `require` reads from (Bevy's asset directory).
+    ///
+    /// The default is `"assets"`, which is quoted from Bevy and not chosen here: it is what
+    /// `AssetPlugin::default()` reads assets out of, so a `.rb` beside a game's other assets is
+    /// found without the app saying anything. The load path the plugin builds from it is
+    /// `["{root}/scripts", "{root}"]`, and **where the `scripts` in that comes from is
+    /// unknown** — it came in with `require` itself (`4c1e89f`) with no reason recorded
+    /// (`docs/numbers.md`). Both are the app's: [`RubevyPlugin::with_asset_root`] moves the
+    /// root, and [`ScriptWorld::require_from`] replaces the whole load path.
     pub asset_root: String,
     _m: PhantomData<fn() -> M>,
 }
@@ -2299,6 +2400,11 @@ impl<M: 'static> Plugin for RubevyPlugin<M> {
 /// The instance variable each task carries its entity in (`Vm::ivar_set`), read back by the
 /// natives through [`Vm::task_running`]. A script can see it — it is an ordinary `@ivar` — but
 /// the name is not one a script would write by accident.
+///
+/// **The name is fixed and not a setting**: `src/prelude.rb` spells the same string where
+/// `Task.new` hands a new task its maker's entity, so the two have to agree, and a script that
+/// wants a task to act for another entity is documented as setting `@rubevy_entity` itself
+/// (`docs/host-api.md`). Changing it here would silently break all three (`docs/numbers.md`).
 const ENTITY_IVAR: &str = "@rubevy_entity";
 
 /// The instance variable a subscription's queue carries its dropped count in, written by
@@ -2307,6 +2413,9 @@ const ENTITY_IVAR: &str = "@rubevy_entity";
 /// An ordinary `@ivar` on the queue object, as [`ENTITY_IVAR`] is on the task: the collector
 /// reaches it through the object that holds it, it goes when the subscription goes, and a script
 /// may read it directly if it would rather not call the method.
+///
+/// Fixed for the reason [`ENTITY_IVAR`] is: `src/prelude.rb` reads this very name
+/// (`docs/numbers.md`).
 const DROPPED_IVAR: &str = "@rubevy_dropped";
 
 /// The [`Script`]s of this VM that are not running and have not ended: what [`start_scripts`]
@@ -2502,6 +2611,11 @@ fn tick_scripts<M: 'static>(world: &mut World, tasks: &mut RunningTasks<M>) {
         // scripts are paused, in which case this frame does not count as time for them (see the
         // rustdoc of `ScriptWorld::budget`)
         if scripts.budget > 0 {
+            // **The tick is the VM's number, not rubevy's**: `Vm::task_tick_unit_ms` answers
+            // mruby-task's `MRB_TICK_UNIT`, 4 ms in SabiRuby 0.5.2, and it is asked for rather
+            // than written down here so that a VM which changes it moves this with it. It is
+            // the grain of every `sleep` a script writes — `sleep 0` waits for the clock to
+            // move, not for the next frame — and rubevy has no say in it (`docs/numbers.md`).
             let unit_ms = scripts.vm.task_tick_unit_ms() as f32;
             scripts.tick_remainder += delta * 1000.0 / unit_ms;
             let whole = scripts.tick_remainder.floor().max(0.0);
@@ -2644,6 +2758,13 @@ fn tick_scripts<M: 'static>(world: &mut World, tasks: &mut RunningTasks<M>) {
 }
 
 /// `$rubevy`, refreshed at the head of every frame.
+///
+/// **The global's name and its three keys are fixed and not a setting.** They are a spelling a
+/// script writes (`$rubevy[:frame]`), so they are named twice — here and in every script that
+/// reads them, `src/layers/camera.rb` included — and both halves have to agree. The three are
+/// Bevy's `FrameCount` and `Time`, put where they cost a script no round trip; what a script
+/// wants of the *game's* clock, including a pause the game made, it reads by name instead
+/// (`Rubevy.resource("Time<Virtual>")`). Nothing here is a number of rubevy's (`docs/numbers.md`).
 fn set_frame_state(vm: &mut Vm, frame: u32, delta: f32, elapsed: f32) {
     let h = vm.hash_new();
     for (key, value) in [
@@ -2763,6 +2884,11 @@ fn entity_from_bits(bits: u64) -> Option<Entity> {
 ///
 /// They are what `src/prelude.rb` sends: `Rubevy::Entity#[]`, `#has?`, `#components`,
 /// `Rubevy.find`, `Rubevy.resource` and `Rubevy.rejected_writes`.
+///
+/// **The six names are fixed and not a setting.** Each is written twice — here, and in the
+/// `Rubevy.ask` the prelude makes — and the pair has to agree or the question is handed to the
+/// game instead of being answered; they are the spelling of a protocol rather than a value
+/// anybody tuned (`docs/numbers.md`).
 const RESERVED_KINDS: [&str; 6] = [
     "component.get",
     "component.has",
@@ -2940,6 +3066,9 @@ fn answer_reflect_requests<M: 'static>(
     };
     let registry = registry.read();
     let entity_class = scripts.entity_class;
+    // read once for the whole round: it is the VM's setting (`ScriptWorld::max_depth`) and a
+    // system cannot change it while this loop is running
+    let max_depth = scripts.max_depth();
     let mut answered = 0usize;
     // where the first answer's span starts (`FrameStats::longest_answer_ns`): here, and not
     // where the round began, because everything above — the run of the VM, taking this round's
@@ -2964,6 +3093,7 @@ fn answer_reflect_requests<M: 'static>(
                                 value.as_partial_reflect(),
                                 entity_class,
                                 ENTITY_TAG,
+                                max_depth,
                             )
                         }),
                         None => scripts.answer(&request, Answer::Nil),
@@ -2990,6 +3120,7 @@ fn answer_reflect_requests<M: 'static>(
                                 value.as_partial_reflect(),
                                 entity_class,
                                 ENTITY_TAG,
+                                max_depth,
                             )
                         }),
                         None => scripts.answer(&request, Answer::Nil),
@@ -3241,6 +3372,7 @@ fn apply_component_writes<M: 'static>(world: &mut World) {
         }
     }
     let writes = std::mem::take(&mut world.resource_mut::<ScriptWorld<M>>().component_writes);
+    let max_depth = world.resource::<ScriptWorld<M>>().max_depth();
     let Some(registry) = world.get_resource::<AppTypeRegistry>().cloned() else { return };
     let registry = registry.read();
     let mut rejected: Vec<RejectedWrite> = Vec::new();
@@ -3271,7 +3403,8 @@ fn apply_component_writes<M: 'static>(world: &mut World) {
             refused(format!("{} has no {}", write.entity, write.name));
             continue;
         };
-        if let Err(e) = reflect::apply_ruby(value.as_partial_reflect_mut(), &write.value) {
+        if let Err(e) = reflect::apply_ruby(value.as_partial_reflect_mut(), &write.value, max_depth)
+        {
             warn!("rubevy: {} was not written whole: {e}", write.name);
             refused(e);
         }
@@ -3292,6 +3425,7 @@ fn apply_resource_writes<M: 'static>(world: &mut World) {
         return;
     }
     let writes = std::mem::take(&mut world.resource_mut::<ScriptWorld<M>>().resource_writes);
+    let max_depth = world.resource::<ScriptWorld<M>>().max_depth();
     let Some(registry) = world.get_resource::<AppTypeRegistry>().cloned() else { return };
     let registry = registry.read();
     // appended to what `apply_component_writes` left, which ran before this and emptied the
@@ -3322,7 +3456,8 @@ fn apply_resource_writes<M: 'static>(world: &mut World) {
             refused(format!("{} is not where the world said it was", write.name));
             continue;
         };
-        if let Err(e) = reflect::apply_ruby(value.as_partial_reflect_mut(), &write.value) {
+        if let Err(e) = reflect::apply_ruby(value.as_partial_reflect_mut(), &write.value, max_depth)
+        {
             warn!("rubevy: {} was not written whole: {e}", write.name);
             refused(e);
         }
@@ -3370,6 +3505,11 @@ pub mod layers {
 
 /// What a `Rubevy::Entity` object is, in the `tag` of [`Vm::data_new`]. A host that gives its
 /// scripts Data objects of its own picks other numbers.
+///
+/// **It is a name, not a size**, which is why it is a `const` and not a setting: the number
+/// means "this Data is an entity" in two places that have to agree — where the object is made,
+/// and the `set_on_free` hook that counts them — and any other number would do as long as both
+/// used it. It is `pub` so that a host can see which number is taken (`docs/numbers.md`).
 pub const ENTITY_TAG: u32 = 1;
 
 /// Defines `Rubevy::Entity`, the class of the object a script holds an entity in, and answers it.
@@ -3520,7 +3660,11 @@ fn install_host_api(vm: &mut Vm, release: ReleaseQueue) -> ObjId {
             Some(v) => String::from_utf8_lossy(&vm.as_string(*v)?).into_owned(),
             None => return Err(vm.raise_arg("set_component needs the name of a component")),
         };
-        let value = reflect::read_ruby(vm, a.get(2).copied().unwrap_or(Value::Nil), ENTITY_TAG)?;
+        // how deep the Hash is followed is the VM's own setting (`ScriptWorld::max_depth`),
+        // and the host state is where a native can reach it
+        let deep = max_depth_of(vm);
+        let value =
+            reflect::read_ruby(vm, a.get(2).copied().unwrap_or(Value::Nil), ENTITY_TAG, deep)?;
         // who is writing, which is not who is written to: `Rubevy.rejected_writes` answers a
         // script its own writes, and a script may write another entity's component
         let by = match current_entity(vm) { Value::Int(bits) => bits as u64, _ => u64::MAX };
@@ -3537,7 +3681,9 @@ fn install_host_api(vm: &mut Vm, release: ReleaseQueue) -> ObjId {
             Some(v) => String::from_utf8_lossy(&vm.as_string(*v)?).into_owned(),
             None => return Err(vm.raise_arg("set_resource needs the name of a resource")),
         };
-        let value = reflect::read_ruby(vm, a.get(1).copied().unwrap_or(Value::Nil), ENTITY_TAG)?;
+        let deep = max_depth_of(vm);
+        let value =
+            reflect::read_ruby(vm, a.get(1).copied().unwrap_or(Value::Nil), ENTITY_TAG, deep)?;
         let by = match current_entity(vm) { Value::Int(bits) => bits as u64, _ => u64::MAX };
         push_command(vm, HostCommand::SetResource { by, name, value });
         Ok(Value::Nil)
