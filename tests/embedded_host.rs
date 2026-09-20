@@ -69,10 +69,9 @@ fn run(host: EmbeddedHost, script: &str) -> Vec<String> {
     .add_systems(Update, answer_all);
     {
         let mut world = app.world_mut().resource_mut::<ScriptWorld>();
-        world.vm.set_host(Box::new(host));
-        // where a `require` looks, exactly as it would on a filesystem — the table's keys are
-        // those paths
-        world.vm.set_load_path(&["ruby", "ruby/lib"]);
+        // the host and where a `require` looks, in one call: the load path has to be the table's
+        // own paths, and the plugin's is the asset directory's
+        world.require_from(host, &["ruby", "ruby/lib"]);
     }
     let handle = app.world_mut().resource_mut::<Assets<MrbAsset>>().add(compile(script));
     app.world_mut().spawn(Script::new(handle));
@@ -117,6 +116,48 @@ fn a_path_that_says_here_is_the_same_file() {
     let host = EmbeddedHost::new(SOURCE_FILES).compile_with(a_compiler());
     let said = run(host, r#"require "./ruby/helper.rb"; Rubevy.ask("said", helper_answer.to_s).pop"#);
     assert_eq!(said, vec!["42"]);
+}
+
+/// **The half that is easy to forget.** `ScriptWorld::require_from` is the host and the load
+/// path together; installing the host on its own leaves the VM asking for the paths the
+/// *plugin's* host reads — `{asset_root}/scripts/helper.rb` — which a table keyed by its own
+/// paths does not hold, and the script gets a `LoadError` for a file that is right there in the
+/// binary. This is that failure, written down so that the door it is the reason for is not taken
+/// away by somebody who cannot see what it was for.
+///
+/// (The host says so once when it happens — a `warn!` naming the directory it was asked for and
+/// the ones it holds. A log line is not something a test can assert on here; what the unit tests
+/// in `src/embed.rs` hold is *when* it is said and that it is said once.)
+#[test]
+fn a_host_installed_without_its_load_path_finds_nothing() {
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins.set(ScheduleRunnerPlugin::run_once()),
+        bevy::asset::AssetPlugin::default(),
+        RubevyPlugin::default(),
+    ))
+    .init_resource::<Said>()
+    .add_systems(Update, answer_all);
+    {
+        // the host, and not the load path: what the plugin put there is still there
+        let mut world = app.world_mut().resource_mut::<ScriptWorld>();
+        world.vm.set_host(Box::new(EmbeddedHost::new(SOURCE_FILES).compile_with(a_compiler())));
+    }
+    let handle = app.world_mut().resource_mut::<Assets<MrbAsset>>().add(compile(
+        r#"begin
+             require "helper"
+           rescue LoadError => e
+             Rubevy.ask("said", e.message).pop
+           end"#,
+    ));
+    app.world_mut().spawn(Script::new(handle));
+    for _ in 0..10 {
+        std::thread::sleep(Duration::from_millis(2));
+        app.update();
+    }
+    let said = std::mem::take(&mut app.world_mut().resource_mut::<Said>().0);
+    assert_eq!(said.len(), 1, "the require raised, with the file in the binary all along");
+    assert!(said[0].contains("helper"), "{}", said[0]);
 }
 
 /// A file that is not in the table is a `LoadError`, as a file that is not on a disk is.

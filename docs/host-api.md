@@ -1068,6 +1068,21 @@ thousand entities), and resident memory at the start went from 2.21 kB an entity
 is left of the starting cost is `Vm::task_spawn` — a context and a stack for each script, which
 they do not share.
 
+**A program that will not load is remembered too**, and for the same reason: so that it is met
+once. A `.mrb` that is a truncated download, or bytes another version's compiler wrote, used to be
+logged and passed over, which left the entity exactly as `start_scripts` had found it — so the
+next frame parsed the same bytes again, and wrote the same line again, once per entity per frame
+for as long as the entity lived. Now the first meeting is the only one that parses and the only
+one that speaks, and the entity is **told** the way every other script's entity is told: a
+`ScriptEnded` of `ScriptStatus::Failed` whose value is what the VM said, sent once, with a
+`ScriptDone` to mark the entity as one this VM is not going to start.
+
+It is a pause, not a verdict. An asset that **changes** takes the mark off again — the same
+handle with other bytes (an editor's Apply, the asset server's hot reload) or another handle
+through `replace_script` — and the script starts if the new bytes load. `ScriptWorld::broken_programs()`
+is how many distinct programs this VM could not load, the pair to `loaded_programs()`;
+`tests/broken_script.rs` holds the whole of this, twenty frames to one ending.
+
 **An irep is never given back.** SabiRuby 0.5.2 has no way to drop one — nothing in the crate
 removes from `Vm::ireps` — so every *new* text a game starts a script from is one more irep for
 the life of the app. That is not something rubevy can fix from the outside, and the table is what
@@ -1093,8 +1108,24 @@ use rubevy::Program;
 
 let program = Program::new(&prelude, "brain.rb", &players_text, "run");
 // program.source        — hand this to whatever compiler this build has
+// program.name          — what to call the file: the separator comment has it, and so does
+//                         the compiler (`compile(&program.source, &program.name)`)
 // program.prelude_lines — how far down that pushed the player's first line
 ```
+
+The name is on the program because it is one name: before, every caller passed it to
+`Program::new` for the separator comment and again to its compiler for the file name, and a name
+written twice is a name that can be changed in one place only.
+
+**Line numbers after it starts running are another matter.** A backtrace — the file and line an
+exception carries, and what `ScriptWorld::stats` shows of a script's frames — is in the program
+only if it was compiled with debug info, and `sabiruby_compiler::Options::debug_info` is `false`
+by default. So a game that compiles with `Options { filename, ..Default::default() }` gets the
+compiler's own messages in the player's lines (above) and, for an error the script raises while
+it runs, no line at all. The browser's bridge defaults the other way: the playground's C ABI takes
+the flag as an argument (`sabi_compile(src, len, debug)`) and its JS wrapper passes it on with
+`compile(src, debug = true)`, so a page compiles with line numbers unless it says otherwise.
+Asking for them costs the bytes the DBG section takes, in the binary and in the VM.
 
 The second is that every line number the compiler then reports is a line of *that* program.
 rubevy_games' garden reported `beetle.rb:600` for something its author had written on line 118,
@@ -1147,10 +1178,10 @@ use rubevy::{EmbeddedHost, ScriptWorld};
 include!(concat!(env!("OUT_DIR"), "/ruby_files.rs"));   // pub static RUBY_FILES: &[(&str, &str)]
 
 fn embed_the_scripts(mut world: ResMut<ScriptWorld>) {
-    world.vm.set_host(Box::new(
+    world.require_from(
         EmbeddedHost::new(RUBY_FILES).compile_with(|src, opts| page_compile(src, opts)),
-    ));
-    world.vm.set_load_path(&["ruby"]);
+        &["ruby"],
+    );
 }
 app.add_systems(Startup, embed_the_scripts);
 ```
@@ -1158,6 +1189,18 @@ app.add_systems(Startup, embed_the_scripts);
 The paths in the table are the paths a script requires: the VM joins a load path and the name the
 script wrote (`"ruby"` + `"helper"` + `".rb"`) and the host looks that text up, so the keys are
 paths relative to the crate with `/` in them. A leading `./` is taken off first.
+
+**Which is why the host and the load path go in together.** `ScriptWorld::require_from(host,
+load_path)` is `vm.set_host` and `vm.set_load_path` under one name, and both are still there for
+a game that means only one of them. Installing the host alone leaves the VM asking for the paths
+the *plugin's* host reads — `{asset_root}/scripts/helper.rb` — which the table does not hold, and
+the script gets a `LoadError` naming a file that is in the binary all along. Nothing in the types
+says so, and because the host being replaced is usually the browser's, it is a thing that happens
+**in a browser only**, where the log is a console nobody has open. `EmbeddedHost` says so once
+when it happens: an ask it could never have answered — a path whose first directory is not one
+the table uses — is a `warn!` naming the directory asked for, the ones it holds, and the call
+above. A miss on its own is not: `require` misses on the way to every hit (`.mrb` before `.rb`,
+each load path in turn), and a host is never told which candidate is the last.
 
 **A `.mrb` needs no compiler**: `with_binaries` takes a table of bytes, the VM sees the RITE magic
 and runs them, and a build with neither the `ruby-source` feature nor a `compile_with` can still

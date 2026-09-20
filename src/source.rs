@@ -35,6 +35,28 @@
 pub struct Program {
     /// The whole source, for whatever compiler the host has.
     pub source: String,
+    /// What to call this file: the name that went into the separator comment, and the name to
+    /// hand the compiler as the file being compiled.
+    ///
+    /// It is here because the two are the same name and a caller that writes it twice can write
+    /// it twice differently — the separator saying `brain.rb` while the compiler's messages say
+    /// something else. All three callers in rubevy_games had it in hand and passed it on
+    /// (`platform::compile(&program.source, name)`); now the program carries it:
+    ///
+    /// ```no_run
+    /// # use rubevy::Program;
+    /// # fn compile(_source: &str, _name: &str) -> Result<Vec<u8>, String> { Ok(Vec::new()) }
+    /// # fn build(prelude: &str, players_text: &str) -> Result<Vec<u8>, String> {
+    /// let program = Program::new(prelude, "brain.rb", players_text, "run");
+    /// let bytes = compile(&program.source, &program.name)?;
+    /// # Ok(bytes) }
+    /// ```
+    ///
+    /// **A compiler is free to ignore it**, and one of them does: the playground's browser bridge
+    /// is handed a source and nothing else, and names every program `playground.rb`. That is why
+    /// this is a name the program *has* rather than a name it is compiled under —
+    /// [`in_the_authors_lines`] looks for the line number in a message, not for this.
+    pub name: String,
     /// How many lines stand in front of the author's own first line: the author's line 1 is line
     /// `prelude_lines + 1` of [`Program::source`], and a compiler's line *n* is the author's
     /// `n - prelude_lines`.
@@ -49,8 +71,9 @@ pub struct Program {
 }
 
 impl Program {
-    /// Puts the four pieces together. `name` goes in the separator comment only — what a compiler
-    /// calls the file is the compiler's own option, and in a browser it is not the caller's to
+    /// Puts the four pieces together. `name` goes in the separator comment and is kept as
+    /// [`Program::name`], which is the name to hand the compiler; what a compiler does with a
+    /// file name is still the compiler's own business, and in a browser it is not the caller's to
     /// choose at all (the playground's bridge names every program `playground.rb`).
     pub fn new(prelude: &str, name: &str, body: &str, tail: &str) -> Program {
         let head = format!("{prelude}\n# ---- {name} ----\n");
@@ -58,7 +81,11 @@ impl Program {
         // newline and does not count one after a trailing newline, which is exactly the
         // difference between a prelude read from a file and one written in the source.
         let prelude_lines = head.lines().count() as u32;
-        Program { source: format!("{head}{body}\n{tail}\n"), prelude_lines }
+        Program {
+            source: format!("{head}{body}\n{tail}\n"),
+            name: name.to_string(),
+            prelude_lines,
+        }
     }
 }
 

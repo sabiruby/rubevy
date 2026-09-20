@@ -277,7 +277,9 @@ pub struct ScriptStats {
 
 /// Marks an entity whose script has ended, so that [`ScriptEnded`] is sent once and the task
 /// is let go of once. The [`ScriptTask`] stays, which is what keeps the script from starting
-/// again.
+/// again — and where there is no task because the script never started (its `.mrb` would not
+/// load), this marker alone keeps it from being started over and over: the system that turns a
+/// [`Script`] into a task passes over an entity that carries it.
 ///
 /// It carries the name tag of its VM for the same reason [`ScriptTask`] does. One entity may
 /// hold a `Script<A>` and a `Script<B>` at once — two scripts of two VMs on one thing — and an
@@ -325,6 +327,18 @@ impl<M> Clone for ScriptDone<M> {
 
 impl<M> Copy for ScriptDone<M> {}
 
+/// Marks an entity whose script could not be **started** — the `.mrb` would not load, or the VM
+/// would not spawn the task — as against one that ran and ended. Both carry [`ScriptDone`]; only
+/// this one is worth trying again when the asset changes ([`retry_failed_scripts`]), which is
+/// the whole reason the two are told apart.
+///
+/// It is not part of the crate's API. What a game sees of a script that could not start is the
+/// [`ScriptEnded`] it was sent, the same as for one that ran and raised.
+#[derive(Component)]
+struct ScriptStartFailed<M = ()> {
+    _m: PhantomData<fn() -> M>,
+}
+
 /// **Gives an entity another script**: the running one is stopped and `script` takes its place.
 ///
 /// ```no_run
@@ -367,6 +381,11 @@ pub enum ScriptStatus {
 
 /// Emitted when a script's task runs to its end, with the value it answered
 /// (or the exception it did not handle, which mruby-task makes the result).
+///
+/// **A script that never started ends this way too**: a `.mrb` that will not load is a
+/// [`ScriptStatus::Failed`] whose value is what the VM said was wrong with it, sent once for
+/// that entity. It is the same ending because it is the same news — this entity has no script
+/// running — and a game that already shows an ending shows this one without being changed.
 ///
 /// One message type per VM (`ScriptEnded<Mods>`), so a reader of the first VM's endings is not
 /// woken by the second's.
@@ -887,6 +906,25 @@ pub struct ScriptWorld<M = ()> {
     /// is what makes an editor that applies the same text twice — or applies a change and takes
     /// it back — cost nothing the second time.
     programs: std::collections::HashMap<Box<[u8]>, sabiruby::object::IrepId>,
+    /// Every program this VM could **not** load, by the same key [`ScriptWorld::programs`] uses,
+    /// to what the VM said was wrong with it.
+    ///
+    /// A `.mrb` that will not load is not a passing condition: it is a truncated download, a file
+    /// written by another version's compiler, a game that saved bytes that were never bytecode.
+    /// `start_scripts` used to answer one by logging and moving on, which meant it met the same
+    /// broken program again on the next frame, and the next — a parse and a line in the log per
+    /// entity per frame, for as long as the entity existed. Now the first meeting is the only
+    /// one that parses and the only one that speaks; what every later entity of the same program
+    /// gets is the message out of here.
+    ///
+    /// **There is no limit on it and it needs none**, for the reason [`ScriptWorld::programs`]
+    /// has none: the key is the program itself, so this can only grow when a game makes a
+    /// *distinct* program that will not load, and it then holds one copy of those bytes — less
+    /// than the `MrbAsset` they came from costs, and less than what a program that *does* load
+    /// costs (an irep the VM never gives back). A cap would be a number with nothing behind it,
+    /// and whatever fell out of the cap would go back to being parsed once a frame for ever.
+    /// [`ScriptWorld::broken_programs`] is how a game watches it.
+    broken: std::collections::HashMap<Box<[u8]>, String>,
     /// Which VM this is, as a type. Nothing reads it; what it does is keep the resources of two
     /// VMs apart, and with them their tasks, requests and components.
     _m: PhantomData<fn() -> M>,
@@ -950,8 +988,58 @@ impl<M: 'static> ScriptWorld<M> {
             freed_entities,
             release,
             programs: std::collections::HashMap::new(),
+            broken: std::collections::HashMap::new(),
             _m: PhantomData,
         })
+    }
+
+    /// **Gives the VM another [`Host`](sabiruby::Host) and tells it where `require` looks**,
+    /// which are one act and not two.
+    ///
+    /// ```no_run
+    /// # use bevy::prelude::*;
+    /// # use rubevy::{EmbeddedHost, ScriptWorld};
+    /// # static RUBY_FILES: &[(&str, &str)] = &[];
+    /// fn embed_the_scripts(mut world: ResMut<ScriptWorld>) {
+    ///     world.require_from(EmbeddedHost::new(RUBY_FILES), &["ruby"]);
+    /// }
+    /// # fn build(app: &mut App) {
+    /// app.add_systems(Startup, embed_the_scripts);
+    /// # }
+    /// ```
+    ///
+    /// [`RubevyPlugin`] puts a host that reads the asset directory on the VM and
+    /// `["{asset_root}/scripts", "{asset_root}"]` on its load path, and a game that replaces the
+    /// host has to replace the
+    /// load path too: the paths a host can answer are the host's own, and the plugin's are the
+    /// asset directory's. `vm.set_host(..)` on its own leaves the VM asking the new host for
+    /// `assets/scripts/helper.rb` — a path a table of embedded files does not hold — and the
+    /// script gets a `LoadError` naming a file the game can see is right there. Nothing in the
+    /// types says so, and because the host that gets replaced is usually the browser's, it is a
+    /// thing that happens **in a browser only**, where the log is a console nobody is reading.
+    ///
+    /// So this is the pair under one name. The two calls it makes are still there
+    /// (`world.vm.set_host`, `world.vm.set_load_path`) and still do what they did — a game that
+    /// wants only one of them writes that one — and this is the way to write both.
+    ///
+    /// **Call it at `Startup`**, for the reason everything on [`ScriptWorld::vm`] is called at
+    /// `Startup`: a script that has already run has already done its `require`s.
+    ///
+    /// `load_path` replaces the load path, it is not added to it, and the entries are what the
+    /// VM joins with the name a script wrote (`"ruby"` + `"helper"` + `".rb"`). An empty slice
+    /// leaves `require` with nowhere to look but the name as written.
+    ///
+    /// The host is also what `eval` compiles through
+    /// ([`Host::compile`](sabiruby::Host::compile)), so this is where a browser's compiler
+    /// arrives as well ([`EmbeddedHost::compile_with`]).
+    pub fn require_from(
+        &mut self,
+        // `Send + Sync` are `Host`'s own supertraits, so the bound is `Host` and nothing else
+        host: impl sabiruby::Host + 'static,
+        load_path: &[&str],
+    ) {
+        self.vm.set_host(Box::new(host));
+        self.vm.set_load_path(load_path);
     }
 
     /// The irep of the program in `bytes`, loading it the first time this VM sees it.
@@ -965,13 +1053,31 @@ impl<M: 'static> ScriptWorld<M> {
     /// the VM writes to an irep is the throwaway one a `Binding` wraps a scope in,
     /// `ext_binding.rs`) — and a string literal is copied out of the pool each time it is
     /// reached, so two tasks of one program cannot reach each other through it.
-    fn irep_of(&mut self, bytes: &[u8]) -> Result<sabiruby::object::IrepId, VmError> {
+    ///
+    /// **A program that will not load is remembered too** ([`ScriptWorld::broken`]), and the
+    /// `Err` is what the VM said about it. `name` is only for the log: a broken program is said
+    /// to be broken **once**, here, where it is met for the first time — every entity that comes
+    /// to the same bytes afterwards is handed the same message without a parse and without a
+    /// second line in the log.
+    fn irep_of(&mut self, bytes: &[u8], name: &str) -> Result<sabiruby::object::IrepId, String> {
         if let Some(&irep) = self.programs.get(bytes) {
             return Ok(irep);
         }
-        let irep = self.vm.load(bytes)?;
-        self.programs.insert(bytes.into(), irep);
-        Ok(irep)
+        if let Some(message) = self.broken.get(bytes) {
+            return Err(message.clone());
+        }
+        match self.vm.load(bytes) {
+            Ok(irep) => {
+                self.programs.insert(bytes.into(), irep);
+                Ok(irep)
+            }
+            Err(e) => {
+                let message = self.vm.describe_error(&e);
+                error!("rubevy: {name} failed to load: {message}");
+                self.broken.insert(bytes.into(), message.clone());
+                Err(message)
+            }
+        }
     }
 
     /// How many distinct programs this VM has loaded for its scripts.
@@ -982,6 +1088,16 @@ impl<M: 'static> ScriptWorld<M> {
     /// to give an irep back, so each **new** text is one more, for the life of the app.
     pub fn loaded_programs(&self) -> usize {
         self.programs.len()
+    }
+
+    /// How many distinct programs this VM has tried to load and could not.
+    ///
+    /// The pair to [`ScriptWorld::loaded_programs`], and the same kind of number: one per
+    /// program, however many entities met it. It is worth watching for the same reason — this
+    /// VM keeps the bytes of each of them so that it never parses one twice — and in a game
+    /// whose `.mrb` files are files on a disk, it is zero or it is a bug in the build.
+    pub fn broken_programs(&self) -> usize {
+        self.broken.len()
     }
 
     /// What a script has spent and where it is, for a HUD or a debugger panel. The task comes
@@ -1845,7 +1961,14 @@ impl<M: 'static> Plugin for RubevyPlugin<M> {
             )
             .add_systems(
                 Update,
-                (start_scripts::<M>, deliver_answers::<M>, release_values::<M>)
+                // `retry_failed_scripts` is before `start_scripts` so that an asset changed on
+                // the frame before is tried again on this one and not the next
+                (
+                    retry_failed_scripts::<M>,
+                    start_scripts::<M>,
+                    deliver_answers::<M>,
+                    release_values::<M>,
+                )
                     .chain()
                     .in_set(RubevySet::<M>::deliver()),
             )
@@ -1881,22 +2004,41 @@ const ENTITY_IVAR: &str = "@rubevy_entity";
 /// may read it directly if it would rather not call the method.
 const DROPPED_IVAR: &str = "@rubevy_dropped";
 
+/// The [`Script`]s of this VM that are not running and have not ended: what [`start_scripts`]
+/// looks at each frame.
+///
+/// It is a `type` for the same reason [`RunningTasks`] is — a query of three things filtered by
+/// two is a mouthful in a signature — and the three and the two are: the entity, its script, and
+/// whether it is one that failed to start before ([`ScriptStartFailed`], which is taken off when
+/// it does start); no task, and not ended.
+type PendingScripts<'w, 's, M> = Query<
+    'w,
+    's,
+    (Entity, &'static Script<M>, Has<ScriptStartFailed<M>>),
+    (Without<ScriptTask<M>>, Without<ScriptDone<M>>),
+>;
+
 /// Turns every [`Script`] whose asset has arrived into a task.
+///
+/// A script that **cannot** be turned into one — the bytes will not load, or the VM will not
+/// spawn the task — ends here instead: a [`ScriptEnded`] of [`ScriptStatus::Failed`] carrying
+/// what went wrong, and a [`ScriptDone`] so that this is said once ([`give_up`]).
 fn start_scripts<M: 'static>(
     mut commands: Commands,
     assets: Res<Assets<MrbAsset>>,
     mut world: ResMut<ScriptWorld<M>>,
-    pending: Query<(Entity, &Script<M>), Without<ScriptTask<M>>>,
+    mut ended: MessageWriter<ScriptEnded<M>>,
+    pending: PendingScripts<M>,
 ) {
-    for (entity, script) in &pending {
+    for (entity, script, had_failed) in &pending {
         let Some(asset) = assets.get(&script.source) else { continue };
         let name = script.name.clone().unwrap_or_else(|| format!("{entity}"));
         // the program is loaded once however many entities run it (`ScriptWorld::irep_of`);
         // what is per-entity is the task, below
-        let irep = match world.irep_of(&asset.bytes) {
+        let irep = match world.irep_of(&asset.bytes, &name) {
             Ok(i) => i,
-            Err(e) => {
-                error!("rubevy: {name} failed to load: {}", world.vm.describe_error(&e));
+            Err(message) => {
+                give_up(&mut commands, &mut ended, entity, message);
                 continue;
             }
         };
@@ -1908,8 +2050,78 @@ fn start_scripts<M: 'static>(
                 // the task carries its entity, which is what `Rubevy.entity` answers
                 vm.ivar_set(task, ENTITY_IVAR, Value::Int(entity.to_bits() as i64));
                 commands.entity(entity).insert(ScriptTask::<M> { task, _m: PhantomData });
+                // it started this time: whatever went wrong before is over, and the mark that
+                // said so must not be left on the entity for a later asset change to act on
+                if had_failed {
+                    commands.entity(entity).remove::<ScriptStartFailed<M>>();
+                }
             }
-            Err(e) => error!("rubevy: {name} failed to start: {}", vm.describe_error(&e)),
+            Err(e) => {
+                // unlike a program that will not load, this is the VM's answer to *this* task
+                // (no room for another context, say), so it is one entity's news and is said
+                // per entity
+                let message = vm.describe_error(&e);
+                error!("rubevy: {name} failed to start: {message}");
+                give_up(&mut commands, &mut ended, entity, message);
+            }
+        }
+    }
+}
+
+/// Ends a script that never started: the entity is told once, and marked so that
+/// [`start_scripts`] does not come back to it every frame.
+///
+/// The ending is the one every other script gets — a [`ScriptEnded`] with
+/// [`ScriptStatus::Failed`] and, as its value, what the VM said. A game that shows the ending of
+/// a script shows this one with nothing added, which is the point of using the ending it already
+/// had rather than a message of its own.
+///
+/// [`ScriptStartFailed`] is what makes it a *pause* rather than a full stop: an asset that
+/// changes takes both marks off again ([`retry_failed_scripts`]).
+fn give_up<M: 'static>(
+    commands: &mut Commands,
+    ended: &mut MessageWriter<ScriptEnded<M>>,
+    entity: Entity,
+    message: String,
+) {
+    ended.write(ScriptEnded { entity, status: ScriptStatus::Failed, value: message, _m: PhantomData });
+    commands
+        .entity(entity)
+        .insert((ScriptDone::<M>::for_vm(), ScriptStartFailed::<M> { _m: PhantomData }));
+}
+
+/// Takes the mark off a script that could not start, when the asset it names is changed.
+///
+/// A `.mrb` that would not load is worth trying again the moment it is another `.mrb`, and that
+/// is what an editor's Apply, a `cargo` rebuild picked up by the asset server's hot reload, or a
+/// download that finished properly the second time all are. Two ways an asset can change reach
+/// this: [`AssetEvent::Modified`], which is the same handle with other bytes, and
+/// [`replace_script`], which is another handle altogether and takes the [`ScriptDone`] off
+/// itself.
+///
+/// It reads the events of **every** `MrbAsset`, not only this VM's, because that is the only
+/// form they come in; what is per-VM is the query, so the failed scripts of the VM named `M` are
+/// the only ones it can touch.
+fn retry_failed_scripts<M: 'static>(
+    mut commands: Commands,
+    mut changed: MessageReader<AssetEvent<MrbAsset>>,
+    failed: Query<(Entity, &Script<M>), With<ScriptStartFailed<M>>>,
+) {
+    let changed: Vec<AssetId<MrbAsset>> = changed
+        .read()
+        .filter_map(|e| match e {
+            AssetEvent::Modified { id } => Some(*id),
+            _ => None,
+        })
+        .collect();
+    if changed.is_empty() {
+        return;
+    }
+    // a `Vec` and not a set: what is in it is the assets that changed in one frame, and what it
+    // is searched for is one lookup per script that is already known to be broken
+    for (entity, script) in &failed {
+        if changed.contains(&script.source.id()) {
+            commands.entity(entity).remove::<ScriptStartFailed<M>>().remove::<ScriptDone<M>>();
         }
     }
 }

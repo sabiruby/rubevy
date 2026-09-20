@@ -6,6 +6,44 @@ ones those documents carry, and nothing is estimated.
 
 ## Unreleased
 
+* **The four small things the first users of the shared entry points found** (R6b of
+  `docs/plans/generalize-plan.md`, on branch `generalize`; the merge's commit goes here when the
+  branch comes in — `docs/worklog/2026-09-20-entry-point-followups.md`). R6 gave both sample games
+  one place for the code they had each written by hand; using it turned up four things, and all
+  four are additions — no name and no meaning changed.
+  **`ScriptWorld::require_from(host, load_path)`** is the host and the load path as one act.
+  A game that replaces the host has to replace the load path too — the plugin's points at the
+  asset directory, an embedded table's paths are its own — and nothing in the types said so, so
+  forgetting it is a `require` that raises `LoadError` for a file that is in the binary all along,
+  **in a browser only**, where the log is a console nobody has open. `vm.set_host` and
+  `vm.set_load_path` are untouched and still the way to do one of them. `EmbeddedHost` also says
+  it once if it happens: an ask it could never have answered — a path whose first directory is
+  not one the table uses — is one `warn!` naming that directory, the ones it holds and the call
+  above (a plain miss is not, because `require` misses on the way to every hit).
+  **`Program::name`** is what to call the file. It was passed to `Program::new` for the separator
+  comment and then again to the compiler by every one of the three callers in rubevy_games, and a
+  name written twice is a name that can be changed in one place only.
+  **A `.mrb` that will not load is met once.** `start_scripts` used to log it and pass over the
+  entity unchanged, so the next frame parsed the same bytes again and wrote the same line again —
+  once per entity per frame, for as long as the entity lived, in the log the game's own messages
+  had to be read out of. Now the VM remembers the programs it could not load by the same key it
+  remembers the ones it could (the bytes), so the parse and the line happen once however many
+  entities carry that program, and each entity is **told** the way every other entity is told: a
+  `ScriptEnded` of `ScriptStatus::Failed` carrying what the VM said, once, with a `ScriptDone`
+  marking it as not to be started again. It is a pause and not a verdict — an asset that changes
+  under its own handle (an editor's Apply, a hot reload) or through `replace_script` takes the
+  mark off and the script starts if the new bytes load. `ScriptWorld::broken_programs()` is the
+  count, the pair to `loaded_programs()`; the table it counts needs no cap for the reason the
+  loaded one needs none (the key is the program, so only a *distinct* program that will not load
+  can add to it, and it costs less than the asset it came from). `tests/broken_script.rs` is six
+  tests, the first of which runs twenty frames and expects one ending.
+  And **one line of documentation**: a line number in an exception a script raises while it runs
+  is in the program only if it was compiled with debug info, which
+  `sabiruby_compiler::Options::debug_info` is not by default — while the playground's browser
+  bridge passes it as an argument and its JS wrapper defaults it to on. `docs/host-api.md` carries
+  that beside `Program`. 135 tests pass (121 before), no dependency was added, there is no
+  `unsafe` and no new number in the crate.
+
 * **A queue that overflowed says so, and how much it holds is the app's to say** (R3 of
   `docs/plans/generalize-plan.md`, on branch `generalize`; the merge's commit goes here when the
   branch comes in — `docs/worklog/2026-09-20-overflow-and-limits.md`). A subscriber's queue held

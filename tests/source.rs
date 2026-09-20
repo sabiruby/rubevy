@@ -109,6 +109,28 @@ fn the_program_is_the_two_files_and_the_call_that_starts_them() {
     assert_eq!(program.prelude_lines, 2);
 }
 
+/// **The program carries the name**, so that the separator comment and the name the compiler is
+/// given cannot drift apart. All three places in rubevy_games wrote it twice —
+/// `Program::new(&prelude, name, body, tail)` and then `platform::compile(&program.source,
+/// name)` — and two spellings of one name are a name that can be changed in one of them.
+#[test]
+fn the_program_knows_what_to_call_the_file() {
+    let program = Program::new("# prelude", "brain.rb", "walk", "run");
+    assert_eq!(program.name, "brain.rb");
+    assert!(
+        program.source.contains(&format!("# ---- {} ----", program.name)),
+        "the same name the separator got: {}",
+        program.source
+    );
+    // and it is the one to hand a compiler, which is what the separator says the file is
+    let opts = sabiruby_compiler::Options {
+        filename: program.name.clone(),
+        ..Default::default()
+    };
+    let error = sabiruby_compiler::compile(b"1 < < 2", &opts).expect_err("does not compile");
+    assert!(error.to_string().starts_with("brain.rb:"), "{error}");
+}
+
 /// **What the compiler really prints**, rather than what this file remembers of it: a program
 /// with a prelude in front is compiled for real, and the message that comes back is moved into
 /// the author's own line.
