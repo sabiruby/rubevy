@@ -234,7 +234,7 @@ rubevy を触ったあとの **`web/build.sh` + Playwright の確認**（共通 
 |---|---|
 | R0 | **済み**（2026-09-20、ブランチ `generalize` の `bf45bde`、`src/` 無変更）。3 つとも書ける: `Rubevy.find(:Camera2d)`、`cam[:Transform] =`、ズームは `cam[:Projection] = { Orthographic: [ { scale: 2.5 } ] }`（変種名の Hash → tuple 変種なので **Array** → 中の struct への部分書き）。通らない形 3 つもテストにした: 変種の切り替え、tuple 変種のフィールドを名前で書く、同じ tick の 2 回のズーム（書きはフレーム末尾）。`tests/camera.rs` 6 件、全体 70 passed。記録は `docs/worklog/2026-09-20-camera-from-ruby.md` |
 | R6 | 実行中（計測が無いので R1〜R5 より先に回す。games の S2 がこれを待っている） |
-| R7 | sabiruby 側（`sabiruby-serde`）を実行中。rubevy 側の節と example は R6 の後 |
+| R7 | **sabiruby 側は済み**（2026-09-20、sabiruby のブランチ `declare` の `2f1043f`、worktree `sabiruby-wt-declare`。VM の crate は無変更、unsafe 0、数 0）。`sabiruby_serde::declare`: `Declarations::<T>::install(&mut vm).define(&mut vm, "unit")` → `load_and_run` → `take(&mut vm) -> Vec<(String, T)>`（宣言順、取り出した後 VM に何も残らない — `live_count` が宣言しなかった VM と一致）。重複は `ArgumentError`、上書きは別名の口 `define_replacing`。エラーは `missing field \`scale\` (TypeError) at data.rb:2` の形。読み返しは `expose(&mut vm, "unit_of", table)`（取り出した後の**別の表**。間にホストの検証が入るため）。表は `T` の host store に置く（使われない `Data` tag を型ごとに 1 つ消費）。serde のテスト 20 → 36、workspace 221 → 237、`thumbv7em-none-eabi` で `no_std` ビルド可。**main への取り込みと push は著者の指示待ち**（games が `[patch]` の git 経由で使うには push が要る）。rubevy 側の節と example は R6 の後 |
 | R1〜R5 | 未着手。計測を伴うので、機械が静かになってから 1 本ずつ |
 | R8〜R10 | 未着手 |
 
@@ -253,4 +253,9 @@ VM 側に残るもの（sabiruby、未計画）: キューごとの待ち手リ�
 | 09-20 R0 | `host-api.md` の「`DefaultPlugins` does it」: bevy 0.19.1 の `bevy_camera` / `bevy_transform` に `register_type` は無く、登録しているのは `reflect_auto_register` feature。どちらが効いているかは未確認 | `docs/host-api.md:406-408` | rubevy（文書、小） | 計画に足す: R8 で確かめて直す。games は `DefaultPlugins` なので F0 でも確かめる |
 | 09-20 R0 | repo に rustfmt の設定が無く、`cargo fmt --check` が既存コードで落ちる。担当が `cargo fmt` を走らせると無関係な差分が出る | repo の根 | repo の作法 | **著者判断待ち**: 設定を置くか「fmt は使わない」と書くか。それまで担当には「`cargo fmt` を走らせない」と伝える |
 | 09-20 R0 | 誰も答えない `Rubevy.ask(...).pop` は永久に park する。任意の Ruby 層の `world_at` に答え手がいないときの振る舞いが決まらない | `Rubevy.ask` | rubevy（口の設計） | R9 は「投げっぱなしでキューを返す」で始める。答え手の有無を聞ける口は**著者判断待ち** |
+| 09-20 R7 | **キーワードを 1 つも書かない宣言（`item :iron_plate`）は `define_fn` では受けられない**（引数の数が固定。`src/convert.rs:440`）。`define_closure` で 1〜2 個を受ける。調査の「`(Symbol, Serde<T>)` で受けられる」は半分だけ正しかった | 調査 §2、計画 3.7 | 計画書の前提 | `Declarations` が吸収済み。rubevy 側の example はこの口を使うので影響なし |
+| 09-20 R7 | 複数行に分けた宣言のエラー行は**最後の行**（SEND 命令の行番号）。「宣言の頭」ではなく閉じる行を指す | sabiruby の行番号の持ち方 | 本の素材／rubevy の文書 | R7 の rubevy 側の節に 1 行。book repo の findings に写す |
+| 09-20 R7 | `Vm::backtrace(Some(mid))` はネイティブ名を先頭に足すが、例外が抱える `Exception#backtrace` には入らない（mruby は C フレームを直下の Ruby フレームに置く） | sabiruby `src/vm.rs:2570-2574`、`:2589-2600` | VM（小さな食い違い） | **著者判断待ち**（VM 本体の話） |
+| 09-20 R7 | `HostStore::take` を「返さない」使い方（番号を手放さず値だけ取り上げる）は rustdoc が想定していない（「借りた側が `restore` する」）。今回の `Declarations::take` はこの使い方 | sabiruby `src/host_store.rs:124-138` | VM（rustdoc）／今回の設計の前提 | **著者判断待ち**: この使い方を認めて rustdoc に書くか、host store に「取り出して閉じる」口を足すか |
+| 09-20 R7 | `tools/check_no_std.sh` は VM の lib しか見ていない。`sabiruby-serde` も `no_std` なのに対象外 | sabiruby `tools/check_no_std.sh:5-6` | sabiruby（確認の網） | **著者判断待ち**（小。対象に足すだけ） |
 | 09-20 R0 | ズームの向き（`zoom 2` は寄るのか引くのか）と、2D は `scale`・3D は `fov` という数の違い | R9 の設計 | rubevy（Ruby 層） | **著者判断待ち**（R9 の前） |
