@@ -29,6 +29,12 @@
 //! that (unit) variant. The fields of a *tuple* variant are written by the same Array the read
 //! answers and cannot be named — a tuple variant's fields have no names in bevy_reflect, not
 //! even `"0"`. A value of a kind the field cannot take is reported, not applied.
+//!
+//! **Both walks stop at the same depth** ([`crate::ScriptWorld::max_depth`]), and a value past it
+//! is reported as what it is: `b.c: deeper than max_depth (2), so nothing under it was read or
+//! written`, where the script reads its refusals (`Rubevy.rejected_writes`). The read out of the
+//! VM is what meets the boundary first, so what it hands the write is [`RubyData::TooDeep`] and
+//! not a nil — the difference between a sentence about the limit and one about a missing key.
 
 use bevy::prelude::*;
 use bevy::reflect::enums::{DynamicEnum, DynamicVariant, VariantType};
@@ -74,6 +80,18 @@ const AS_ARRAY: [&str; 5] = ["glam::Vec2", "glam::Vec3", "glam::Vec3A", "glam::V
 /// already moved on, and a Hash it changes in the meantime would change the write.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum RubyData {
+    /// Where the read stopped: the value here is further from the top than
+    /// [`crate::ScriptWorld::max_depth`] allows, so nothing of it was read.
+    ///
+    /// **It is not `nil`, and the difference is a sentence a script can act on.** The two walks
+    /// meet at the same depth — [`read_ruby`] stops reading the Hash out of the VM exactly where
+    /// [`apply_ruby`] would stop writing it — so the write side never reaches its own "too deep"
+    /// through this road: what arrives at the boundary is an entry whose key and value are both
+    /// this. While that was `Nil`, the refusal a script read in `Rubevy.rejected_writes` was
+    /// `b.c: a field name must be a Symbol or a String`, which is true of the nil and says
+    /// nothing about the depth that made it one (R10 of `docs/plans/generalize-plan.md`,
+    /// `docs/numbers.md` §9-3).
+    TooDeep,
     Nil,
     Bool(bool),
     Int(i64),
@@ -133,7 +151,8 @@ fn levels(max_depth: usize) -> usize {
 
 fn read_at(vm: &mut Vm, v: Value, entity_tag: u32, left: usize) -> Result<RubyData, VmError> {
     let Some(deeper) = left.checked_sub(1) else {
-        return Ok(RubyData::Nil);
+        // and not `Nil`: what the write side is handed has to be able to say *why* it is nothing
+        return Ok(RubyData::TooDeep);
     };
     if let Some((tag, handle)) = vm.data_of(v)
         && tag == entity_tag
@@ -345,9 +364,37 @@ pub(crate) fn apply_ruby(
     value: &RubyData,
     max_depth: usize,
 ) -> Result<(), String> {
-    let mut problems = Vec::new();
+    let mut list = Vec::new();
+    let mut problems = Problems { max_depth, list: &mut list };
     apply_at(dest, value, "", levels(max_depth), &mut problems);
-    if problems.is_empty() { Ok(()) } else { Err(problems.join("; ")) }
+    if list.is_empty() { Ok(()) } else { Err(list.join("; ")) }
+}
+
+/// What a write ran into, gathered as it goes — and the one number a refusal may have to name.
+///
+/// `max_depth` is carried rather than looked up because the sentence a script reads is the whole
+/// of what it is told: "deeper than the host reads" without the number leaves it guessing which
+/// number, and the number is a setting the app may have moved
+/// ([`crate::ScriptWorld::set_max_depth`]).
+struct Problems<'a> {
+    max_depth: usize,
+    list: &'a mut Vec<String>,
+}
+
+impl Problems<'_> {
+    fn push(&mut self, text: String) {
+        self.list.push(text);
+    }
+
+    /// The refusal for a value the depth cut, from either walk: the read that stopped before it
+    /// ([`RubyData::TooDeep`]) or this walk running out of levels itself.
+    fn too_deep(&mut self, path: &str) {
+        let max = self.max_depth;
+        self.push(at(
+            path,
+            format!("deeper than max_depth ({max}), so nothing under it was read or written"),
+        ));
+    }
 }
 
 fn apply_at(
@@ -355,10 +402,16 @@ fn apply_at(
     value: &RubyData,
     path: &str,
     left: usize,
-    problems: &mut Vec<String>,
+    problems: &mut Problems,
 ) {
+    // the value the *read* stopped at (`read_ruby` walks to the same depth this does, so this is
+    // the arm the boundary is met in, and not the one below)
+    if let RubyData::TooDeep = value {
+        problems.too_deep(path);
+        return;
+    }
     let Some(deeper) = left.checked_sub(1) else {
-        problems.push(at(path, "too deep"));
+        problems.too_deep(path);
         return;
     };
     // An enum is settled before the value is looked at, because a Symbol names a variant and
@@ -372,7 +425,13 @@ fn apply_at(
             RubyData::Map(entries) => {
                 for (k, v) in entries {
                     let Some(name) = k.as_name() else {
-                        problems.push(at(path, "a field name must be a Symbol or a String"));
+                        // a key the read stopped at is the boundary itself, and says so: this is
+                        // where a Hash one level past `max_depth` arrives
+                        if let RubyData::TooDeep = k {
+                            problems.too_deep(path);
+                        } else {
+                            problems.push(at(path, "a field name must be a Symbol or a String"));
+                        }
                         continue;
                     };
                     let here = join(path, name);
@@ -466,7 +525,7 @@ fn apply_enum(
     value: &RubyData,
     path: &str,
     left: usize,
-    problems: &mut Vec<String>,
+    problems: &mut Problems,
 ) {
     let current = match dest.reflect_ref() {
         ReflectRef::Enum(e) => e.variant_name().to_string(),
@@ -527,7 +586,7 @@ fn apply_opaque(
     dest: &mut dyn PartialReflect,
     value: &RubyData,
     path: &str,
-    problems: &mut Vec<String>,
+    problems: &mut Problems,
 ) {
     macro_rules! number {
         ($($t:ty),*) => { $(if let Some(x) = dest.try_downcast_mut::<$t>() {

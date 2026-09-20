@@ -77,21 +77,68 @@ module Rubevy
     ask("resource.get", name.to_s).pop
   end
 
+  # Waits for the next frame and answers its number — the same Integer `$rubevy[:frame]` carries
+  # while the line after this one runs.
+  #
+  # It is the one wait `sleep` cannot spell. `sleep 0` waits for the VM's clock to move, and the
+  # clock moves in whole ticks of 4 ms, so what a script asks with it is a length of time that
+  # happens to be about a frame at the frame rates a game runs at. This asks for the frame
+  # itself: one call, one frame, however long the frame was.
+  #
+  #   loop do
+  #     f = Rubevy.next_frame                  # woken at the head of the frame's tick
+  #     Rubevy.log "frame #{f}, #{$rubevy[:delta]} s" if f % 60 == 0
+  #   end
+  #
+  # The host wakes it before it runs anything else of that frame (`wake_next_frame` in
+  # src/lib.rs), so the line after it sees that frame's `$rubevy` and writes what it writes into
+  # that frame's writes. **A paused VM (`budget = 0`) is not a frame that is waited through**:
+  # the frame it wakes on is the first one the scripts run in again.
+  #
+  # Every task that asked is woken, oldest first. Where the host's `frame_time` is too short to
+  # wake them all, the rest are the first woken on the frame after — they lose a frame, they do
+  # not lose their turn (`FrameStats::carried_reflect` counts them).
+  def self.next_frame
+    ask("frame.next").pop
+  end
+
+  # Runs the block once a frame, for ever: `Rubevy.each_frame { |dt| … }`.
+  #
+  # It is `next_frame` and a loop, written once here because it is what a game writes the loop
+  # for. The block is handed the seconds since the previous frame and the frame's number, so a
+  # block of one argument gets the delta:
+  #
+  #   Rubevy.each_frame do |dt|
+  #     e[:Transform] = { translation: [x += 40.0 * dt, 0.0, 0.0] }
+  #   end
+  #
+  # `break` in the block ends it, as it does in any block; nothing else does. A script whose
+  # whole job is one pass a frame writes this in its own task (`Task.new { Rubevy.each_frame …
+  # }`) where it also has something else to do.
+  def self.each_frame
+    loop do
+      n = next_frame
+      yield $rubevy[:delta], n
+    end
+  end
+
   # The writes **this script** made that the world would not take, as an Array of Hashes —
   # `{entity: Rubevy::Entity or nil, name: "Projection", reason: "…"}`, newest last, and empty
   # where every write landed.
   #
   # They are of one frame: the last one in which the scripts of this VM wrote anything at all.
   # The next frame that writes replaces the lot, so this is read after a write and before the
-  # next — which is not "the very next frame", because a script cannot ask to be woken on one
-  # (`sleep 0` waits for the VM's clock to move, and it moves in ticks of 4 ms).
+  # next. A script that waits with `Rubevy.next_frame` reads its own refusals on the frame the
+  # write landed; one that waits with `sleep` may be two or three frames later (`sleep 0` waits
+  # for the VM's clock to move, and it moves in ticks of 4 ms), which is why the list is held
+  # until something replaces it rather than emptied every frame.
   #
   # A write is applied after this frame's scripts have run, so nothing can be answered where it
   # is made: `e[:X] = hash` gives back the hash it was handed, whatever becomes of it. The news
   # is a frame old by the time there is any news at all, and this is where it arrives:
   #
   #   cam[:Projection] = { Orthographic: [ { scale: 2.0 } ] }
-  #   sleep 0                                        # the next frame, and the write has landed
+  #   Rubevy.next_frame                              # the next frame, and the write has landed
   #   Rubevy.rejected_writes.each { |w| Rubevy.log "#{w[:name]}: #{w[:reason]}" }
   #
   # `entity` is what was written to (nil for a resource — `Rubevy.set_resource`), which is not

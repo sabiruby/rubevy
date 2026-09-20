@@ -636,7 +636,7 @@ refusals of a frame's writes are kept, and a script reads its own on a later fra
 
 ```ruby
 cam[:Projection] = { Orthographic: [ { scale: 2.0 } ] }
-sleep 0                                    # the clock moves, and the write has landed or not
+Rubevy.next_frame                          # the next frame, and the write has landed or not
 Rubevy.rejected_writes.each do |w|
   Rubevy.log "#{w[:name]} on #{w[:entity].inspect}: #{w[:reason]}"
 end
@@ -664,10 +664,13 @@ in the log either, so the list and the log say the same things.
 
 **One frame's worth.** The list holds what one frame's writes refused, and the next frame in
 which the scripts write anything replaces the lot. It is not emptied by every frame on purpose:
-a script cannot ask to be woken on the very next one (`sleep 0` waits for the VM's clock, which
-moves in whole ticks of 4 ms), so a list that lasted one frame would usually be gone before the
-script that wrote could look at it. Holding it until the scripts next write is the soonest
-anything in it could be out of date.
+not every script that writes comes back on the next frame. **A script that waits with
+`Rubevy.next_frame` does** — it reads its own refusals on the frame the write landed, which is
+the shortest this can be — but a script that waits with `sleep` may be two or three frames later
+(`sleep 0` waits for the VM's clock, which moves in whole ticks of 4 ms), and for that one a list
+that lasted a single frame would usually be gone by the time it looked. Holding it until the
+scripts next write is the soonest anything in it could be out of date, and it is one frame's
+worth either way.
 
 **It has no limit and needs none.** A script cannot write without spending instructions on the
 writing, so the frame's `budget` already bounds how many refusals a frame can make: 33
@@ -1008,6 +1011,63 @@ bevy's clocks (`Time<Real>` keeps running while the game is paused, `Time<Fixed>
 fixed-step one), or a field of the clock itself rather than its reading. Reaching for it every
 frame to ask what `$rubevy[:delta]` already says is paying for nothing.
 
+### Waiting for the next frame (`Rubevy.next_frame`, `Rubevy.each_frame`)
+
+`$rubevy` says which frame it is; this is how a script asks to be there for the next one.
+
+```ruby
+f = Rubevy.next_frame           # parks until the next frame, and answers its number
+```
+
+The task is woken at the **head** of that frame's tick, before anything else of the frame runs,
+and the Integer it is answered is that frame's `$rubevy[:frame]`. So the line after it sees that
+frame's `$rubevy`, and what it writes is in that frame's writes.
+
+`Rubevy.each_frame` is the loop around it, which is what a game usually wants:
+
+```ruby
+e = Rubevy.entity
+x = 0.0
+Rubevy.each_frame do |dt|       # the seconds since the previous frame; a second argument, the
+  x += 40.0 * dt                # frame's number, is there for a block that asks for it
+  e[:Transform] = { translation: [x, 0.0, 0.0] }
+end
+```
+
+`break` ends it, as in any block. A script that has other things to do runs it in a task of its
+own: `Task.new { Rubevy.each_frame { |dt| … } }`.
+
+**Why this and not `sleep 0`.** `sleep` is a length of time and the VM's clock moves in whole
+ticks of 4 ms, so `sleep 0` means "until the clock moves" — which is the next frame at the frame
+rates a game runs at, and not a promise. `next_frame` is the promise: one call, one frame,
+however long the frame was, and the frame number to prove it. What it costs is the difference: a
+`sleep 0` is 14 instructions and the VM settles it by itself, while a `next_frame` is 62 and a
+question the host takes off a queue and answers (both measured with
+`tests/next_frame.rs::what_one_next_frame_costs`, an `#[ignore]`d instrument; the counts are of
+the VM, not of the machine). A script that wants "about a frame" and has a thousand of itself
+still wants `sleep 0`.
+
+**Three rules it keeps.**
+
+* **A paused VM is not a frame that is waited through.** With `budget = 0` nothing of the scripts
+  runs, so nobody is woken; the frame a waiting task goes on in is the first one the scripts run
+  in again. It is the same rule as the clock's, which a pause also stops ("Pausing" below).
+* **The frame time may cut the waking short**, as it cuts the answering
+  (`ScriptWorld::frame_time`): where there are more waiting tasks than a frame's time can wake,
+  the rest are woken at the head of the frame after — first, because the queue is in the order
+  they asked in and nothing has been added in front of them. They lose a frame, not their turn,
+  and `FrameStats::carried_reflect` counts them while they are behind.
+* **It is rubevy's own question** (`"frame.next"`, one of the reserved kinds), so it never reaches
+  a game's `take_requests` and a game cannot answer it with something else.
+
+**What a frame of waiting tasks costs.** Waking is an answer, so a thousand scripts that each
+wake every frame are a thousand answers at the head of every tick: about 2.5 ms of tick and
+56,000 instructions (of a default budget of 200,000) on the machine of 2026-09-20, against
+0.35 ms for a hundred of them. Most of that is inside the VM's scheduler, which walks the waiting
+tasks on every push and every wake — the same cost `frame_time`'s rustdoc names for three
+thousand parked tasks. `tests/next_frame.rs::what_a_frame_of_waiting_tasks_costs` is the
+instrument; `docs/worklog/2026-09-20-next-frame.md` has the run.
+
 ## Time
 
 `sleep` in a script waits in real time: the plugin gives mruby-task's clock Bevy's `Time`
@@ -1032,6 +1092,66 @@ changed, and what its origin is or that there is none — and the two other sett
 `ScriptWorld` are there too: `queue_limit` ("How much a queue holds") and `max_depth`
 ("Components by name").
 
+### Choosing `budget` and `frame_time` for your game
+
+The defaults are a starting point with nothing behind them (the column above says so). These two
+numbers are a game's own, and there is a way to arrive at them that is not a feeling.
+
+**1. Measure what your scripts cost in instructions per millisecond.** It is not a property of
+rubevy, it is a property of what your scripts *do* — a loop that reads a component every turn and
+a loop that sorts arrays run at different rates — and both numbers you need are in `FrameStats`:
+
+```rust
+fn rate(scripts: Res<ScriptWorld>) {
+    let f = scripts.last_frame();
+    if f.time_ns > 0 {
+        info!("{:.0} instructions/ms", f.instructions as f64 / (f.time_ns as f64 / 1e6));
+    }
+}
+```
+
+Two measured rates, to show how far apart they can be:
+
+| what | rate | where it comes from |
+|---|---|---|
+| rubevy's own read loop (a script that does nothing but read a component) | **~32,800 instructions/ms** | 200,000 instructions in 6.10 ms, `docs/worklog/2026-09-17-sync-reads.md` §5.1 |
+| rubevy_games' garden, the world's rules at the garden's caps | **~9,300 instructions/ms** | measured in that game, `garden/src/main.rs` (`install_world_answers`) |
+
+Read the numbers your own game shows over a few hundred frames, not one.
+
+**2. Decide the share of the frame the scripts may have, and divide it by the number of VMs.**
+`frame_time` is per VM and nothing adds them together, so an app with two VMs and 4 ms each has
+given its scripts 8 ms of every frame. A worked example at 60 Hz: a frame is 16.7 ms, a game that
+means to spend a quarter of it on scripts has 4 ms, and one VM gets `frame_time = 4 ms` while two
+VMs get 2 ms each.
+
+**3. Set `budget` to what that time buys at your rate**, so that the two limits mean the same
+thing. At 9,300 instructions/ms, 4 ms is about 37,000 instructions. Which of the two then bites
+first is worth being deliberate about:
+
+* **The budget first** (the instruction count is the smaller of the two) is the way round the
+  garden chose for its world VM: `budget = 45_000` against a `frame_time` of 8 ms, which at that
+  game's rate is about 4.8 ms. Instructions are a fact about the *rules* and are the same number
+  on a machine several times slower, including a browser; milliseconds are a fact about the
+  machine. A game that wants its scripts to behave the same way everywhere makes the budget the
+  real limit and leaves the clock as a guard with room.
+* **The clock first** is what the defaults do for a game at the garden's rate: 200,000
+  instructions at 9,300/ms is some 21 ms, far past the default 8 ms, so what ends the frame is
+  the clock. That is the safer way round for a game running other people's scripts, where "this
+  frame must end" matters more than "every machine runs the same amount of Ruby".
+
+**`overrun` is not chosen the same way.** It is the net under the case neither of the other two
+can catch — a script inside a native that will not be switched out — so what it has to be is
+*larger than `frame_time`*, and how much larger is how long a frozen frame is worth waiting
+before the game gets it back.
+
+**What to watch afterwards.** `FrameStats` says which limit is doing the work: `instructions`
+reaching `budget` frame after frame is the budget biting, `time_ns` at `frame_time` with
+`instructions` under budget is the clock, and `carried_reflect` / `carried_in_tick` staying above
+zero says the tick cannot answer what the scripts are asking at all — more scripts than this
+frame time can serve. `examples/how_many_scripts.rs` is the instrument that shows all of it for a
+number of scripts you choose.
+
 **The VM's clock moves in whole ticks of 4 ms.** That is mruby-task's `MRB_TICK_UNIT`, asked for
 rather than copied (`Vm::task_tick_unit_ms`), and it is the grain of every `sleep` a script
 writes. It has two consequences worth knowing before writing one:
@@ -1039,10 +1159,12 @@ writes. It has two consequences worth knowing before writing one:
 * **`sleep 0` is not "the next frame".** It waits for the clock to *move*, and at 60 Hz a frame
   is 16.7 ms, so the clock moves about four ticks a frame and `sleep 0` does come back on the
   next frame. At 240 Hz a frame is 4.2 ms and it still does; below about 250 Hz there is no
-  frame the clock stands still through. What a script cannot say is "wake me on the very next
+  frame the clock stands still through. What a `sleep` cannot say is "wake me on the very next
   frame and no later" — `sleep 0.001` and `sleep 0.004` are the same wait.
+  `Rubevy.next_frame` is that sentence ("Waiting for the next frame", above).
 * **A script cannot count frames by sleeping.** `$rubevy[:frame]` is the frame number, and a
-  script that must see every frame reads that rather than assuming one `sleep` is one frame.
+  script that must see every frame reads that — or waits on the frame itself with
+  `Rubevy.next_frame`, which answers the number it woke on.
 
 **`frame_time` bounds the tick, and here is what it does not cover.** A tick is a loop — run the
 ready tasks, answer what they parked on, run them again — and until 2026-09-20 the clock was

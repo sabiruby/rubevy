@@ -319,7 +319,9 @@ pub struct FrameStats {
     /// scripts are asking and being answered inside the tick, which is what the loop is for.
     pub rounds: u32,
     /// Questions rubevy answered itself in this tick: a component or resource by name,
-    /// `Rubevy.find`, `components`.
+    /// `Rubevy.find`, `components` — and the tasks woken at the head of the tick because they
+    /// asked for this frame (`Rubevy.next_frame`), which are answers of rubevy's own kinds made
+    /// inside the tick like the rest.
     pub reflect_answers: u32,
     /// Questions the game's own in-tick answerers made in this tick
     /// ([`ScriptWorld::answer_in_tick`]). The two are counted apart because they are bounded
@@ -330,6 +332,12 @@ pub struct FrameStats {
     /// A number that stays above zero frame after frame says the tick cannot keep up with what
     /// the scripts are asking: the frame time is short for the number of scripts, or a single
     /// answer is dear.
+    ///
+    /// The tasks still waiting for their `Rubevy.next_frame` when the waking ran out of frame
+    /// time are in here too, and only those: a task that asked for the next frame *during* this
+    /// tick is waiting because it said so, and so is everything waiting through a paused frame
+    /// (`budget = 0`, which wakes nobody). Neither is a backlog and neither is counted
+    /// (`wake_next_frame`).
     pub carried_reflect: u32,
     /// The same for the game's own kinds ([`ScriptWorld::answer_in_tick`]).
     pub carried_in_tick: u32,
@@ -927,6 +935,11 @@ pub struct ScriptWorld<M = ()> {
     /// still taken and answered — they simply reach a script that is not running. Bevy's own
     /// `Time` is the game's to pause (`Time<Virtual>`); this is about the VM's scheduler.
     ///
+    /// The one thing that follows the clock rather than the frame is `Rubevy.next_frame`: a
+    /// paused frame wakes nobody, and a task that asked for the next frame goes on in the first
+    /// frame the scripts run in again (`wake_next_frame`). It is the same rule said twice —
+    /// a frame no script could run in is not one they lived through.
+    ///
     /// **Where the default of 200,000 comes from: unknown.** It came in with the scheduler
     /// itself (`4c1e89f`, "v1: one VM, one task per script"), and neither that commit nor the
     /// plan behind it says how it was chosen (`docs/numbers.md`). What it *buys* has been
@@ -1056,6 +1069,20 @@ pub struct ScriptWorld<M = ()> {
     /// of the VM, never becomes a [`Request`] in [`ScriptWorld::requests`], and so is never seen
     /// by [`ScriptWorld::take_requests`].
     in_tick_answerers: std::collections::HashMap<String, InTickAnswerer>,
+    /// The tasks that asked for the next frame (`Rubevy.next_frame`, [`NEXT_FRAME_KIND`]) and
+    /// are waiting for it, oldest first.
+    ///
+    /// It is the one queue of questions here that is not a backlog: what stands in it between two
+    /// ticks is every task that *meant* to wait, and [`wake_next_frame`] empties it at the head
+    /// of the next tick. The order is the order they asked in, and a wake the frame time cut
+    /// short leaves the rest at the front — so the tasks that have waited longest are the first
+    /// ones woken on the frame after, and a frame that cannot wake everybody does not wake the
+    /// same few every time.
+    ///
+    /// **A paused frame (`budget = 0`) wakes nobody**, for the reason the clock does not move
+    /// either: a pause is not time the scripts lived through ([`ScriptWorld::budget`]). The frame
+    /// they wake on is the first frame the scripts run in again.
+    next_frame_waiters: Vec<Request>,
     /// Questions for [`ScriptWorld::in_tick_answerers`] left over from a frame that ran out of
     /// budget or of time — on the VM's queue when the loop ended, or taken and not reached
     /// before the frame time was up — the way [`ScriptWorld::reflect_requests`] is for rubevy's
@@ -1240,6 +1267,7 @@ impl<M: 'static> ScriptWorld<M> {
             reflect_requests: Vec::new(),
             in_tick_answerers: std::collections::HashMap::new(),
             in_tick_requests: Vec::new(),
+            next_frame_waiters: Vec::new(),
             reflect_cache: std::collections::HashMap::new(),
             resource_cache: std::collections::HashMap::new(),
             component_writes: Vec::new(),
@@ -2702,9 +2730,32 @@ fn tick_scripts<M: 'static>(world: &mut World, tasks: &mut RunningTasks<M>) {
         // what this tick will have to say for itself afterwards (`ScriptWorld::last_frame`). The
         // counters are the loop's own; the clock is the one the deadline makes it read anyway.
         let mut rounds = 0u32;
-        let mut reflect_answers = 0usize;
         let mut in_tick_answers = 0usize;
         let mut clock = AnswerClock { at_ns: started_ns, longest_ns: None };
+
+        // **This is the next frame.** Everybody who asked for it is woken here, before the first
+        // run of the VM, so that the line after `Rubevy.next_frame` runs in this frame's tick and
+        // reads this frame's `$rubevy`. They are counted as answers of rubevy's own kinds,
+        // because that is what they are.
+        //
+        // Nothing is woken while the scripts are paused: with `budget = 0` the loop below runs
+        // not one instruction, so an answer pushed here would sit in a queue carrying the number
+        // of a frame the script never saw. A pause is not a frame the scripts lived through
+        // (`ScriptWorld::budget`), and this follows the clock above in saying so.
+        let paused = scripts.budget == 0;
+        let mut reflect_answers =
+            if paused { 0 } else { wake_next_frame(scripts, frame_no, deadline_ns, &mut clock) };
+        // Whoever is still waiting *at this moment* asked on an earlier frame and was not reached
+        // before the frame time was up — a backlog, and the only part of the queue that is one.
+        // The tasks that ask later in this tick are waiting on purpose and are not counted
+        // (`FrameStats::carried_reflect`).
+        //
+        // A paused frame has no backlog either, although it reached nobody: what is waiting in a
+        // pause is waiting because the game stopped the scripts, and a `carried_reflect` that
+        // showed the whole queue every paused frame would be saying "the tick cannot keep up"
+        // about a tick that was asked to do nothing. The rest of a paused frame's numbers say the
+        // same thing by being zero.
+        let carried_waiters = if paused { 0 } else { scripts.next_frame_waiters.len() as u32 };
         loop {
             let left = scripts.budget.saturating_sub(spent);
             if left == 0 {
@@ -2763,7 +2814,7 @@ fn tick_scripts<M: 'static>(world: &mut World, tasks: &mut RunningTasks<M>) {
             rounds,
             reflect_answers: reflect_answers as u32,
             in_tick_answers: in_tick_answers as u32,
-            carried_reflect: scripts.reflect_requests.len() as u32,
+            carried_reflect: scripts.reflect_requests.len() as u32 + carried_waiters,
             carried_in_tick: scripts.in_tick_requests.len() as u32,
             dropped: dropped_total.saturating_sub(scripts.dropped_before),
             time_ns: clock_ns().saturating_sub(started_ns),
@@ -2883,7 +2934,15 @@ fn drain_commands<M: 'static>(
                 // is the leftovers of a frame that ran out of budget or of time; the next
                 // frame's answer loop takes them first.
                 let request = Request { entity: entity_from_bits(entity), kind, args, queue };
-                if RESERVED_KINDS.contains(&request.kind.as_str()) {
+                // `Rubevy.next_frame` asked in a round the tick never came back to — the frame
+                // ran out of budget or of time before its answer loop reached the queue — goes
+                // straight to the tasks waiting for the next frame. Sorting it into
+                // `reflect_requests` with the rest of rubevy's kinds would cost it a frame: the
+                // next tick would take it out of there, see the kind, and move it to the waiters
+                // for the frame after that.
+                if request.kind == NEXT_FRAME_KIND {
+                    world.next_frame_waiters.push(request);
+                } else if RESERVED_KINDS.contains(&request.kind.as_str()) {
                     world.reflect_requests.push(request);
                 } else if world.in_tick_answerers.contains_key(&request.kind) {
                     world.in_tick_requests.push(request);
@@ -2933,20 +2992,39 @@ fn entity_from_bits(bits: u64) -> Option<Entity> {
 /// queue before the game's own in-tick answerers are.
 ///
 /// They are what `src/prelude.rb` sends: `Rubevy::Entity#[]`, `#has?`, `#components`,
-/// `Rubevy.find`, `Rubevy.resource` and `Rubevy.rejected_writes`.
+/// `Rubevy.find`, `Rubevy.resource`, `Rubevy.rejected_writes` and `Rubevy.next_frame`.
 ///
-/// **The six names are fixed and not a setting.** Each is written twice — here, and in the
+/// **The seven names are fixed and not a setting.** Each is written twice — here, and in the
 /// `Rubevy.ask` the prelude makes — and the pair has to agree or the question is handed to the
 /// game instead of being answered; they are the spelling of a protocol rather than a value
 /// anybody tuned (`docs/numbers.md`).
-const RESERVED_KINDS: [&str; 6] = [
+///
+/// [`NEXT_FRAME_KIND`] is the odd one: it is in this list so that it is rubevy's name and no
+/// game can answer it, but it is the one kind [`answer_reflect_requests`] does *not* answer.
+const RESERVED_KINDS: [&str; 7] = [
     "component.get",
     "component.has",
     "components",
     "entities.with",
+    "frame.next",
     "resource.get",
     "writes.rejected",
 ];
+
+/// `Rubevy.next_frame`: the question whose answer is the next frame.
+///
+/// It is a reserved kind ([`RESERVED_KINDS`], where the same string stands once more) and it is
+/// answered nowhere a question is normally answered. A task that asks it is moved to
+/// [`ScriptWorld::next_frame_waiters`] — by [`answer_reflect_requests`] when the tick reaches it,
+/// by [`drain_commands`] when the frame ended before the tick did — and the *next* tick wakes it
+/// at its head (`wake_next_frame`) with the frame number it woke on.
+///
+/// This is the one thing a `sleep` cannot say. mruby-task's clock moves in whole ticks of 4 ms
+/// (`Vm::task_tick_unit_ms`), so `sleep 0` means "until the clock moves" and not "on the very
+/// next frame": at 60 Hz it happens to be the next frame, at 240 Hz it happens to be the next
+/// frame, and what a script cannot write is the promise itself
+/// (`docs/worklog/2026-09-20-next-frame.md`).
+const NEXT_FRAME_KIND: &str = "frame.next";
 
 /// Takes the questions rubevy answers itself off the VM's command queue, leaving every other
 /// command where it is.
@@ -3059,6 +3137,51 @@ fn resource_entity(world: &World, type_id: std::any::TypeId) -> Option<Entity> {
     world.resource_entities().get(id)
 }
 
+/// Wakes the tasks that asked for the next frame, and says how many it woke.
+///
+/// Called by [`tick_scripts`] **at the head of the tick**, before the first run of the VM: a task
+/// that asked on the frame before goes on in this one, with this frame's `$rubevy` already in
+/// place ([`set_frame_state`] runs a few lines above it). The answer is the frame number, as an
+/// Integer and the same one `$rubevy[:frame]` carries, so `f = Rubevy.next_frame` is a script's
+/// cheapest way of knowing which frame it woke on.
+///
+/// **What the frame time does to it.** Waking is an answer like any other, so the clock is read
+/// after each one exactly as it is in [`answer_reflect_requests`], and a wake that runs out of
+/// frame time leaves the rest of the queue where it is — at the front, since nothing else has
+/// been added to it yet. Those tasks are the first ones woken on the frame after, so a game with
+/// more waiters than a frame can carry moves round them rather than waking the same few for ever
+/// (`tests/next_frame.rs`). They are also the one thing counted in
+/// [`FrameStats::carried_reflect`] that nobody asked for this frame: a number that stays above
+/// zero there says the frame time is short for the number of tasks waiting on a frame.
+///
+/// The waking goes before the answer loop and therefore before the leftovers in
+/// [`ScriptWorld::reflect_requests`]. Both are tasks that have already waited a frame, so the
+/// order between them only shows at all in a frame too short to do both — which is a frame where
+/// the tick is behind already, and `carried_reflect` is what says so.
+fn wake_next_frame<M: 'static>(
+    scripts: &mut ScriptWorld<M>,
+    frame: u32,
+    deadline_ns: Option<u64>,
+    clock: &mut AnswerClock,
+) -> usize {
+    if scripts.next_frame_waiters.is_empty() {
+        // the whole road, clock reading included, costs an app that does not use it this test
+        return 0;
+    }
+    let mut waiting = std::mem::take(&mut scripts.next_frame_waiters).into_iter();
+    let mut woken = 0usize;
+    clock.start(deadline_ns);
+    while let Some(request) = waiting.next() {
+        scripts.answer_value(&request, |_vm| Value::Int(frame as i64));
+        woken += 1;
+        if clock.answer_made(deadline_ns) {
+            scripts.next_frame_waiters.extend(waiting);
+            break;
+        }
+    }
+    woken
+}
+
 /// Answers the questions about components from the world the tick is holding, and says how many
 /// it answered. Called by [`tick_scripts`] between two runs of the VM — this is what makes a
 /// read return inside the same tick.
@@ -3108,9 +3231,17 @@ fn answer_reflect_requests<M: 'static>(
     }
     let Some(registry) = world.get_resource::<AppTypeRegistry>().cloned() else {
         warn!("rubevy: no AppTypeRegistry, so no component is reachable by name");
-        let answered = asked.len();
+        let mut answered = 0usize;
         for request in asked {
+            // an app with no registry still owes `Rubevy.next_frame` a frame and not a nil: it
+            // asks nothing of the registry, and answering it here would wake it in the frame it
+            // asked in — the one thing it promises not to do
+            if request.kind == NEXT_FRAME_KIND {
+                scripts.next_frame_waiters.push(request);
+                continue;
+            }
             scripts.answer(&request, Answer::Nil);
+            answered += 1;
         }
         return answered;
     };
@@ -3127,6 +3258,15 @@ fn answer_reflect_requests<M: 'static>(
     {
         let mut asked = asked.into_iter();
         while let Some(request) = asked.next() {
+            // `Rubevy.next_frame` is taken off the queue here, with the rest of rubevy's kinds,
+            // and answered nowhere: it goes to the queue [`wake_next_frame`] empties at the head
+            // of the *next* tick. It is not an answer, so it does not count as one and does not
+            // buy the round another turn — a task waiting for the next frame is not a task this
+            // frame can run.
+            if request.kind == NEXT_FRAME_KIND {
+                scripts.next_frame_waiters.push(request);
+                continue;
+            }
             match request.kind.as_str() {
                 "component.get" => {
                     let rc = request
@@ -3398,14 +3538,16 @@ fn answer_in_tick_requests<M: 'static>(
 /// until this moment is of the last frame that wrote anything, which the tick that has just run
 /// was answering `Rubevy.rejected_writes` out of, and a frame that writes replaces the lot.
 ///
-/// **Why "the last frame that wrote" and not "the frame before".** A script cannot ask to be
-/// woken on the very next frame. `sleep 0` parks it until the VM's clock moves, and the clock
-/// moves in whole ticks of 4 ms (`Vm::task_tick_unit_ms`), so at a fast frame rate two or three
-/// frames go by before it runs again — and a list emptied by every frame would be gone before
-/// the script that wrote could look at it. Replacing it only where there is something to
-/// replace it with holds it until the scripts next write, which is the soonest anything in it
-/// could be stale. It is still one frame's worth: whatever a frame's writes refuse, and nothing
-/// from any frame before that one.
+/// **Why "the last frame that wrote" and not "the frame before".** Not every script that writes
+/// comes back on the next frame. `Rubevy.next_frame` does say exactly that (`wake_next_frame`),
+/// and a script that writes and then waits on it reads its own refusals on the frame the write
+/// landed — but `sleep` is the older and commoner way to wait, and it parks a task until the
+/// VM's clock moves, in whole ticks of 4 ms (`Vm::task_tick_unit_ms`), so at a fast frame rate
+/// two or three frames go by before it runs again. A list emptied by every frame would be gone
+/// before that script could look at it. Replacing it only where there is something to replace it
+/// with holds it until the scripts next write, which is the soonest anything in it could be
+/// stale. It is still one frame's worth: whatever a frame's writes refuse, and nothing from any
+/// frame before that one.
 ///
 /// Both queues of writes are looked at here and not only this system's own: it runs first of the
 /// two, so a frame that wrote only resources must have its list replaced here all the same,

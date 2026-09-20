@@ -6,6 +6,60 @@ ones those documents carry, and nothing is estimated.
 
 ## Unreleased
 
+* **A script can wait for the next frame** (R11 of `docs/plans/generalize-plan.md`, on branch
+  `generalize`; the merge's commit goes here when the branch comes in —
+  `docs/worklog/2026-09-20-next-frame.md`, `docs/host-api.md`). `Rubevy.next_frame` parks the task
+  until the next frame and answers that frame's number — the Integer `$rubevy[:frame]` carries —
+  and `Rubevy.each_frame { |dt| … }` is the loop around it. Until now the only wait a script had
+  was `sleep`, which is a length of real time on a clock that moves in whole ticks of 4 ms: at the
+  frame rates a game runs at `sleep 0` does come back on the next frame, but it is a habit and not
+  a promise, and every game that wanted one pass a script a frame wrote the machinery itself (the
+  garden of rubevy_games answers a question of its own, once a frame, from a system).
+  The task is woken at the **head** of the next tick, before the first run of the VM, so the line
+  after it sees that frame's `$rubevy` and writes into that frame's writes — a write is readable
+  one `next_frame` later. A paused VM (`budget = 0`) wakes nobody, for the reason its clock does
+  not move either; where the `frame_time` cannot wake everybody, the rest are woken first on the
+  frame after, and `FrameStats::carried_reflect` counts them while they are behind. It is one of
+  rubevy's own kinds (`"frame.next"`, the seventh in `RESERVED_KINDS`), so a game never sees the
+  question and cannot answer it with something else.
+  Measured with the `#[ignore]`d instruments in `tests/next_frame.rs`: one `next_frame` costs 62
+  instructions of the frame's budget against 14 for a `sleep 0` (which the VM settles by itself),
+  and a thousand tasks that each wake every frame cost about 2.5 ms of tick and 56,000
+  instructions. `Rubevy::Camera#follow` therefore keeps its `sleep`: the two wake on the same
+  frames at any frame rate a game runs at, and `every` stays a length of time throughout.
+  `Rubevy.rejected_writes` is unchanged — it still holds what the last frame that wrote refused,
+  because a script that waits with `sleep` may be two or three frames late — but what a script
+  can now do is wait one frame exactly and read its own refusals there.
+
+* **The three things R10 left for R11** (on branch `generalize`; the merge's commit goes here when
+  the branch comes in — `docs/worklog/2026-09-20-r10-followups.md`, `docs/numbers.md` §9).
+  **`examples/how_many_scripts.rs` reads the defaults instead of copying them.** Its `default`
+  row wrote `200_000` and `8 ms` itself, and its name said so a third time, so the day a default
+  moved the row would have gone on calling itself `default(200k/8ms)` while measuring something
+  that was no longer the default. All four rows are now said against the `ScriptWorld` the plugin
+  built — five hundred times the default budget, an eighth of the default frame time, sixty
+  frames of deadline — and each row's name is made from the numbers it actually ran with. With
+  the defaults where they are the names are the same strings as before, so the tables in
+  `docs/verification/scale.md` can still be laid beside a new run. A count of scripts or a sleep
+  given on the command line is also measured now whether or not it is one of the listed ones
+  (`how_many_scripts 90 3 500 0.01`), and the "every one of them is an argument" line at the top
+  of both instruments has been made true.
+  **A write refused for being too deep now says so.** The Hash is read out of the VM before it is
+  applied, and that read stops at `max_depth` first, so what reached the write was an entry with
+  a nil key — and the refusal a script read was `b.c: a field name must be a Symbol or a String`,
+  which is about the nil and not about the boundary. The read now hands the write a value that
+  says where it stopped, and the sentence is
+  `b.c: deeper than max_depth (2), so nothing under it was read or written`, carrying the number
+  the app set (`ScriptWorld::set_max_depth`).
+  **`docs/host-api.md` says how to choose `budget` and `frame_time`** ("Time"): measure your own
+  game's instructions per millisecond with `FrameStats`, divide the share of the frame you mean
+  to give the scripts by the number of VMs to get `frame_time`, and set `budget` to what that
+  time buys at your rate — with the two measured rates that are on the record (about 32,800
+  instructions/ms for rubevy's read loop, about 9,300 for the garden's world rules) to show how
+  far apart two games can be, and with which of the two limits bites first as something to choose
+  rather than discover. **No default moved**, and the origins in `docs/numbers.md` still say
+  "unknown" where nobody wrote one down.
+
 * **What R9's first readers walked into** (R10 of `docs/plans/generalize-plan.md`, merged in `06a9d32` —
   `docs/worklog/2026-09-20-numbers-inventory.md`, `docs/host-api.md`). Four small things the
   camera layer and the entry points left behind, and the documents that were missing beside

@@ -62,9 +62,14 @@ const SLEEPER: &str = r#"
 
 // --- the numbers this instrument runs with, and where each of them comes from -----------------
 //
-// Every one of them is an argument (see `main`); these are the defaults, and each is the value
-// the survey of 2026-09-20 used, so that a run of this today can be laid beside the tables in
-// `docs/worklog/2026-09-20-factory-survey.md` and the worklogs of R1 and R3.
+// Each is the value the survey of 2026-09-20 used, so that a run of this today can be laid beside
+// the tables in `docs/worklog/2026-09-20-factory-survey.md` and the worklogs of R1 and R3.
+//
+// **Which of them an argument can move** (see `main`): the frames and the repeats of every mode,
+// and the `mem` mode's two. The shape of the table — the subscribers of each row, the messages of
+// each column, the limits the `limit` mode walks — is not an argument: a cell is only worth
+// reading beside the others of its row, so what this instrument offers is the whole table or a
+// mode of it, and a run of one cell is a line changed here.
 
 /// Subscribers per row, from the survey: one, and then the three powers of ten a game might
 /// plausibly reach.

@@ -12,6 +12,11 @@
 
 以後、rubevy に数を足す変更は、この表に 1 行足すことを含む。
 
+**R11（2026-09-20）で足した名前**: `RESERVED_KINDS` に `frame.next`（§4。数ではなく名前で、
+分類は (a)）。R11 が足した**数は 1 つも無い** — `Rubevy.next_frame` に上限も既定値も無く、
+待ち行列の長さを縛るのは既にある `budget` と `frame_time` である（`docs/worklog/2026-09-20-next-frame.md`）。
+§8 の集計の 44 件は **45 件**になる（(a) が 8 → 9）。
+
 ---
 
 ## 0. 読み方
@@ -112,7 +117,7 @@ R3 が測ったのは次の 2 つで、**どちらも 64 を指していない**
 |---|---|---|---|---|---|
 | `ENTITY_IVAR` | `src/lib.rs:2458` | `@rubevy_entity` | `src/prelude.rb`（`Task.new` が子タスクに写す）、`docs/host-api.md`（スクリプトが自分で書いてよいと案内している） | `Rubevy.entity` / `ask` / `subscribe` が「エンティティが無い」と言う | *理由のみ*: 「a script would not write it by accident」（`:2405`） |
 | `DROPPED_IVAR` | `src/lib.rs:2469` | `@rubevy_dropped` | `src/prelude.rb` の `Subscription#dropped` | 落とした件数が常に 0 に見える | *理由のみ*: `ENTITY_IVAR` に揃えた（`:2415-2418`） |
-| `RESERVED_KINDS` の 6 つ | `src/lib.rs:2942` | `component.get` / `component.has` / `components` / `entities.with` / `resource.get` / `writes.rejected` | `src/prelude.rb` の `Rubevy.ask(...)` | 問いが rubevy ではなくゲームの `take_requests` に渡り、誰も答えずスクリプトが永久に park する | *理由のみ*: 綴りの約束（`:2885-2891`）。点区切りにした理由はどこにも無い |
+| `RESERVED_KINDS` の 7 つ | `src/lib.rs`（`RESERVED_KINDS`） | `component.get` / `component.has` / `components` / `entities.with` / `frame.next` / `resource.get` / `writes.rejected` | `src/prelude.rb` の `Rubevy.ask(...)` | 問いが rubevy ではなくゲームの `take_requests` に渡り、誰も答えずスクリプトが永久に park する | *理由のみ*: 綴りの約束（`drain_commands` のコメント）。点区切りにした理由はどこにも無い。**R11 で `frame.next` を足して 6 → 7**（`Rubevy.next_frame`。予約 kind の中で唯一 `answer_reflect_requests` が答えず、次の tick の頭で答える） |
 | `$rubevy` とそのキー | `src/lib.rs:2818` | `$rubevy`、`:frame` / `:delta` / `:time` | 全スクリプト、`src/layers/camera.rb:291` | スクリプトが読むものが nil になる | **引用**: `4c1e89f`「`$rubevy` (`:frame`, `:delta`, `:time`) replaces `$frame`/`$delta`」 |
 | `ENTITY_TAG` | `src/lib.rs:3563` | 1 | `set_on_free` の判定と `data_new` の作成 | **名前であって大きさではない**。どの数でもよいが、両方が同じでなければ別種の Data をエンティティと取り違える。`pub` なのは、ホストが自分の Data に別の番号を選べるようにするため | **不明**（なぜ 1 か。ただし「どの数でもよい」ので、不明であることが問題にならない唯一の行） |
 | `AS_ARRAY` の 5 型 | `src/reflect.rs:65` | `glam::Vec2` / `Vec3` / `Vec3A` / `Vec4` / `Quat` | bevy_reflect の型パス | 読みの形が変わり、`tf[:translation][0]` が書けなくなる | **引用**: bevy_reflect 0.19 がこれらを struct として綴っているという事実（`bevy_reflect/src/impls/glam.rs`）。表であって調整値ではない |
@@ -155,17 +160,17 @@ R5 が常設したときに、**全部の `const` の rustdoc に出どころが
 
 | 名前 | 位置 | 既定値 | 引数で | 出どころ |
 |---|---|---|---|---|
-| `SCRIPTS` | `:79` | `[10, 100, 300, 1000, 3000]` | **選べるだけ**（第 3 引数がこの中の 1 つに絞る） | **引用**: 調査（10 と 100 は 2 本のゲームの実数、1000 はこの機械で 60 Hz のフレームを使い切るあたり、3000 は意図的にその先） |
-| `SLEEPS` | `:84` | `[0.004, 0.25]` | **選べるだけ**（第 4 引数） | **導出**: 0.004 は 1 tick（`TICK_UNIT_MS`）＝ 60 Hz の次フレームで起きる最短、0.25 は約 15 フレーム |
+| `SCRIPTS` | `:79` | `[10, 100, 300, 1000, 3000]` | 第 3 引数（**R11 で「選べるだけ」から変えた**: 一覧に無い台数もそのまま測る） | **引用**: 調査（10 と 100 は 2 本のゲームの実数、1000 はこの機械で 60 Hz のフレームを使い切るあたり、3000 は意図的にその先） |
+| `SLEEPS` | `:84` | `[0.004, 0.25]` | 第 4 引数（同上） | **導出**: 0.004 は 1 tick（`TICK_UNIT_MS`）＝ 60 Hz の次フレームで起きる最短、0.25 は約 15 フレーム |
 | `FRAMES` | `:87` | 90 | 第 1 引数 | **引用**: 調査の `factory_machines 90 3` |
 | `REPEATS` | `:92` | 3 | 第 2 引数 | **引用**: 調査以降ずっと 3 |
 | `SETTLE` | `:97` | 30 フレーム | `const` | **導出**: `SLEEPS` の最長が約 15 フレームで、その 2 回ぶん |
 | `FRAME` | `:101` | 16,666,667 ns | `const` | **引用**: 60 Hz |
 | `mem` モードの既定 | `:452-453` | 1000 台 / 60 フレーム | 第 2・第 3 引数 | **不明**（この 2 つだけ rustdoc が無い。直書き） |
-| `Limits::Default` の 2 つ | `:282-283` | 200,000 / 8 ms | `const` | **引用**（§1 の既定値の**写し**）。写しなので連動しない — §9-1 |
-| `Limits::Generous` | `:286-287` | 100,000,000 / なし | `const` | *理由のみ*: 「五百倍で、時計は無し」（`:256-258`）。どちらの上限もフレームを終わらせないことが目的 |
-| `Limits::Tight` | `:291` | 200,000 / 1 ms | `const` | **導出**: 既定の 1/8（`:259-261`）。tick がそれに合わせて縮まなければ、使っているのは答えの中ではない |
-| `Limits::Clocked` | `:293-` | 100,000,000 / 1 s | `const` | **導出**: `generous` と、時計を読むこと以外は同じにするため（`:262-266`） |
+| `Limits::Default` の 2 つ | — | 既定そのもの（今は 200,000 / 8 ms） | **`ScriptWorld` の既定から読む**（R11。写しをやめた — §9-1） | **引用**: §1 の既定値**そのもの**。既定が動けば行の名札も一緒に動く |
+| `Limits::Generous` | `GENEROUS` | 既定の予算 × **500** / 時計なし | `const`（倍率） | *理由のみ*: 「五百倍で、時計は無し」。どちらの上限もフレームを終わらせないことが目的 |
+| `Limits::Tight` | `TIGHT` | 既定の予算 / 既定の `frame_time` ÷ **8** | `const`（除数） | **導出**: 既定の 1/8。tick がそれに合わせて縮まなければ、使っているのは答えの中ではない |
+| `Limits::Clocked` | `NEVER_DUE` | `generous` の予算 / `FRAME` × **60** | `const`（倍率） | **導出**: `generous` と、時計を読むこと以外は同じにするため。60 フレームぶんの締切はフレームの中で来ない |
 
 ### 7.2 `how_many_subscribers.rs`
 
@@ -254,24 +259,37 @@ rustdoc とコメントだけの行を落としてから目で選んだ。**リ�
 
 `src/` だけを見たい人は **24 件**（44 − 計測器 18 − VM の数 2）を読めばよい。
 
-## 9. 気づいた点（一覧の仕事の外。**直していない**）
+## 9. 気づいた点（R10 の一覧の仕事の外。**1〜3 は R11 で直した**。下の各項の末尾を見よ）
 
 1. **計測器の `Limits::Default` が既定値を写している。** `examples/how_many_scripts.rs:282-283` は
    `scripts.budget = 200_000; scripts.frame_time = Some(Duration::from_millis(8));` と直書きしていて、
    `ScriptWorld` の既定を読んでいない。既定値が動いた日に、`default(200k/8ms)` と名乗る行が
    **既定ではない設定**を測る。行の名札（`:272`）も同じ数を 3 度目に書いている。
    直すなら `ScriptWorld::new` の値をそのまま使い、名札はその値から組む。
+   → **R11 で直した。** プラグインが建てた `ScriptWorld` から読む（`Defaults::of`）。4 つの行は
+   全部その 2 つの数の掛け算・割り算になり、名札は実際に使った数から組む。既定のままなら
+   名札は今までと同じ字（`default(200k/8ms)` ほか）なので、`docs/verification/scale.md` の表と並べられる。
 2. **計測器の冒頭の「Every one of them is an argument」が正確ではない。**
    `how_many_scripts.rs:73` と `how_many_subscribers.rs:64` はそう書いているが、
    引数になっているのは `FRAMES` / `REPEATS` と `mem` モードの 2 つだけで、
    `SCRIPTS` と `SLEEPS` は**行を選べるだけ**（一覧に無い台数は指定できない）、
    `SUBSCRIBERS` / `PER_FRAME` / `QUEUE_LIMITS` / `SETTLE` / `FRAME` は `const` のままである。
+   → **R11 で直した。** 小さい方（文を実物に合わせる）を選びつつ、`how_many_scripts` の
+   台数と sleep だけは**引数で任意の値を渡せる**ようにした（一覧に無い数を渡すと 1 行も出ずに
+   終わるのは「測ったのに何も出ない」に見えるため）。両方の計測器の冒頭の段落は、何が引数で
+   何がそうでないか、そうでないものはなぜかを書く形に直した。
 3. **深さを超えた書きの断り文句が、深さの話をしない。** `max_depth` を超える Hash は
    **VM から読み出す側**（`reflect::read_ruby`）で先に切られ、境界の 1 つ先のエントリは
    鍵も値も nil になって届く。だから `apply_at` の `too deep` には（この道からは）決して届かず、
    スクリプトが `Rubevy.rejected_writes` で読むのは
    `b.c: a field name must be a Symbol or a String` である（`tests/max_depth.rs`）。
    場所は正しいが、文は nil のことを言っていて深さのことを言っていない。R10 より前からの性質。
+   → **R11 で直した。** 読み出す側が境界で `RubyData::TooDeep` を返すようにし（nil と区別できる）、
+   書く側はその値と自分の深さ切れの両方を
+   `b.c: deeper than max_depth (2), so nothing under it was read or written` と言う。
+   数（app が設定した `max_depth`）を文に入れるために、書きの問題を集める入れ物を
+   `Vec<String>` から `Problems`（`max_depth` を持つ）に替えた。`tests/max_depth.rs` の期待も
+   文そのものに直した。
 4. **`docs/host-api.md` の「Time」の表に `queue_limit` と `max_depth` が無い。** R10 で出どころの列を足したが、
    表が並べているのは `RunLimits` に渡る 3 つだけで、`ScriptWorld` の `pub` な数はいま 4 つある。
    「Events」と「Components by name」にそれぞれ書いてあるので重複させるかどうかは判断が要る。
