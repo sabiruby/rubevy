@@ -69,7 +69,7 @@ module Rubevy
       @zoom = 1.0
       @at = nil
       @stamp = nil
-      @following = false
+      @follower = nil
     end
 
     # The entity, the marker it was found by (`:Camera2d` / `:Camera3d`), and the variant its
@@ -94,8 +94,8 @@ module Rubevy
       inside = inside.is_a?(Array) ? inside[0] : nil
       @base = inside.is_a?(Hash) ? inside[@field] : nil
       # a projection this layer cannot zoom — a variant it does not know, a type nobody
-      # registered, a camera without one — leaves `zoom` and `scale` answering nil rather than
-      # writing something made up
+      # registered, a camera without one — leaves `zoom` and `magnification` answering nil rather
+      # than writing something made up
       @field = nil unless @base.is_a?(Numeric)
       @zoom = 1.0
       @at = nil
@@ -140,13 +140,19 @@ module Rubevy
     # How much bigger things look than they did when the projection was last read: 1.0 after
     # `reload`, 2.0 after `zoom 2`. nil where this camera has no projection this layer knows how
     # to zoom.
-    def scale
+    #
+    # It is **not** bevy's `OrthographicProjection#scale`, and the two run opposite ways: bevy's
+    # is how much world fits across the window, so a smaller one is closer, while this is
+    # apparent size, so a larger one is closer. That is why it is not called `scale` — the same
+    # word meaning the reverse on the two sides of one boundary is a trap laid for whoever reads
+    # `4.0x` beside `scale 0.25`.
+    def magnification
       @field && @zoom
     end
 
     # `zoom 2` comes twice as close — things look twice as big — and `zoom 0.5` pulls back, on a
-    # 2D camera and a 3D one alike. Answers the new magnification (what `scale` answers), or nil
-    # where there is no projection to write.
+    # 2D camera and a 3D one alike. Answers the new magnification (what `magnification` answers),
+    # or nil where there is no projection to write.
     #
     # The two cameras zoom by different numbers and the layer is what makes them mean the same:
     #
@@ -200,39 +206,53 @@ module Rubevy
     # target's z as well. Left out it is no offset at all — the camera's x and y become the
     # target's.
     #
-    # It stops on `unfollow`, and by itself when the target is gone (its `Transform` reads nil,
-    # which is what a despawned entity answers). Following again replaces the task that was
-    # following.
+    # It stops on `unfollow`, by itself when the target is gone (its `Transform` reads nil, which
+    # is what a despawned entity answers), and by itself when **this camera** is gone (`move_to`
+    # answers nil for the same reason). However it stops, `following?` goes back to false.
+    # Following again replaces the task that was following.
     def follow(target, every = 0, offset = nil)
       unfollow
       here = position
       there = translation_of(target)
       return nil if here.nil? || there.nil?
       offset ||= [0.0, 0.0]
-      @following = true
       camera = self
       @follower = Task.new(name: "camera.follow") do
-        while camera.following?
+        me = Task.current
+        # `follower` and not a flag of its own: one thing says both "is this camera following"
+        # and "is it *me* that is following", and a `follow` that replaces this one puts its own
+        # task there, which is how this one is told to stop. The block does not run until the
+        # scheduler reaches it, which is after the assignment below, so `me` is there by then.
+        while camera.follower == me
           at = camera.translation_of(target)
           break if at.nil?
           z = offset[2] && at[2] + offset[2]
           break if camera.move_to(at[0] + offset[0], at[1] + offset[1], z).nil?
           sleep every
         end
+        # It stopped by itself — the target is gone, or **this camera** is (a despawned entity's
+        # `Transform` reads nil, so `move_to` answers nil) — and `following?` has to stop saying
+        # yes. Only while this is still the camera's follower: a later `follow` must not have its
+        # own task taken away by the one it replaced.
+        camera.unfollow if camera.follower == me
       end
     end
 
     # Stops following. The task ends at its next turn — it may be asleep in `every` — so what
     # this promises is that no further move is made, not that the task is already gone.
     def unfollow
-      @following = false
       @follower = nil
       self
     end
 
-    # Whether this camera is following something.
+    # The task that is following, or nil. `follow` answers it too; this is how a script holding
+    # the camera rather than the task asks, and it is what the following task itself watches.
+    attr_reader :follower
+
+    # Whether this camera is following something. It goes back to false by itself when the
+    # following task stops — because the target was despawned, or because this camera was.
     def following?
-      @following ? true : false
+      @follower ? true : false
     end
 
     # The writes this script made that the world would not take, of this camera's entity only

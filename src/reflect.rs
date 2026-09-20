@@ -37,11 +37,19 @@ use bevy::reflect::{PartialReflect, ReflectMut, ReflectRef};
 use sabiruby::value::ObjId;
 use sabiruby::{Value, Vm, VmError};
 
-/// How deep the conversion follows a value in either direction. A component nested past this
-/// is a script's problem, not the host's: the point of the boundary is a Hash a script can
-/// read, and the limit keeps a cycle (a `Map` holding itself, a Ruby Hash holding itself) from
-/// taking the stack with it.
-const MAX_DEPTH: usize = 16;
+/// How deep the conversion follows a value in either direction, unless the app says otherwise
+/// ([`crate::ScriptWorld::set_max_depth`]). A component nested past this is a script's problem,
+/// not the host's: the point of the boundary is a Hash a script can read, and the limit keeps a
+/// cycle (a `Map` holding itself, a Ruby Hash holding itself) from taking the stack with it.
+///
+/// **Where 16 comes from: unknown.** It came in with the reflection bridge itself (`0cf047c`,
+/// 2026-09-15) and neither that commit, `docs/worklog/2026-09-15-ecs-bridge.md` nor the plan
+/// behind it says why sixteen rather than eight or thirty-two; the *reason for having a limit*
+/// is the sentence above, and the value is not measured, not derived and not quoted
+/// (`docs/numbers.md`). Bevy's own components are far shallower than this — a `Transform` is
+/// two — so the number that is actually in use is whatever the deepest component of the game
+/// is, and an app whose components go deeper says so rather than reading nil.
+pub(crate) const DEFAULT_MAX_DEPTH: usize = 16;
 
 /// The math types a script is given as an Array rather than as a Hash of `x`, `y`, `z`.
 ///
@@ -50,6 +58,10 @@ const MAX_DEPTH: usize = 16;
 /// says `tf[:translation][0] += 1.0` wants the Array all the same, and a position that is three
 /// numbers reads better than a Hash of one-letter keys. The other way round needs no list: an
 /// Array written over any struct goes by position (see [`apply_ruby`]).
+///
+/// It is a fixed table and not a setting: what is in it is decided by what bevy_reflect makes
+/// of glam's types, and the five names are quoted from there (`docs/numbers.md`). A game whose
+/// own type should read as an Array writes it as a tuple struct, which already does.
 const AS_ARRAY: [&str; 5] = ["glam::Vec2", "glam::Vec3", "glam::Vec3A", "glam::Vec4", "glam::Quat"];
 
 /// A Ruby value the host has taken a copy of, out of the VM and owned by Rust.
@@ -97,18 +109,32 @@ impl RubyData {
 
 // ------------------------------------------------------------------ reading a Ruby value
 
-/// Reads a Ruby value out of the VM, as far as [`MAX_DEPTH`].
+/// Reads a Ruby value out of the VM, as far as `max_depth` levels below the top one
+/// ([`crate::ScriptWorld::max_depth`], [`DEFAULT_MAX_DEPTH`]).
 ///
 /// `entity_tag` is what a `Rubevy::Entity` object carries in its `Vm::data_of` tag, so that an
 /// entity a script holds stays an entity instead of becoming a number.
-pub(crate) fn read_ruby(vm: &mut Vm, v: Value, entity_tag: u32) -> Result<RubyData, VmError> {
-    read_at(vm, v, entity_tag, 0)
+pub(crate) fn read_ruby(
+    vm: &mut Vm,
+    v: Value,
+    entity_tag: u32,
+    max_depth: usize,
+) -> Result<RubyData, VmError> {
+    read_at(vm, v, entity_tag, levels(max_depth))
 }
 
-fn read_at(vm: &mut Vm, v: Value, entity_tag: u32, depth: usize) -> Result<RubyData, VmError> {
-    if depth > MAX_DEPTH {
+/// The three walks below count *down*, so that the limit is carried rather than compared with a
+/// constant, and this is how a depth becomes that count: `max_depth` levels below the top one is
+/// `max_depth + 1` levels in all. Saturating, so that a `usize::MAX` asked for by an app is as
+/// deep as the machine goes rather than none at all.
+fn levels(max_depth: usize) -> usize {
+    max_depth.saturating_add(1)
+}
+
+fn read_at(vm: &mut Vm, v: Value, entity_tag: u32, left: usize) -> Result<RubyData, VmError> {
+    let Some(deeper) = left.checked_sub(1) else {
         return Ok(RubyData::Nil);
-    }
+    };
     if let Some((tag, handle)) = vm.data_of(v)
         && tag == entity_tag
     {
@@ -128,7 +154,7 @@ fn read_at(vm: &mut Vm, v: Value, entity_tag: u32, depth: usize) -> Result<RubyD
             if let Some(items) = vm.ary_vals(other) {
                 let mut out = Vec::with_capacity(items.len());
                 for it in items {
-                    out.push(read_at(vm, it, entity_tag, depth + 1)?);
+                    out.push(read_at(vm, it, entity_tag, deeper)?);
                 }
                 return Ok(RubyData::List(out));
             }
@@ -140,8 +166,8 @@ fn read_at(vm: &mut Vm, v: Value, entity_tag: u32, depth: usize) -> Result<RubyD
                 let mut out = Vec::with_capacity(keys.len());
                 for k in keys {
                     let value = vm.hash_get(other, k).unwrap_or(Value::Nil);
-                    let k = read_at(vm, k, entity_tag, depth + 1)?;
-                    let value = read_at(vm, value, entity_tag, depth + 1)?;
+                    let k = read_at(vm, k, entity_tag, deeper)?;
+                    let value = read_at(vm, value, entity_tag, deeper)?;
                     out.push((k, value));
                 }
                 return Ok(RubyData::Map(out));
@@ -163,8 +189,9 @@ pub(crate) fn reflect_to_ruby(
     value: &dyn PartialReflect,
     entity_class: ObjId,
     entity_tag: u32,
+    max_depth: usize,
 ) -> Value {
-    to_ruby(vm, value, entity_class, entity_tag, 0)
+    to_ruby(vm, value, entity_class, entity_tag, levels(max_depth))
 }
 
 fn to_ruby(
@@ -172,12 +199,11 @@ fn to_ruby(
     value: &dyn PartialReflect,
     entity_class: ObjId,
     entity_tag: u32,
-    depth: usize,
+    left: usize,
 ) -> Value {
-    if depth > MAX_DEPTH {
+    let Some(deeper) = left.checked_sub(1) else {
         return Value::Nil;
-    }
-    let deeper = depth + 1;
+    };
     match value.reflect_ref() {
         ReflectRef::Struct(s) => {
             if AS_ARRAY.contains(&value.reflect_type_path()) {
@@ -314,9 +340,13 @@ fn opaque_to_ruby(
 ///
 /// The `Err` is a sentence for the log, naming the path inside the component (`translation.x`)
 /// rather than only the component. A mismatch stops that field, not the whole write.
-pub(crate) fn apply_ruby(dest: &mut dyn PartialReflect, value: &RubyData) -> Result<(), String> {
+pub(crate) fn apply_ruby(
+    dest: &mut dyn PartialReflect,
+    value: &RubyData,
+    max_depth: usize,
+) -> Result<(), String> {
     let mut problems = Vec::new();
-    apply_at(dest, value, "", 0, &mut problems);
+    apply_at(dest, value, "", levels(max_depth), &mut problems);
     if problems.is_empty() { Ok(()) } else { Err(problems.join("; ")) }
 }
 
@@ -324,14 +354,13 @@ fn apply_at(
     dest: &mut dyn PartialReflect,
     value: &RubyData,
     path: &str,
-    depth: usize,
+    left: usize,
     problems: &mut Vec<String>,
 ) {
-    if depth > MAX_DEPTH {
+    let Some(deeper) = left.checked_sub(1) else {
         problems.push(at(path, "too deep"));
         return;
-    }
-    let deeper = depth + 1;
+    };
     // An enum is settled before the value is looked at, because a Symbol names a variant and
     // switching one is not a field write.
     if let ReflectMut::Enum(_) = dest.reflect_mut() {
@@ -436,7 +465,7 @@ fn apply_enum(
     dest: &mut dyn PartialReflect,
     value: &RubyData,
     path: &str,
-    depth: usize,
+    left: usize,
     problems: &mut Vec<String>,
 ) {
     let current = match dest.reflect_ref() {
@@ -473,7 +502,7 @@ fn apply_enum(
                         let Some(field) = k.as_name() else { continue };
                         let here = join(path, field);
                         match e.field_mut(field) {
-                            Some(f) => apply_at(f, v, &here, depth, problems),
+                            Some(f) => apply_at(f, v, &here, left, problems),
                             None => problems.push(format!("{here}: no such field")),
                         }
                     }
@@ -482,7 +511,7 @@ fn apply_enum(
                     for (i, v) in items.iter().enumerate() {
                         let here = join(path, &i.to_string());
                         match e.field_at_mut(i) {
-                            Some(f) => apply_at(f, v, &here, depth, problems),
+                            Some(f) => apply_at(f, v, &here, left, problems),
                             None => problems.push(format!("{here}: past the end")),
                         }
                     }

@@ -532,6 +532,16 @@ The measurements are in `docs/worklog/2026-09-17-sync-reads.md`, and `tests/sche
 the frames from the script's own side — zero for these, one for the questions the game answers,
 in the same file.
 
+**How deep a value is followed** is `ScriptWorld::max_depth()` / `set_max_depth()`, and the
+default is 16 levels below the component itself. Both directions use it: a field nested deeper
+reads as `nil`, and a Hash nested deeper is refused where it goes past — which a script sees in
+`Rubevy.rejected_writes`. Two things are behind having a limit at all: the point of this
+boundary is a Hash a script can read, and a cycle (a reflected `Map` that holds itself, a Ruby
+Hash that holds itself) would otherwise take the stack with it. Bevy's own components are far
+shallower than sixteen — a `Transform` is two — so an app that raises it is one whose *own*
+components go deeper, and what raising it costs is stack, since the walk is recursive. Where 16
+came from is unknown, and `docs/numbers.md` says so beside every other number rubevy holds.
+
 The six kinds rubevy answers itself — `component.get`, `component.has`, `components`,
 `entities.with`, `resource.get`, `writes.rejected` — never reach `ScriptWorld::take_requests`:
 they are sorted out
@@ -549,6 +559,33 @@ can be parked in. `e[:Transform]` is the spelling; `e.get(:Transform)` is the sa
 because spelling the round trip out reads better where it matters. The Ruby side of all this is
 `src/prelude.rb`, compiled to `.mrb` and run when the VM starts, so a script has these without
 requiring anything.
+
+**A read cannot wait inside `initialize`**, and that one is not fixable from here. `Class#new` is
+a native, so everything `initialize` does happens inside a C function — and the boundary a `[]`
+written in Ruby no longer puts around itself is still there around `new`. A script that reads a
+component in `initialize` does not get nil and does not raise something a `rescue` would name:
+the task dies with `blocking pop cannot be called from within a C function boundary`, the entity
+gets a `ScriptEnded` of `Failed`, and from the Ruby side the script simply stopped. Blocks,
+`times`, `while`, and any ordinary method are all fine — the boundary is `new` itself, not depth.
+So a class whose objects need the world at birth is built in two steps, which is what
+`Rubevy::Camera.attach` is:
+
+```ruby
+class Body
+  def self.at(entity)                 # this is what a script calls
+    new(entity).reload
+  end
+
+  def initialize(entity)              # holds, reads nothing
+    @entity = entity
+  end
+
+  def reload                          # an ordinary Ruby frame: it may park
+    @at = @entity[:Transform]
+    self
+  end
+end
+```
 
 ## Resources by name
 
@@ -824,6 +861,36 @@ what a camera is and nothing is to start: the camera layer is Ruby over `Rubevy.
 with it as without it (`bevy_camera` is a dev-dependency, for the tests and the example). An app
 that loads nothing has no `Rubevy::Camera`, and `tests/camera_layer.rs` begins by checking that.
 
+**A layer taken up twice is taken up once.** `load_and_run` remembers the programs it has run in
+that VM, by their bytes, and answers `Ok(false)` for one it has run already — so two plugins that
+both want the camera, or a test that adds the line beside an app that already had it, get one
+layer. That is what makes a layer different from a script: two entities running one `.mrb` are
+two tasks on purpose, while a layer is something the VM either has or has not. A program that is
+meant to run twice is not a layer, and `world.vm.load_and_run(..)` is the unconditional
+spelling.
+
+**Adding a second layer**, if you are working on rubevy rather than using it:
+
+* **Where.** `src/layers/<name>.rb`, with `<name>.mrb` beside it (both committed) and a
+  `pub const <NAME>: &[u8] = include_bytes!("layers/<name>.mrb")` in `pub mod layers`.
+  `tools/compile_scripts.sh` already walks `src/layers/*.rb`, so nothing there changes.
+* **What it may depend on.** The host API and nothing else — `Rubevy.find`, `e[:X]`, `e[:X] =`,
+  `Rubevy.resource`, `Rubevy.ask`, `Task.new`. **No Rust.** If a layer would need a type,
+  a system or a dependency in `src/`, it is not a layer: rubevy does not know what a game has,
+  and a layer that made it know would be the host API wearing a coat. Anything the layer cannot
+  work out itself is a `Rubevy.ask` the game answers, as `camera.world_at` is.
+* **What it may be called.** A class or module under `Rubevy::`, named for the thing a game
+  already has a word for (`Rubevy::Camera`). Its `ask` kinds are `<thing>.<verb>`
+  (`camera.world_at`), which is a name the answering app has to spell too, so it belongs in this
+  document beside the layer.
+* **What it must not do at its top level.** Park. `load_and_run` runs the program in the system
+  that called it, so no `sleep`, no `Rubevy.ask`, nothing that waits for a frame — and nothing
+  that reads the world, since reading is waiting. A layer reads the world from a method a script
+  calls later, as `Rubevy::Camera.attach` does.
+* **`initialize` cannot read the world** (see "Components by name"), so a layer whose objects
+  need a read at birth is built the way the camera is: a class method that calls `new` and then
+  a reading method on the result.
+
 ### The camera layer
 
 ```ruby
@@ -835,7 +902,7 @@ cam.move_to(100.0, 0.0)              # z is kept unless you pass one
 cam.pan(20.0, -40.0)                 # and two pans in one tick both count
 cam.zoom 2                           # twice as close: 2D and 3D alike
 cam.zoom 2                           # 4x, not 2x
-cam.scale                            # 4.0 — the magnification, not bevy's `scale`
+cam.magnification                    # 4.0 — apparent size, the reverse of bevy's `scale`
 cam.position                         # [x, y, z]
 cam.follow(target)                   # a task of its own; `unfollow` stops it
 cam.world_at(x, y)                   # a question for the game; answers the queue
@@ -863,8 +930,11 @@ started, on either camera.
   told to look again after the *host* has changed the projection from Rust.
 * **The magnification.** A write lands at the end of the frame, so reading the projection,
   multiplying it and writing it back would lose every `zoom` in a tick but the first. The layer
-  holds the magnification on the Ruby side and writes an absolute value. `scale` answers that
-  magnification — 1.0 after a `reload`, whatever bevy's own number happens to be.
+  holds the magnification on the Ruby side and writes an absolute value. `magnification` answers
+  it — 1.0 after a `reload`, whatever bevy's own number happens to be. It is **not** called
+  `scale`, because bevy's `OrthographicProjection::scale` is that word for the reverse thing:
+  bevy's is how much world fits across the window, so smaller is closer, while this is apparent
+  size, so larger is closer. `4.0x` printed beside `scale 0.25` is the same camera.
 * **Where it put the camera**, for this frame only: `position` answers what the layer wrote if it
   wrote it this frame (`$rubevy[:frame]`, which costs no round trip) and the world's own
   otherwise, which is what makes two `pan`s in one tick add up.
@@ -874,8 +944,10 @@ script's entity) that moves the camera to the target's x and y. `every` is what 
 turns — 0 is "every frame the VM's clock moves" — and `offset` is `[dx, dy]` or `[dx, dy, dz]`,
 where the third puts the camera dz from the target's z instead of leaving its own alone. There is
 no smoothing and no speed in it, because either would be a number this layer has no grounds for;
-a game that wants one writes its own task around `move_to`. It stops on `unfollow`, and by itself
-when the target is gone — a despawned entity's `Transform` reads nil.
+a game that wants one writes its own task around `move_to`. It stops on `unfollow`, by itself
+when the target is gone — a despawned entity's `Transform` reads nil — and by itself when **the
+camera** is gone, for the same reason on the other side (`move_to` answers nil). However it
+stops, `following?` goes back to false, and `follower` is the task itself or nil.
 
 **`world_at(x, y)` is a question with no answerer.** Where a point on the window is in the world
 is worked out from the camera's placing and its projection; no component holds it, so the layer
@@ -923,6 +995,19 @@ is in the run without asking.
 The plugin puts it there with `Vm::global_set`, so it is an ordinary global: a script may write
 to it, and what it writes stands until the next frame replaces it.
 
+**`$rubevy` or `Rubevy.resource("Time<Virtual>")`?** **`$rubevy` is the one to reach for**, and
+for most scripts it is the only one needed. It is already in the VM, so reading it costs no
+round trip and next to no instructions, where a resource read is about 2.2 µs and a question the
+tick has to answer ("Resources by name"). It is also the only place the **frame number** is. And
+it is not a lesser clock: rubevy ticks in `Update`, where bevy's plain `Time` is a copy of
+`Time<Virtual>` (`bevy_time-0.19.1/src/lib.rs`, `time_system`), so `:delta` and `:time` already
+follow a game that paused or slowed its own clock.
+
+Read the resource by name where the script wants something `$rubevy` does not carry: another of
+bevy's clocks (`Time<Real>` keeps running while the game is paused, `Time<Fixed>` is the
+fixed-step one), or a field of the clock itself rather than its reading. Reaching for it every
+frame to ask what `$rubevy[:delta]` already says is paying for nothing.
+
 ## Time
 
 `sleep` in a script waits in real time: the plugin gives mruby-task's clock Bevy's `Time`
@@ -934,14 +1019,30 @@ The instruction count cannot stop everything, so each frame also runs under time
 (`Vm::task_run_limits`, on a clock the plugin gives the VM — Bevy's `Instant`, which a browser
 has too):
 
-| `ScriptWorld` field | default | what it does |
-|---|---|---|
-| `budget` | 200,000 instructions | checked between timeslices, as before; **zero pauses the scripts** |
-| `frame_time` | 8 ms | the tick's bound: the running timeslice is cut short once the frame's scripts have taken this long, and the answering stops there too |
-| `overrun` | 50 ms | a script that cannot be switched out — inside a native waiting for a block, `sort { }` or `Array.new(1) { loop { } }` — gets `Task::Overrun` past this, and the frame comes back |
+| `ScriptWorld` field | default | what it does | where the default comes from |
+|---|---|---|---|
+| `budget` | 200,000 instructions | checked between timeslices, as before; **zero pauses the scripts** | **unknown** — it came in with the scheduler (`4c1e89f`) and nothing says how it was chosen. What it buys *is* measured: ~75 instructions a component read, 51 a message taken off a subscription, 33 a refused write |
+| `frame_time` | 8 ms | the tick's bound: the running timeslice is cut short once the frame's scripts have taken this long, and the answering stops there too | **unknown** — stated, not explained, in the commit that added it (`0d0662b`). It is about half of a 60 Hz frame, but nobody wrote that down |
+| `overrun` | 50 ms | a script that cannot be switched out — inside a native waiting for a block, `sort { }` or `Array.new(1) { loop { } }` — gets `Task::Overrun` past this, and the frame comes back | **unknown** — the same commit. What is on the record is only the *relation*: larger than `frame_time` on purpose, since this is the net under the case that one cannot catch |
 
 All three are fields of `ScriptWorld<M>`, so an app with a second VM has a second set of them and
 nothing adds the two together: the worst case per frame is the sum ("Two VMs in one app").
+`docs/numbers.md` is the whole of this for every number rubevy holds — what it is, where it is
+changed, and what its origin is or that there is none — and the two other settings on
+`ScriptWorld` are there too: `queue_limit` ("How much a queue holds") and `max_depth`
+("Components by name").
+
+**The VM's clock moves in whole ticks of 4 ms.** That is mruby-task's `MRB_TICK_UNIT`, asked for
+rather than copied (`Vm::task_tick_unit_ms`), and it is the grain of every `sleep` a script
+writes. It has two consequences worth knowing before writing one:
+
+* **`sleep 0` is not "the next frame".** It waits for the clock to *move*, and at 60 Hz a frame
+  is 16.7 ms, so the clock moves about four ticks a frame and `sleep 0` does come back on the
+  next frame. At 240 Hz a frame is 4.2 ms and it still does; below about 250 Hz there is no
+  frame the clock stands still through. What a script cannot say is "wake me on the very next
+  frame and no later" — `sleep 0.001` and `sleep 0.004` are the same wait.
+* **A script cannot count frames by sleeping.** `$rubevy[:frame]` is the frame number, and a
+  script that must see every frame reads that rather than assuming one `sleep` is one frame.
 
 **`frame_time` bounds the tick, and here is what it does not cover.** A tick is a loop — run the
 ready tasks, answer what they parked on, run them again — and until 2026-09-20 the clock was
@@ -1288,6 +1389,11 @@ script on the same entity alone). What it does is take the `ScriptTask` off, tak
 marker off in case the old script had already ended — without that, an entity whose script ran to
 its end could never be given another one — and insert the new `Script`. Both sample games had
 those three lines copied into them, and it is a reload button in each.
+
+It also takes off the mark that says this entity's *last* script would not start at all (a `.mrb`
+that would not load: "One program, one irep"). That mark is rubevy's own and not part of the API,
+but the effect is: an entity whose script was broken bytecode is given a fresh start by
+`replace_script`, the same as one whose script ran to its end.
 
 **Stopping** a script is still just removing its `ScriptTask` or despawning the entity: there is
 no function for it because there is nothing else to do.

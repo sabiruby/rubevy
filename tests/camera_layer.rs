@@ -181,7 +181,7 @@ fn the_layer_finds_the_camera_and_says_what_it_is() {
                      all.length,
                      cam.kind.to_s,
                      cam.variant.to_s,
-                     cam.scale,
+                     cam.magnification,
                      cam.entity.to_i,
                      all[1].kind.to_s,
                      all[1].variant.to_s,
@@ -247,7 +247,7 @@ fn zooming_a_2d_camera_halves_its_scale_and_two_zooms_in_one_tick_multiply() {
           cam = Rubevy::Camera.find
           cam.zoom 2
           cam.zoom 2
-          Rubevy.ask("zoomed", cam.scale).pop
+          Rubevy.ask("zoomed", cam.magnification).pop
         "#,
     );
     frames(&mut app, 20);
@@ -291,7 +291,7 @@ fn zooming_a_3d_camera_halves_the_tangent_of_half_its_fov() {
           cam = Rubevy::Camera.find_all[0]
           cam.zoom 2
           cam.zoom 0.5
-          Rubevy.ask("back", cam.scale).pop
+          Rubevy.ask("back", cam.magnification).pop
         "#,
     );
     frames(&mut app, 20);
@@ -312,7 +312,7 @@ fn a_camera_without_a_projection_pans_but_does_not_zoom() {
           cam = Rubevy::Camera.find
           Rubevy.ask("no projection",
                      cam.variant.inspect,
-                     cam.scale.inspect,
+                     cam.magnification.inspect,
                      cam.zoom(2).inspect,
                      cam.move_to(5.0, 6.0).class.to_s).pop
         "#,
@@ -410,6 +410,61 @@ fn following_stops_when_the_target_is_gone() {
     assert_eq!(seen.0[0].kind, "done");
 }
 
+/// The other half of the same promise, and the one the camera layer got wrong: when **the
+/// camera** is despawned the following task stops too — a despawned entity's `Transform` reads
+/// nil, so `move_to` answers nil and the loop ends — and `following?` says so.
+///
+/// It used to end the task and leave `following?` answering true for ever, so a script that
+/// polled it to decide whether to follow something else never got its turn. Nothing was being
+/// written every frame (a write to an entity that is gone is dropped, not refused), which is
+/// what the record of R9 guessed; what was wrong was what the camera said about itself.
+#[test]
+fn following_stops_when_the_camera_itself_is_gone() {
+    let mut app = app(true);
+    let camera = spawn_camera_2d(&mut app);
+    app.world_mut().spawn(Transform::from_xyz(100.0, 0.0, 0.0));
+    watch(
+        &mut app,
+        r#"
+          cam = Rubevy::Camera.find
+          who = Rubevy.find(:Transform).find { |e| e[:Transform][:translation][0] > 50.0 }
+          cam.follow who
+          sleep 0.05
+          Rubevy.ask("while", cam.following? ? 1.0 : 0.0).pop
+          sleep 0.5
+          Rubevy.ask("after", cam.following? ? 1.0 : 0.0).pop
+        "#,
+    );
+
+    frames(&mut app, 12);
+    {
+        let seen = app.world().resource::<Seen>();
+        assert_eq!(seen.0.len(), 1, "the first report is in");
+        assert_eq!(seen.0[0].num(0), Some(1.0), "it is following while the camera is there");
+    }
+    assert!((at(&app, camera).x - 100.0).abs() < 0.001, "and it did follow");
+
+    app.world_mut().entity_mut(camera).despawn();
+    // the frame it notices, and plenty after it
+    frames(&mut app, 2);
+    let spent = app.world().resource::<ScriptWorld>().last_frame().instructions;
+    frames(&mut app, 120);
+    assert_eq!(
+        app.world().resource::<ScriptWorld>().last_frame().instructions,
+        0,
+        "the following task is not still turning (it spent {spent} on the frame it noticed)"
+    );
+    assert_eq!(
+        app.world().resource::<ScriptWorld>().rejected_writes().len(),
+        0,
+        "and it left no refused write behind"
+    );
+
+    let seen = app.world().resource::<Seen>();
+    assert_eq!(seen.0.len(), 2, "the script reached its last line");
+    assert_eq!(seen.0[1].num(0), Some(0.0), "and the camera no longer says it is following");
+}
+
 /// `world_at` is a question the game answers, and the layer throws it without waiting: what it
 /// answers is the queue. Nobody in rubevy answers `camera.world_at` — a `pop` on it would park
 /// that task for ever — so the layer hands the queue back and the script decides.
@@ -478,12 +533,12 @@ fn reload_takes_the_projection_as_it_now_stands() {
         r#"
           cam = Rubevy::Camera.find
           cam.zoom 2
-          Rubevy.ask("first", cam.scale).pop
+          Rubevy.ask("first", cam.magnification).pop
           sleep 0.2                              # the host changes the projection meanwhile
           cam.reload
-          Rubevy.ask("reloaded", cam.scale).pop
+          Rubevy.ask("reloaded", cam.magnification).pop
           cam.zoom 2
-          Rubevy.ask("again", cam.scale).pop
+          Rubevy.ask("again", cam.magnification).pop
         "#,
     );
     frames(&mut app, 10);
@@ -503,4 +558,46 @@ fn reload_takes_the_projection_as_it_now_stands() {
     assert_eq!(said[1], ("reloaded".into(), Some(1.0)), "a reload is 1x again");
     assert_eq!(said[2], ("again".into(), Some(2.0)));
     assert_eq!(ortho_scale(&app, camera), 4.0, "measured from the 8.0 the host put there");
+}
+
+/// A layer taken up twice is taken up once. `load_and_run` remembers the programs it has run in
+/// this VM, so two plugins that both want `Rubevy::Camera` — or a test that adds the line beside
+/// an app that already had it — get one camera layer and not two.
+///
+/// The camera layer itself only defines methods, so running it twice would look the same; the
+/// program here is one whose top level *does* something, which is what a layer or a library of a
+/// game's own may well do.
+#[test]
+fn a_layer_taken_up_twice_is_run_once() {
+    let mut app = app(false);
+    let counts = compile("$ran = ($ran || 0) + 1");
+    let layer = counts.bytes.clone();
+    let other = compile("$other = 1").bytes;
+    app.add_systems(
+        Startup,
+        move |mut world: ResMut<ScriptWorld>| {
+            assert_eq!(world.load_and_run(&layer), Ok(true), "the first time it runs");
+            assert_eq!(world.load_and_run(&layer), Ok(false), "the second time it does not");
+            assert_eq!(world.load_and_run(&other), Ok(true), "another program is another entry");
+            assert_eq!(
+                world.load_and_run(rubevy::layers::CAMERA),
+                Ok(true),
+                "and the camera layer is one of these too"
+            );
+            assert_eq!(world.load_and_run(rubevy::layers::CAMERA), Ok(false));
+        },
+    );
+    watch(
+        &mut app,
+        r#"
+          Rubevy.ask("ran", $ran.to_f, $other.to_f, Rubevy::Camera.find.inspect).pop
+        "#,
+    );
+    frames(&mut app, 10);
+
+    let seen = app.world().resource::<Seen>();
+    let r = seen.0.first().expect("the script asked");
+    assert_eq!(r.num(0), Some(1.0), "the top level ran once, not twice");
+    assert_eq!(r.num(1), Some(1.0), "and the other program ran");
+    assert_eq!(r.text(2), Some("nil"), "the camera layer is there (no camera to find)");
 }

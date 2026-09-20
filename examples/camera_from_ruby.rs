@@ -44,7 +44,7 @@ const SCRIPT: &str = r#"
   # here, in one tick — which is the other thing the layer holds the magnification for.
   cam.zoom 2
   cam.zoom 2
-  Rubevy.log "now at #{cam.position.inspect} at #{cam.scale}x"
+  Rubevy.log "now at #{cam.position.inspect} at #{cam.magnification}x"
 
   sleep 0                                  # the clock moves on, and the frame's writes land
   there = cam.entity[:Transform][:translation]

@@ -6,6 +6,81 @@ ones those documents carry, and nothing is estimated.
 
 ## Unreleased
 
+* **What R9's first readers walked into** (R10 of `docs/plans/generalize-plan.md`, on branch
+  `generalize`; the merge's commit goes here when the branch comes in —
+  `docs/worklog/2026-09-20-numbers-inventory.md`, `docs/host-api.md`). Four small things the
+  camera layer and the entry points left behind, and the documents that were missing beside
+  them.
+  **`Rubevy::Camera#scale` is now `magnification`.** It answers apparent size — 4.0 after two
+  `zoom 2`s — and bevy's `OrthographicProjection::scale` is the same word for the reverse thing,
+  how much world fits across the window, so a script could print `4.0x` beside `scale 0.25` for
+  one camera. The layer is not published, so the old name is simply gone rather than kept as an
+  alias.
+  **A `follow` now stops saying it is following once it has stopped.** It ended by itself
+  already, whether the target was despawned or the camera itself was — a despawned entity's
+  `Transform` reads nil, so `move_to` answers nil and the loop ends, and nothing was refused
+  every frame; what was wrong is that `following?` went on answering true for ever, so a script
+  polling it never got its turn. The camera now holds the task itself rather than a flag
+  (`follower`, which `follow` already answered), so the two cannot disagree, and a `follow` that
+  replaces another cannot have its task cleared by the one it replaced.
+  **A layer taken up twice is taken up once.** `ScriptWorld::load_and_run` remembers the
+  programs it has run in that VM, by their bytes, and answers `Ok(false)` for one it has run
+  already — so two plugins that both want `Rubevy::Camera` get one layer, and a library whose
+  top level *does* something does it once. Its signature is now `Result<bool, String>`.
+  `docs/host-api.md` has the rules for adding a second layer: where the file goes, that it may
+  depend on the host API and no Rust, how its `ask` kinds are named, and what its top level must
+  not do.
+  **`tests/embedded_host.rs` can tell when the `.mrb` it embeds is stale.** It
+  `include_bytes!`s a generated file, so editing `helper.rb` and forgetting
+  `tools/compile_scripts.sh` used to leave the test passing against yesterday's bytecode. The
+  two cannot be compared as bytes — the reference `mrbc` built one and `sabiruby-compiler` is
+  what the tests have — so they are compared by what they answer, which was checked by making
+  the `.rb` disagree.
+  Written down beside all that: **a read cannot wait inside `initialize`** (`Class#new` is a
+  native, so the task dies with `blocking pop cannot be called from within a C function
+  boundary` and the script just stops — the two-step build that `Rubevy::Camera.attach` is);
+  **the VM's clock moves in whole ticks of 4 ms**, so `sleep 0` waits for the clock and not for
+  the next frame; that `replace_script` also clears the mark left by a script that would not
+  start; when to read `$rubevy` and when `Rubevy.resource("Time<Virtual>")`; that `publish` to a
+  name nobody listens for no longer costs the number of standing subscriptions; that the
+  reflection caches keep the old entry for a type registered again over itself; and, in
+  `docs/README.md`, that **`cargo fmt` is not run in this repository** and why.
+
+* **Every number rubevy holds, written down — and the last one that could not be changed, made
+  settable** (R10 of `docs/plans/generalize-plan.md`, on branch `generalize`; the merge's commit
+  goes here when the branch comes in — `docs/numbers.md`,
+  `docs/worklog/2026-09-20-numbers-inventory.md`). The `const`s and the numeric literals of
+  `src/`, `rubevy-build/` and the two standing instruments were swept mechanically (33 `const`
+  declarations, 361 lines holding a literal) and the **44** that are numbers or fixed names
+  rather than indices, unit conversions and identities are now one table in `docs/numbers.md`:
+  what each is, where an app changes it, and where its default came from. Each line of that
+  table is also a paragraph in the rustdoc of the thing it is about, and the "Time" table in
+  `docs/host-api.md` has gained a column for it. **No default moved**, and the tests pass
+  unchanged on the defaults, which is what says so.
+  **`ScriptWorld::max_depth()` / `set_max_depth()`** is the one number that had no way to be
+  changed: how deep a value is followed across the boundary, `reflect::MAX_DEPTH` and 16 since
+  the reflection bridge was written. The default is still 16 and an ordinary component is
+  untouched; an app whose own components nest deeper now says so rather than reading nil, and
+  one that wants a shallower boundary says that. It is a pair of methods and not a `pub` field
+  because a write (`e[:X] = hash`) is read out of the VM by a **native**, which is handed
+  `&mut Vm` and nothing else — so the number lives in the VM's host state, in one place, which
+  is the same problem `queue_limit` had in the other direction. `tests/max_depth.rs` is the
+  default reading and writing four levels down and a shallower setting stopping both.
+  **Seven defaults have no recorded origin**, and the table says so rather than inventing one:
+  `budget` 200,000, `frame_time` 8 ms and `overrun` 50 ms (stated, never explained, in the two
+  commits that added them), `max_depth` 16, the `scripts` in the load path, and two of the
+  instruments'. Against that, four numbers turned out to be **quoted from elsewhere** and not
+  rubevy's at all — a script's default priority 128 and the clock's 4 ms tick are mruby-task's
+  (`MRB_TASK_PRIORITY_DEFAULT`, `MRB_TICK_UNIT`), `"assets"` is bevy's asset directory, and the
+  five types read as Arrays are bevy_reflect's. The tally's own finding: **not one of rubevy's
+  defaults was chosen by measuring.** What has been measured is what a default *buys* — 2,600
+  component reads in a frame's budget, 3,900 messages, 8.28 ms of tick — which is the material
+  for choosing, and `docs/numbers.md` keeps the two apart. `queue_limit` stays at **64** by the
+  author's decision, with the measured bounds around it (about 3,800–3,900 messages one
+  subscriber can read in a frame, and 16–335 bytes a waiting message) written where the
+  rustdoc used to imply a derivation there never was.
+  No dependency was added, there is no `unsafe`, and the public API grew by two methods.
+
 * **An optional Ruby layer, and the first one is a camera** (R9 of
   `docs/plans/generalize-plan.md`, merged in `57774f3` — `docs/worklog/2026-09-20-camera-layer.md`).
   rubevy carries Ruby it does not run: **`rubevy::layers::CAMERA`**, taken up by the app in one
@@ -16,7 +91,8 @@ ones those documents carry, and nothing is estimated.
   `src/layers/camera.rb`, Ruby over `Rubevy.find`, `e[:Transform] =`, `e[:Projection] =` and
   `Rubevy.ask`, and the crate's dependencies are unchanged.
   `Rubevy::Camera.find` / `.find_all` / `.attach`, then `position`, `move_to`, `pan`, `zoom`,
-  `scale`, `follow` / `unfollow`, `world_at`, `reload` and `rejected_writes`. **`zoom 2` is twice
+  `magnification`, `follow` / `unfollow` / `follower`, `world_at`, `reload` and
+  `rejected_writes`. **`zoom 2` is twice
   as close on a 2D camera and on a 3D one alike**, which is most of the reason it exists: an
   orthographic camera zooms by `scale` (divided by the factor) and a perspective one by `fov`,
   where what sets apparent size is `tan(fov / 2)` — so the layer writes

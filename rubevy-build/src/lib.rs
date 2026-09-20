@@ -39,7 +39,9 @@ use std::path::{Path, PathBuf};
 /// and write `rubevy_build::Embed::new("ruby").write()` without changing the `include!` on the
 /// other side: `.rb` files under the directory, a `pub static RUBY_FILES` in `ruby_files.rs`.
 /// Everything about that is settable, because a game with two kinds of embedded file needs two
-/// tables with two names.
+/// tables with two names. **Where the three names come from** is exactly that and no more: both
+/// sample games had written them, and keeping them is what let those games delete a file rather
+/// than edit one (rubevy `docs/numbers.md`).
 #[derive(Debug, Clone)]
 pub struct Embed {
     dir: PathBuf,
