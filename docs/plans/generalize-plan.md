@@ -241,11 +241,12 @@ rubevy を触ったあとの **`web/build.sh` + Playwright の確認**（共通 
 | R3 | 実行中 |
 | R4〜R5 | 未着手。計測を伴うので 1 本ずつ |
 | R8 | **済み**（2026-09-20、`generalize` の `52bfe7b`）。`Rubevy.resource(:Score)`（tick の中で返る、無ければ nil）と `Rubevy.set_resource(:Score, { points: 8.0 })`（名前を挙げた分だけ、フレーム末尾）。ジェネリックは型引数ごと綴る（`"Time<Virtual>"`。`Time` は `Time<()>` で、`:Time` は nil）。Rust の公開 API は 0 個増、依存の追加なし、unsafe 0、新しい数 0。R0 の 3 件も直した（warn のコロン 18 か所、tuple 変種の書きの文書、型の登録は `reflect_auto_register` feature だと確かめて `host-api.md` を差し替え — `bevy_time` / `bevy_pbr` のように手で登録するプラグインも残る）。109 passed（着手前 101）、wasm の lib ビルド可。読み 1 回: component 2.38〜2.45 µs / resource 2.24〜2.66 µs（静かな機械、3 回。差はぶれの中。止めているのは命令の予算で、75 命令と 69 命令）。記録は `docs/worklog/2026-09-20-resources-by-name.md` |
+| R6b | 未着手（R3 の後。計測なし）。R6 と S2 が見つけた 3 つ: (1) 埋め込みの `Host` とロードパスを一緒に受ける口、(2) `Program` がコンパイラに渡す名前を持つ、(3) 壊れた `.mrb` を毎フレーム load し直して毎フレーム `error!` を流すのをやめ、1 回報告して印を付ける |
 | R9 | 未着手（R3〜R5 の後）。**著者判断済み（2026-09-20）**: (1) `zoom 2` は 2 倍に寄る（大きく見える）。2D は `scale`、3D は `fov` に直して同じ意味にする。(2) **拒まれた書きをスクリプトから読める口を足す** — component と resource の両方、直前のフレームに拒まれた書きの一覧。(3) 答え手のいない問いは、投げっぱなしでキューを返す形で始める |
 | R10 | 未着手 |
 | 取り込み | **2026-09-20、著者「取り込みも push も今やってよい」**: R0・R1・R2・R6・R8 を main に取り込み（merge `fa1b7e3`、CHANGELOG に SHA）、push 済み（`33d851a`）。sabiruby は `declare` を main に取り込み（`944b72b`）push 済み — `HostStore::take` の「返さずに閉じる」使い方は、著者判断で rustdoc に 1 段落足して認めた（VM のコードは無変更）。crates.io への公開はしていない（R7 の rubevy 側はそれを待つ）。以後もレビュー済みの段階から順に取り込んで push する |
 
-VM 側に残るもの（sabiruby、未計画）: キューごとの待ち手リスト・sleep 期限のヒープ・タスクが自分のいるキューを覚える（待ちタスクの O(N)）、`ireps` の解放。
+VM 側に残るもの（sabiruby。**本体が R5 の数字が出た後に sabiruby の計画書を書く** — 下の 3 つに、irep の数え口・2 つの backtrace の食い違い・`check_no_std.sh` の対象を足したもの。VM の crate なので unsafe は禁止、性能に触れる変更は交互 A/B で測る）: キューごとの待ち手リスト・sleep 期限のヒープ・タスクが自分のいるキューを覚える（待ちタスクの O(N)）、`ireps` の解放。
 
 ## 7. 気づいた点（段階の報告から本体が集める）
 
@@ -258,11 +259,11 @@ VM 側に残るもの（sabiruby、未計画）: キューごとの待ち手リ�
 | 09-20 R0 | 書きが拒まれたことがスクリプトから分からない（`warn!` だけ、`Entity#set` は渡した値を返す）。カメラ層で変種が想定と違うと `zoom` が黙って効かない | `src/lib.rs:2124-2127`、`src/prelude.rb:40-43` | rubevy（口の設計） | **著者判断済み（09-20）: 足す**。R9 の最初に、component と resource の両方を見る形で |
 | 09-20 R0 | `host-api.md` に tuple 変種の書きの規則が無い（Array でしか書けない）。読みの表も struct 変種と一括り | `docs/host-api.md:422-436` | rubevy（文書と実物のずれ） | 計画に足す: R8 で 1 文 |
 | 09-20 R0 | `host-api.md` の「`DefaultPlugins` does it」: bevy 0.19.1 の `bevy_camera` / `bevy_transform` に `register_type` は無く、登録しているのは `reflect_auto_register` feature。どちらが効いているかは未確認 | `docs/host-api.md:406-408` | rubevy（文書、小） | 計画に足す: R8 で確かめて直す。games は `DefaultPlugins` なので F0 でも確かめる |
-| 09-20 R0 | repo に rustfmt の設定が無く、`cargo fmt --check` が既存コードで落ちる。担当が `cargo fmt` を走らせると無関係な差分が出る | repo の根 | repo の作法 | **著者判断待ち**: 設定を置くか「fmt は使わない」と書くか。それまで担当には「`cargo fmt` を走らせない」と伝える |
-| 09-20 R0 | 誰も答えない `Rubevy.ask(...).pop` は永久に park する。任意の Ruby 層の `world_at` に答え手がいないときの振る舞いが決まらない | `Rubevy.ask` | rubevy（口の設計） | R9 は「投げっぱなしでキューを返す」で始める。答え手の有無を聞ける口は**著者判断待ち** |
+| 09-20 R0 | repo に rustfmt の設定が無く、`cargo fmt --check` が既存コードで落ちる。担当が `cargo fmt` を走らせると無関係な差分が出る | repo の根 | repo の作法 | **本体が原則から決めた（09-20、著者「原則を大切に判断して」）**: **`cargo fmt` は使わない、と書く**。既存のコードは手で幅を揃えてあり、どんな設定を置いても既存の全ファイルに無関係な差分が出る（差分は変更の理由を言うためのもの）。`implementer.md` に 1 行足した。R10 のとき `docs/README.md` にも 1 行 |
+| 09-20 R0 | 誰も答えない `Rubevy.ask(...).pop` は永久に park する。任意の Ruby 層の `world_at` に答え手がいないときの振る舞いが決まらない | `Rubevy.ask` | rubevy（口の設計） | R9 は「投げっぱなしでキューを返す」で始める。答え手の有無を聞ける口は足さない（本体の判断: 使う人が出るまで口を増やさない。投げっぱなしで困る実例が F5 で出たら足す） |
 | 09-20 R2 | **調査の数の帰属が 1 つ間違っていた**: 「起動で 1 台 2.2 kB（irep のコピー）」のうち irep は 0.75 kB、残り 1.46 kB は `task_spawn` 側（コンテキスト・スタック・Task オブジェクト） | `docs/worklog/2026-09-20-factory-survey.md` | 計画書／R5 の前後表／本の素材 | 調査の worklog に訂正の 1 行を足した。R5 の表はこの内訳で書く |
-| 09-20 R2 | 壊れた `.mrb` は毎フレーム・毎エンティティで load をやり直し、`error!` が毎フレーム流れる（失敗を覚えない。前からの性質） | `src/lib.rs` の `start_scripts` | rubevy（既存の性質） | **著者判断待ち**（小）: 失敗したスクリプトに印を付けて 1 回だけ報告する形にするか |
-| 09-20 R2 | `Vm::ireps` が `#[doc(hidden)] pub` であることに rubevy のテストと計測器が依存している。irep の総数を外から読める数え口が VM に無い | sabiruby `Vm::ireps` | VM（公開の約束が曖昧） | **著者判断待ち**（VM 本体）。R5 の `FrameStats` は `loaded_programs()`（プログラムの本数）で書く |
+| 09-20 R2 | 壊れた `.mrb` は毎フレーム・毎エンティティで load をやり直し、`error!` が毎フレーム流れる（失敗を覚えない。前からの性質） | `src/lib.rs` の `start_scripts` | rubevy（既存の性質） | **本体が原則から決めた（09-20、著者「原則を大切に判断して」）**: **直す**（R6b）。同じ失敗を毎フレーム言うログは、ほかの出来事を読めなくする。失敗は 1 回報告し、そのエンティティには既にある終わり方（`ScriptEnded` の Failed）で印を付け、アセットが差し替わったらやり直す |
+| 09-20 R2 | `Vm::ireps` が `#[doc(hidden)] pub` であることに rubevy のテストと計測器が依存している。irep の総数を外から読める数え口が VM に無い | sabiruby `Vm::ireps` | VM（公開の約束が曖昧） | **本体が原則から決めた（09-20、著者「原則を大切に判断して」）**: **VM に数え口を足す**（sabiruby の計画に入れる）。公開の crate のテストと計測器が `#[doc(hidden)]` に寄りかかるのは約束の無い場所に立つこと。それまで R5 の `FrameStats` は `loaded_programs()` で書く |
 | 09-20 R2 | 箱庭は 1 匹ごとに `Assets::add` している（`give_mind`）。VM の irep は 1 部になったが `Assets<MrbAsset>` には同じバイト列が匹数ぶん残る。種ごとに 1 つの `Handle` を持てば消える | rubevy_games `garden/src/main.rs:2660-2685` | ゲーム固有（箱庭） | games の計画 7 章に写す。S5b のついでか別に |
 | 09-20 R2 | `.mrb` を 2 回 parse している（`MrbLoader::load` の検証と `Vm::load`）。R2 で 2 回目はプログラム 1 本につき 1 回になったので実害はほぼ無い | `src/lib.rs:129` | rubevy（小さな重複） | 見送り |
 | 09-20 R1 | **計測の罠 2 つ**: (1) 2 つの worktree を同じ `CARGO_TARGET_DIR` で建てると 2 つ目の example が建たず 1 つ目のバイナリが残る（md5 が一致して気づいた）。(2) 隣の担当の `docker run … cargo build` が `pgrep -af "cargo|rustc"` に出る前後で p95 が跳ねた（28.5 ms 対 12.2 ms） | 計測の手順 | repo の作法／R5 の材料 | 計画に足した: R2 以降の依頼文に「前の版は別の target で建て、md5 で別物だと確かめる」。R5 の `docs/verification/` の再現手順にも書く |
@@ -274,14 +275,14 @@ VM 側に残るもの（sabiruby、未計画）: キューごとの待ち手リ�
 | 09-20 R8 | resource の読みは `$rubevy`（frame / delta / time）と役割が重なる。どちらを勧めるか | `docs/host-api.md` | 計画書（R10 の範囲） | 計画に足す: R10 で `$rubevy` のキーを棚卸しするときに書く |
 | 09-20 R8 | `host-api.md` の「Time」節が `Time<Virtual>` を名前で読めることを知らない | `docs/host-api.md` | 文書 | 計画に足す: R4 がこの節を書き直すときに 1 行 |
 | 09-20 R8 | bevy 0.19 で `Components::get_valid_resource_id` ほか 2 つが deprecated（resource が component になったため）。rubevy は `get_valid_id` を使っていて影響なし | `bevy_ecs-0.19.1/src/component/info.rs:608,632,686` | 本の素材／games への注意 | 見送り（記録のみ） |
-| 09-20 R6 | **`EmbeddedHost` を `set_host` したら `set_load_path` も書き直す必要があるのに、型に現れない**。プラグインは `{root}/scripts` と `{root}` を入れるので、忘れると `require` が静かに LoadError になり、ブラウザでだけ起きる | `src/lib.rs` の `RubevyPlugin::build` | rubevy（口の設計） | **著者判断待ち**: host とパスを一緒に受ける口（例 `ScriptWorld::embed(host, paths)`）を足すか。S2 の実感を見てから |
-| 09-20 S2 | （games の S2 から）**`Program` にコンパイラへ渡すファイル名の置き場所が無い**。`name` は区切りコメント専用で、呼び出し側が同じ `name` を 2 回書く。`&str` 4 本は実際には取り違えなかった（変数名が引数の順に並ぶ）ので、ビルダは要らない | `src/source.rs:55` | rubevy（API） | 計画に足す: R10 の前に小さく直す（`Program` が `name` を持って読めるように。足すだけ） |
+| 09-20 R6 | **`EmbeddedHost` を `set_host` したら `set_load_path` も書き直す必要があるのに、型に現れない**。プラグインは `{root}/scripts` と `{root}` を入れるので、忘れると `require` が静かに LoadError になり、ブラウザでだけ起きる | `src/lib.rs` の `RubevyPlugin::build` | rubevy（口の設計） | **本体が原則から決めた（09-20、著者「原則を大切に判断して」）**: **足す**（R6b）。rubevy は外の利用者のためのもので、「忘れるとブラウザでだけ静かに LoadError」は外の利用者が必ず踏む形。型に現れない約束は口にする。足すだけで、既存の `set_host` / `set_load_path` は残す |
+| 09-20 S2 | （games の S2 から）**`Program` にコンパイラへ渡すファイル名の置き場所が無い**。`name` は区切りコメント専用で、呼び出し側が同じ `name` を 2 回書く。`&str` 4 本は実際には取り違えなかった（変数名が引数の順に並ぶ）ので、ビルダは要らない | `src/source.rs:55` | rubevy（API） | 計画に足した: R6b で直す（`Program` が `name` を持って読めるように。足すだけ） |
 | 09-20 R6 | `Program::new(prelude, name, body, tail)` は `&str` 4 本で、取り違えても型が通る（`name` と `body` を逆にすると静かに 1 行のプログラムができる） | `src/source.rs` | rubevy（API の使いにくさ） | S2 で使ってみてから。直すならビルダを**足す** |
 | 09-20 R6 | `tests/embedded_host.rs` が生成物 `assets/scripts/helper.mrb`（Docker の mrbc で作る）を `include_bytes!` している。`helper.rb` を変えて作り直し忘れると古いバイトコードで通り続ける | `tests/embedded_host.rs`、`tools/compile_scripts.sh` | repo の作法 | 見送り（今ある他のテストと同じ性質）。R10 のついでに、生成物が古いと落ちる確認を足せるか見る |
 | 09-20 R6 | `rubevy-build` の既定の**名前** 3 つ（`RUBY_FILES` / `ruby_files.rs` / `.rb`）の出どころは「2 本のゲームがそう書いていた」だけ。数ではないが、R10 の一覧に入れるのか | `rubevy-build/src/lib.rs` | 計画書（R10 の範囲） | 計画に足す: R10 は数だけでなく「埋め込みの既定の名前」も一覧に入れる（全部引数で変えられることは確認済み） |
 | 09-20 R7 | **キーワードを 1 つも書かない宣言（`item :iron_plate`）は `define_fn` では受けられない**（引数の数が固定。`src/convert.rs:440`）。`define_closure` で 1〜2 個を受ける。調査の「`(Symbol, Serde<T>)` で受けられる」は半分だけ正しかった | 調査 §2、計画 3.7 | 計画書の前提 | `Declarations` が吸収済み。rubevy 側の example はこの口を使うので影響なし |
 | 09-20 R7 | 複数行に分けた宣言のエラー行は**最後の行**（SEND 命令の行番号）。「宣言の頭」ではなく閉じる行を指す | sabiruby の行番号の持ち方 | 本の素材／rubevy の文書 | R7 の rubevy 側の節に 1 行。book repo の findings に写す |
-| 09-20 R7 | `Vm::backtrace(Some(mid))` はネイティブ名を先頭に足すが、例外が抱える `Exception#backtrace` には入らない（mruby は C フレームを直下の Ruby フレームに置く） | sabiruby `src/vm.rs:2570-2574`、`:2589-2600` | VM（小さな食い違い） | **著者判断待ち**（VM 本体の話） |
+| 09-20 R7 | `Vm::backtrace(Some(mid))` はネイティブ名を先頭に足すが、例外が抱える `Exception#backtrace` には入らない（mruby は C フレームを直下の Ruby フレームに置く） | sabiruby `src/vm.rs:2570-2574`、`:2589-2600` | VM（小さな食い違い） | **本体が原則から決めた（09-20、著者「原則を大切に判断して」）**: **本家と同じ形に直す**（sabiruby の計画に入れる）。SabiRuby は本家 mruby との差を「意図した差異」として理由つきで持つ方針で、これは理由の無い差 |
 | 09-20 R7 | `HostStore::take` を「返さない」使い方（番号を手放さず値だけ取り上げる）は rustdoc が想定していない（「借りた側が `restore` する」）。今回の `Declarations::take` はこの使い方 | sabiruby `src/host_store.rs:124-138` | VM（rustdoc）／今回の設計の前提 | **著者判断済み（09-20）: 使い方を認めて rustdoc に書く**。sabiruby `c38f0e2`（コード無変更）、main に取り込み push 済み |
-| 09-20 R7 | `tools/check_no_std.sh` は VM の lib しか見ていない。`sabiruby-serde` も `no_std` なのに対象外 | sabiruby `tools/check_no_std.sh:5-6` | sabiruby（確認の網） | **著者判断待ち**（小。対象に足すだけ） |
+| 09-20 R7 | `tools/check_no_std.sh` は VM の lib しか見ていない。`sabiruby-serde` も `no_std` なのに対象外 | sabiruby `tools/check_no_std.sh:5-6` | sabiruby（確認の網） | **本体が原則から決めた（09-20、著者「原則を大切に判断して」）**: **対象に足す**（sabiruby の計画に入れる）。`no_std` は規則で、規則は機械が確かめる形にしておく |
 | 09-20 R0 | ズームの向き（`zoom 2` は寄るのか引くのか）と、2D は `scale`・3D は `fov` という数の違い | R9 の設計 | rubevy（Ruby 層） | **著者判断済み（09-20）**: `zoom 2` は 2 倍に寄る。2D は `scale`、3D は `fov` に直して同じ意味に |
