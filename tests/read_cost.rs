@@ -24,6 +24,15 @@ struct Hp {
     max: f32,
 }
 
+/// The same two fields as a resource, so that the only difference between the two reads measured
+/// below is the road, not the value being built in the VM.
+#[derive(Resource, Reflect, Debug, Default)]
+#[reflect(Resource)]
+struct Score {
+    points: f32,
+    best: f32,
+}
+
 /// What the scripts reported (`Rubevy.ask` nobody pops).
 #[derive(Resource, Default)]
 struct Said(Vec<f64>);
@@ -49,6 +58,8 @@ fn app() -> App {
     ))
     .init_resource::<Said>()
     .register_type::<Hp>()
+    .register_type::<Score>()
+    .insert_resource(Score { points: 7.0, best: 10.0 })
     .add_systems(Update, answer_nil);
     app
 }
@@ -155,6 +166,62 @@ fn one_task_that_does_nothing_but_read() {
         let longest = times.iter().max().unwrap();
         println!(
             "{what}: {rounds} reads in the frame they started in, the longest frame was {longest:?} \
+             ({:?} a read)",
+            longest.div_f64(rounds.max(1.0))
+        );
+    }
+}
+
+/// What `Rubevy.resource(:Score)` costs beside `e[:Hp]`, measured the same way and in the same
+/// run so that the machine is the same machine.
+///
+/// The two scripts are the same script with one line changed, and both read a two-field struct
+/// of `f32`, so what the difference between the two counts is worth saying is the road and not
+/// the value: a component read looks the name up (cached), finds the entity the script named and
+/// reflects; a resource read looks the name up (cached), asks the world which entity holds that
+/// resource — `Components::get_valid_id` and `World::resource_entities`, both a lookup by index —
+/// and reflects the same way.
+///
+/// It prints reads-per-frame, which is rounds of the tick's answer loop, exactly as
+/// [`one_task_that_does_nothing_but_read`] does; the frame's wall clock divided by that count is
+/// one round.
+#[test]
+#[ignore]
+fn a_resource_read_beside_a_component_read() {
+    const COMPONENT: &str = r#"
+      e = Rubevy.entity
+      f0 = $rubevy[:frame]
+      n = 0
+      loop do
+        e[:Hp]
+        n += 1
+        break if $rubevy[:frame] != f0
+      end
+      Rubevy.ask("rounds", n.to_f)
+    "#;
+    const RESOURCE: &str = r#"
+      e = Rubevy.entity
+      f0 = $rubevy[:frame]
+      n = 0
+      loop do
+        Rubevy.resource(:Score)
+        n += 1
+        break if $rubevy[:frame] != f0
+      end
+      Rubevy.ask("rounds", n.to_f)
+    "#;
+
+    for (what, src) in [("a component read", COMPONENT), ("a resource read", RESOURCE)] {
+        let mut app = app();
+        let asset = app.world_mut().resource_mut::<Assets<MrbAsset>>().add(compile(src));
+        app.world_mut().spawn((Script::new(asset), Hp { current: 7.0, max: 10.0 }));
+
+        let times = timed_frames(&mut app, 40);
+        let said = &app.world().resource::<Said>().0;
+        let rounds = said.first().copied().unwrap_or(-1.0);
+        let longest = times.iter().max().unwrap();
+        println!(
+            "{what}: {rounds} in the frame they started in, the longest frame was {longest:?} \
              ({:?} a read)",
             longest.div_f64(rounds.max(1.0))
         );

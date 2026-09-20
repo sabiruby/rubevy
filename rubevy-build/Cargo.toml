@@ -1,0 +1,20 @@
+[package]
+name = "rubevy-build"
+version = "0.0.1"
+edition = "2024"
+# std and nothing else, so this is the edition's own floor: edition 2024 was stabilised in
+# Rust 1.85 (the same floor SabiRuby names). It is deliberately not rubevy's 1.95 — a build
+# script that only reads a directory has no reason to ask for Bevy's compiler.
+rust-version = "1.85"
+license = "MIT"
+description = "Build-script helper for rubevy: puts a directory of Ruby files into the binary"
+keywords = ["bevy", "mruby", "ruby", "build-dependencies"]
+categories = ["development-tools::build-utils"]
+repository = "https://github.com/sabiruby/rubevy"
+
+# No dependencies, and none are wanted. This is a build-dependency: everything it names is
+# built for the *host* before the crate that uses it starts, so a dependency on rubevy — which
+# is what one would reach for, since `EmbeddedHost` reads what this writes — would build Bevy a
+# second time for every game that embeds a script. The two ends agree on a table of pairs, which
+# is a type std already has.
+[dependencies]

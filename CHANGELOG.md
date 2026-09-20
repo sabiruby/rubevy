@@ -4,6 +4,124 @@ What changed in each release of `rubevy`. Every claim names the commit behind it
 the work came in on a branch) and the document under `docs/` that records it; measurements are the
 ones those documents carry, and nothing is estimated.
 
+## Unreleased
+
+* **One program, one irep** (R2 of `docs/plans/generalize-plan.md`, on branch `generalize`; the
+  merge's commit goes here when the branch comes in —
+  `docs/worklog/2026-09-20-one-irep-per-program.md`). `start_scripts` used to hand `Vm::load` the
+  bytes of every `Script` it turned into a task, so a thousand entities running one `.mrb` put a
+  thousand copies of the same instructions in the VM (the survey of 2026-09-20 measured 2.2 kB
+  and 2.5 µs an entity). The plugin now keeps the programs it has loaded, by the bytes of the
+  program itself, and spawns every task of one program from the one irep — which is all
+  `Vm::task_spawn` ever needed, and needs nothing of SabiRuby that was not already there. The key
+  is the program and not the asset it arrived in because a game that compiles a player's Ruby
+  adds a new asset every time, and garden compiles a species' file again for every animal born
+  into it; the key is the whole program and not a hash of it so that two different programs can
+  never meet in the table. Measured with the survey's own instrument on the machine and settings
+  of `docs/worklog/2026-09-20-factory-survey.md` (`taskset -c 2`, release, 90 frames × 3, before
+  and after taken the same day): the VM holds **2 ireps whatever the number of entities** where it
+  used to hold two per entity (6000 at three thousand), the frame all of them start in goes
+  1.86 → 0.91 ms at a thousand and 7.56 → 5.11 ms at three thousand, and resident memory at the
+  start goes 2.21 → 1.46 kB an entity (three thousand entities of a 294-byte `.mrb`: 28.9 → 26.3 MB,
+  and 49.1 → 47.1 MB once they have run). The steady frame time is unchanged, which the code says
+  too — after the starting frame `start_scripts` walks an empty query. The survey's "2.2 kB an
+  entity, the copy of the irep" turns out to have been the irep *and* the task: 0.75 kB of it was
+  the irep, and that is the part this gives back.
+  Nothing in the public API changed except one addition, `ScriptWorld::loaded_programs()`, and
+  nothing was added to `[dependencies]`. `tests/shared_irep.rs` (6 tests) checks that a hundred
+  entities load one program once, that the same text in another asset is the same irep, that two
+  tasks of one irep cannot reach each other through its string literals, and that a replaced or
+  reloaded asset runs its new text. What it cannot fix is that **SabiRuby has no way to give an
+  irep back** (0.5.2 never removes from `Vm::ireps`), so a game that applies a *new* text over and
+  over still spends one program's ireps each time; the table is what keeps applying the *same*
+  text again from costing anything, and `docs/host-api.md` says so.
+
+* **Subscriptions are filed by name** (R1 of `docs/plans/generalize-plan.md`, on branch
+  `generalize`; the merge's commit goes here when the branch comes in —
+  `docs/worklog/2026-09-20-subscription-index.md`). `ScriptWorld::publish` used to walk every
+  standing subscription of the VM to find the ones listening for a name, so publishing cost the
+  number of subscriptions whether anybody was listening or not: 228 ns a message at a thousand
+  subscriptions, for a name nobody had subscribed to. The subscriptions now sit in a map from
+  name to the subscribers of that name, in the order they asked, and publishing is one lookup.
+  Measured with the survey's own instrument on the machine and settings of
+  `docs/worklog/2026-09-20-factory-survey.md` (60 frames × 3, `taskset -c 2`, release), a message
+  to a name nobody subscribed to costs 7.9 → 8.1 → 31.3 → 228.0 ns as the subscriptions go
+  1 → 10 → 100 → 1000, and afterwards 13.8 → 9.2 → 8.9 → 9.6 ns: no longer a function of how many
+  subscriptions the VM holds. Publishing to a name that *is* heard, the frame time and the number
+  of messages each script read are unchanged (within the ±2% the instrument repeats to; the
+  one-subscriber cell is noisier than the difference — the worklog says what was and was not
+  settled there). Nothing in the public API changed, and nothing was added to `[dependencies]`:
+  the map is `std::collections::HashMap`, which the crate already used in three places.
+  `tests/events.rs` gains one test for the shape the filing gives Ruby (one script listening for
+  several names, and within a name the order it subscribed in).
+
+* **Resources by name** (R8 of `docs/plans/generalize-plan.md`, on branch `generalize`; the
+  merge's commit goes here when the branch comes in —
+  `docs/worklog/2026-09-20-resources-by-name.md`). `Rubevy.resource(:Score)` reads a resource as
+  a Hash of its fields and `Rubevy.set_resource(:Score, { points: 8.0 })` writes the fields it
+  names — the component road with the entity left out of it, and the same rules throughout: the
+  read is answered inside the tick that asked it (no frame), the write lands at the end of the
+  frame (`apply_resource_writes`, beside `apply_component_writes`), an unreachable name is `nil`
+  rather than an error, and the game never sees the question. A type is reachable with
+  `#[derive(Resource, Reflect)]`, `#[reflect(Resource)]` and `register_type`: in Bevy 0.19 a
+  resource *is* a component on an entity of its own, so `ReflectResource` — a marker with no
+  functions at all — is taken as the type's word that it is a resource, and
+  `Rubevy.resource(:Transform)` is `nil`. Names are the component's names, so a generic type
+  carries its parameters (`"Time<Virtual>"`, and `Time` is `Time<()>`). `tests/resources.rs`
+  (8 tests, including a second VM under a name tag) and the `#[ignore]`d
+  `tests/read_cost.rs::a_resource_read_beside_a_component_read`, which measured the two reads at
+  the same 2.2–2.7 µs and the Ruby of the asking 6 instructions apart. Nothing was added to
+  `[dependencies]`; the public Rust API is unchanged.
+
+* **Three things R0 wrote down, fixed** (same branch and worklog). A write refused at the top of
+  a component no longer reports itself with a stray colon (`was not written whole: : the fields
+  of …`): `src/reflect.rs` now leaves the prefix off where there is no path inside the value, as
+  `join` always did. `docs/host-api.md` says how a tuple variant's fields are written (the Array
+  the read answers, never by name) and splits the two enum rows of the read table. And the claim
+  that `DefaultPlugins` registers Bevy's own types is replaced by what the sources say: in bevy
+  0.19.1 it is the `reflect_auto_register` feature, part of bevy's default features and off in
+  this crate, while a few plugins (`TimePlugin`) still register by hand — which is what
+  `tests/resources.rs` reads `Time<Virtual>` under `MinimalPlugins` to show.
+
+* **The entry points both sample games had written by hand** (R6 of
+  `docs/plans/generalize-plan.md`, on branch `generalize`; the merge's commit goes here when the
+  branch comes in — `docs/worklog/2026-09-20-shared-entry-points.md`). Five of them, for a game
+  that compiles a player's Ruby itself:
+  * `Program::new(prelude, name, body, tail)` builds one program out of a prelude and an author's
+    file and says how far down that pushed the author's first line. The number is counted off the
+    text that really went in front, so it is right whether or not the prelude ended with a newline
+    (both games' `prelude.lines().count() + 2` assumed it did).
+  * `in_the_authors_lines(message, prelude_lines, prelude_name)` takes the prelude back off the
+    line numbers a compiler reported — the author's own line, the prelude by name when the error
+    is in it, the line past the end for the `tail`, and a message with no place in it handed back
+    whole. It reads text and compiles nothing, and `tests/source.rs` checks it against what
+    `sabiruby_compiler` really prints and against the same message under the name a browser's
+    bridge gives it (`playground.rb`).
+  * `replace_script(&mut commands, entity, script)` is the swap both games wrote by hand:
+    `ScriptTask` off, `ScriptDone` off, the new `Script` in.
+  * `EmbeddedHost` serves `require` out of tables built into the binary — `&[(&str, &str)]` of
+    source, `&[(&str, &[u8])]` of `.mrb` — which is the only `require` a browser can have. What
+    compiles a `.rb` is given with `compile_with` (a page's own compiler) and otherwise is the
+    crate's, which is now shared with `FileHost` so the two cannot disagree.
+  * `rubevy-build`, a second package in this repository (std only, no dependencies), is the build
+    script that writes those tables. The repository is a workspace for it; `cargo test` and
+    `cargo package` at the root are unchanged and `Cargo.lock` gains four lines.
+
+  `docs/host-api.md` has the two new sections and `Replacing and removing a script` now names the
+  function. `src/` gained no dependency and nothing a browser lacks
+  (`tests/no_wasm_unsupported.rs`); the public API only grew.
+
+* **A camera driven from Ruby, with nothing added to the crate** (R0 of
+  `docs/plans/generalize-plan.md`, on branch `generalize`; the merge's commit goes here when the
+  branch comes in — `docs/worklog/2026-09-20-camera-from-ruby.md`). `Camera2d`, `Camera3d` and `Projection` are
+  ordinary `#[reflect(Component)]` types, so `Rubevy.find(:Camera2d)`, `cam[:Transform] =` and
+  `cam[:Projection] = { Orthographic: [ { scale: 2.0 } ] }` already pan and zoom one. The new
+  `examples/camera_from_ruby.rs` and `tests/camera.rs` say so and hold the shape of the write;
+  `src/` is unchanged and `[dependencies]` is unchanged (the example and the test ask for bevy's
+  `bevy_camera` feature as a dev-dependency). What a Ruby camera layer will be built on is in the
+  worklog, including the two shapes that are refused: switching an enum's tuple variant, and
+  naming a tuple variant's field instead of giving the Array.
+
 ## 0.0.1 — 2026-09-18
 
 The first release on crates.io (tag `v0.0.1`, `2d9eb92`). Until now the crate was used from git;

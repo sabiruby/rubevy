@@ -63,6 +63,20 @@ module Rubevy
     ask("entities.with", name.to_s).pop
   end
 
+  # A resource as a Hash of its fields, or nil where the world has no resource of that type, or
+  # the type is not registered, or it is registered but does not say it is a resource
+  # (`#[reflect(Resource)]`). The name is the type's short name, as a component's is
+  # (`Rubevy.resource(:Score)`); a generic one carries its parameters and so needs quoting
+  # (`Rubevy.resource("Time<Virtual>")`).
+  #
+  # It is the same round trip `Rubevy::Entity#[]` is, and it costs no frame for the same reason:
+  # the task is parked here and the host answers inside the very tick that asked. The write
+  # (`Rubevy.set_resource`) still lands at the end of the frame, so a read after a write in the
+  # same tick answers the old value.
+  def self.resource(name)
+    ask("resource.get", name.to_s).pop
+  end
+
   # Raised in whatever is waiting on a subscription's queue when the subscription ends: the
   # script's entity was despawned, its `ScriptTask` was taken away, or its own task ran off its
   # end. Nothing will ever be published to that queue again, so a `pop` that answered would be

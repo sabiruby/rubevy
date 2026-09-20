@@ -19,6 +19,7 @@ command behind and the `drain_commands` system carries it out later in the same 
 | `Rubevy.move_to x, y, z` | the script's own entity is moved |
 | `Rubevy.set_position entity, x, y, z` | any entity is moved |
 | `entity[:Transform] = hash` | the fields the Hash names are written over that component |
+| `Rubevy.set_resource :Score, hash` | the fields the Hash names are written over that resource |
 
 ## What an entity is, on the Ruby side
 
@@ -404,12 +405,20 @@ Rubevy.find(:Npc)               # every entity with that component, as Rubevy::E
 ```
 
 **What a type has to do to be there.** `#[derive(Reflect)]`, `#[reflect(Component)]`, and
-`app.register_type::<T>()`. Bevy's own types are registered by the app — `DefaultPlugins` does
-it, and `MinimalPlugins` does not, so `examples/components.rs` names `Transform` itself (in
-bevy 0.19 even `TransformPlugin` only propagates transforms; the automatic registration is
-bevy's `reflect_auto_register` feature, which this crate does not turn on). A type nobody
-registered is not an error on the Ruby side: the component reads as `nil`, `has?` answers
-`false`, and it is not in `components`.
+`app.register_type::<T>()`. A type nobody registered is not an error on the Ruby side: the
+component reads as `nil`, `has?` answers `false`, and it is not in `components`.
+
+**Where Bevy's own types come from is a feature, not a plugin** (checked against bevy 0.19.1 on
+2026-09-20). `bevy_transform`, `bevy_camera`, `bevy_sprite`, `bevy_ui`, `bevy_input` and
+`bevy_window` contain no `register_type` call at all any more; what registers their types is
+bevy's `reflect_auto_register` feature, which puts every `Reflect` type in the build into the
+registry `App::default()` starts with (`bevy_app-0.19.1/src/app.rs:113-120`). It is part of
+bevy's `default_app` feature and so of bevy's default features, which is why a game built on
+`DefaultPlugins` finds `Transform` there — and why rubevy's own tests do not: this crate takes
+bevy with `default-features = false`, so `examples/components.rs` names `Transform` itself. A
+few plugins do still register by hand: `TimePlugin` registers the four `Time`s
+(`bevy_time-0.19.1/src/lib.rs:76-79`), which is why `Time<Virtual>` is reachable by name under
+`MinimalPlugins` with the feature off (`tests/resources.rs`).
 
 **What a value looks like.**
 
@@ -420,7 +429,8 @@ registered is not an error on the Ruby side: the component reads as `nil`, `has?
 | tuple struct, tuple, array, list, set | Array |
 | map | Hash |
 | enum, unit variant | the variant's name as a Symbol (`:Hidden`) |
-| enum, tuple or struct variant | a one-entry Hash, `{Srgba: {red: …}}` |
+| enum, struct variant | a one-entry Hash whose value is a **Hash** of the fields, `{Srgba: {red: …}}` |
+| enum, tuple variant | a one-entry Hash whose value is an **Array** of the fields, `{Orthographic: [{scale: 1.0}]}` |
 | numbers, `bool`, String, `char` | the Ruby ones |
 | `Entity` | a `Rubevy::Entity` object, not a number |
 | anything else opaque | nil |
@@ -434,6 +444,16 @@ value handed to it, and a Ruby Hash says nothing about types, so a tuple or stru
 only have its fields written while it is already the current one. A field that cannot take what
 it was given is logged with its path (`translation.x: takes a number`) and skipped; the rest of
 the write still happens.
+
+**A variant's fields are written in the shape the read answers**, and the two variants differ:
+a *struct* variant takes the Hash of names, a *tuple* variant takes the Array —
+`cam[:Projection] = { Orthographic: [ { scale: 2.5 } ] }` zooms a 2D camera, where the outer
+one-entry Hash names the variant, the Array is `Projection::Orthographic(..)`'s one positional
+field, and the inner Hash is an ordinary partial write of the `OrthographicProjection` struct
+(`near`, `far`, `scaling_mode` and the rest keep their values). A tuple variant's field
+**cannot be named**: `{ Orthographic: { "0" => … } }` is refused with `no such field`, because a
+tuple variant's fields have no names in bevy_reflect, not even `"0"`. `tests/camera.rs` holds
+both shapes, and `docs/worklog/2026-09-20-camera-from-ruby.md` is where it was worked out.
 
 **A read costs no frame** (since 2026-09-17). `e[:Transform]` is still `Rubevy.ask` under a nicer
 name, and the task is still parked on a queue while the question is out — but the question is
@@ -478,10 +498,10 @@ The measurements are in `docs/worklog/2026-09-17-sync-reads.md`, and `tests/sche
 the frames from the script's own side — zero for these, one for the questions the game answers,
 in the same file.
 
-The four kinds rubevy answers itself — `component.get`, `component.has`, `components`,
-`entities.with` — never reach `ScriptWorld::take_requests`: they are sorted out where the
-request is made, so a game's answering system sees only its own. A game that wants those names
-picks others.
+The five kinds rubevy answers itself — `component.get`, `component.has`, `components`,
+`entities.with`, `resource.get` — never reach `ScriptWorld::take_requests`: they are sorted out
+where the request is made, so a game's answering system sees only its own. A game that wants
+those names picks others.
 
 **Why a read can wait inside `[]`.** Short as the wait is now, the task really is parked in the
 middle of `[]`, and that took something of the VM. mrbc folds a one-argument `[]` into
@@ -494,6 +514,46 @@ can be parked in. `e[:Transform]` is the spelling; `e.get(:Transform)` is the sa
 because spelling the round trip out reads better where it matters. The Ruby side of all this is
 `src/prelude.rb`, compiled to `.mrb` and run when the VM starts, so a script has these without
 requiring anything.
+
+## Resources by name
+
+A resource is read and written the way a component is, with the entity left out of it:
+
+```ruby
+s = Rubevy.resource(:Score)              # {points: 7.0, best: 12.0}, or nil
+Rubevy.set_resource(:Score, { points: s[:points] + 1.0 })   # `best` is not named, so it stays
+```
+
+Everything the section above says about values holds here — the same table of what a struct, a
+`Vec3`, an enum or an `Entity` looks like, the same partial write, the same path in the warning
+when a field cannot take what it was given. **A read costs no frame**: `Rubevy.resource` is
+answered inside the tick that asked it, out of the same `&World`, in the same gap between two
+runs of the VM as `e[:Transform]`. **A write lands at the end of the frame**
+(`apply_resource_writes`, right after `apply_component_writes`), so a read after a write in the
+same tick answers the old value — read, decide, write, as everywhere else.
+
+**What a type has to do to be there.** `#[derive(Resource, Reflect)]`, **`#[reflect(Resource)]`**,
+and `app.register_type::<T>()`. The `#[reflect(Resource)]` is what makes the difference between
+a resource and a component here: in Bevy 0.19 a resource *is* a component, kept on an entity of
+its own, and `ReflectResource` carries no functions at all — it is the type's own word that it
+is a resource. rubevy asks for that word, so `Rubevy.resource(:Transform)` is `nil` even though
+`Transform` is registered and really is on entities. Four things are `nil` and none of them is
+an error: a type nobody registered, a type that is not a resource, a resource nothing has
+inserted into the world yet, and a name of no type at all.
+
+**The name is the short type path**, exactly as a component's is — `Score`, and the whole path
+(`my_game::Score`) where two types share the short one. A **generic** type carries its
+parameters in that name, and a defaulted parameter is written out rather than left off: bevy's
+`Time` is `Time<()>`, so `Rubevy.resource("Time<()>")` finds it and `Rubevy.resource(:Time)`
+does not. `Rubevy.resource("Time<Virtual>")` is the one a game usually wants. Names with `<` in
+them need quoting on the Ruby side (`"Time<Virtual>"` or `:"Time<Virtual>"`); a String and a
+Symbol are the same thing to the call.
+
+A game answers nothing for this: `resource.get` is one of the kinds rubevy answers itself, so it
+never reaches `ScriptWorld::take_requests`. `tests/resources.rs` is the whole of it, including a
+second VM under a name tag reading and writing the app's one resource, and
+`tests/read_cost.rs::a_resource_read_beside_a_component_read` is the `#[ignore]`d instrument
+that says what the extra lookup costs on the machine it is run on.
 
 ## Events
 
@@ -879,6 +939,25 @@ A game reloads a script by removing the entity's `ScriptTask` and inserting a ne
 ends one by despawning the entity. Either way `ScriptTask`'s `on_remove` hook terminates the task
 in the VM (`Task#terminate`) and lets the collector have it.
 
+**Replacing is `replace_script`**, which is those lines under a name:
+
+```rust
+use rubevy::{replace_script, Script};
+
+replace_script(&mut commands, entity, Script::new(compiled).with_name("brain.rb"));
+```
+
+It takes the `Script` rather than a handle, so the new script's name and priority are set the way
+they are set anywhere else, and the VM it belongs to comes from the `Script`'s own name tag
+(`Script::<Mods>::for_vm(h)` replaces a script of the VM named `Mods` and leaves the first VM's
+script on the same entity alone). What it does is take the `ScriptTask` off, take the `ScriptDone`
+marker off in case the old script had already ended — without that, an entity whose script ran to
+its end could never be given another one — and insert the new `Script`. Both sample games had
+those three lines copied into them, and it is a reload button in each.
+
+**Stopping** a script is still just removing its `ScriptTask` or despawning the entity: there is
+no function for it because there is nothing else to do.
+
 Before that hook the task was only forgotten by the ECS: it stayed in the scheduler's queues and
 kept running, still carrying its entity, so a reloaded robot had two brains asking for the same
 body — the old one invisible, since nothing showed it any more. `tests/replace.rs` checks both
@@ -895,6 +974,146 @@ report is rubevy_games' garden). With a VM that has the 2026-09-17 scheduler fix
 the frame it is in and no more: `tests/restart_burst.rs` replaces ten such scripts in one frame
 and checks that an eleventh, untouched, keeps running on every frame after it. Against a VM
 without the fix that test fails, which is what it is there for.
+
+## One program, one irep
+
+A hundred entities running one `.mrb` load it **once**. The plugin keeps every program it has
+loaded, by the bytes of the program itself, and `start_scripts` looks there before it asks the VM
+to load anything; `Vm::task_spawn` takes an irep, so the hundred tasks are spawned from that one
+copy. `ScriptWorld::loaded_programs()` is how many distinct programs this VM holds.
+
+The key is the program and not the handle it arrived in, because a game that compiles a player's
+Ruby itself adds a **new** asset every time (`Assets::add` hands out a fresh id, and both sample
+games compile once per script *and once per creature*). Two assets with the same bytes are one
+program; a program that changed is other bytes, so it misses the table and is loaded — there is
+nothing to invalidate, and no window in which a reloaded file could be started with the code it
+had before. `tests/shared_irep.rs` checks both directions, including a file replaced under its own
+handle the way the asset server replaces one.
+
+What it is worth, measured on 2026-09-20 with the survey's instrument (`taskset -c 2`, release):
+three thousand entities of one 294-byte `.mrb` used to leave the VM holding 6000 ireps and now
+leave it holding 2, the frame they all start in went from 7.56 ms to 5.11 ms (1.86 → 0.91 ms at a
+thousand entities), and resident memory at the start went from 2.21 kB an entity to 1.46 kB. What
+is left of the starting cost is `Vm::task_spawn` — a context and a stack for each script, which
+they do not share.
+
+**An irep is never given back.** SabiRuby 0.5.2 has no way to drop one — nothing in the crate
+removes from `Vm::ireps` — so every *new* text a game starts a script from is one more irep for
+the life of the app. That is not something rubevy can fix from the outside, and the table is what
+keeps it from being worse: applying the same text again, or applying a change and taking it back,
+costs nothing the second time. A game with an editor that applies a change every few seconds for
+an hour should know the number it is spending; a game whose scripts are files on disk spends it
+once each.
+
+## A script the game compiles itself (`Program`, `in_the_authors_lines`)
+
+A game whose scripts are `.mrb` files on disk needs none of this: Bevy's asset server reads them
+and `Script::new(handle)` runs them. A game that lets a **player** write Ruby — an editor panel, a
+file the player is invited to change — compiles that text itself, and then meets two things both
+sample games wrote by hand.
+
+The first is that the player's file is not the whole program. A game of this kind has a **prelude**
+in front of it: the DSL the player writes in, the methods the game will call back. The two are
+compiled as one program, which is why neither needs a `require` and why the player's file may call
+the prelude's methods at the top level.
+
+```rust
+use rubevy::Program;
+
+let program = Program::new(&prelude, "brain.rb", &players_text, "run");
+// program.source        — hand this to whatever compiler this build has
+// program.prelude_lines — how far down that pushed the player's first line
+```
+
+The second is that every line number the compiler then reports is a line of *that* program.
+rubevy_games' garden reported `beetle.rb:600` for something its author had written on line 118,
+and its sibling sabibots still reports numbers 295 lines too far down. `in_the_authors_lines` puts
+them back:
+
+```rust
+use rubevy::in_the_authors_lines;
+
+match compile(&program.source) {                      // the game's own compiler; see below
+    Ok(bytes) => { /* … */ }
+    Err(message) => {
+        let shown = in_the_authors_lines(&message, program.prelude_lines, "prelude.rb");
+        // "brain.rb:118:19: syntax error, unexpected '<'; …"
+    }
+}
+```
+
+It works on the **text**, and rubevy compiles nothing here. Both compilers a game can have print
+`FILE:LINE:COL: message`, one diagnostic to a line — `sabiruby_compiler::Diagnostic`'s `Display`,
+"as `mrbc` prints it" — and in a browser the compiler is a function the page defines, which is
+handed a source and nothing else, so it prints the same thing with the file always called
+`playground.rb`. So the only thing to find in a line is the `:LINE:COL:` in it, and the first one
+on the line is the only one that can be it; what is in front of it is a file name, which may have
+colons of its own.
+
+Three things come back (`tests/source.rs` has each, with the real compiler's real message):
+
+| where the compiler pointed | what is shown |
+|---|---|
+| past the prelude | the author's own line: `n - prelude_lines` |
+| past the author's last line (the `tail`) | the line after the file's end, which is where the program's last statement is |
+| inside the prelude | the prelude's name and the line it really is — not a number the author cannot find, and not a negative one |
+| nowhere (`compile error`, a missing file) | the message, whole |
+
+`prelude_lines` is counted off the text that really went in front, so it is right whether or not
+the prelude ended with a newline of its own, and it is the same number a panel showing a script's
+frames subtracts from the line the VM reports (rubevy_games' `VmInspector::fill`).
+
+## `require` out of the binary (`EmbeddedHost`, `rubevy-build`)
+
+`require` reads the asset directory with `std::fs` (`FileHost`), and a browser has no filesystem:
+a page is served a wasm module and whatever it fetches, and none of that is a path. `EmbeddedHost`
+is the same road with a table in place of the directory.
+
+```rust
+use rubevy::{EmbeddedHost, ScriptWorld};
+
+// what the build script wrote
+include!(concat!(env!("OUT_DIR"), "/ruby_files.rs"));   // pub static RUBY_FILES: &[(&str, &str)]
+
+fn embed_the_scripts(mut world: ResMut<ScriptWorld>) {
+    world.vm.set_host(Box::new(
+        EmbeddedHost::new(RUBY_FILES).compile_with(|src, opts| page_compile(src, opts)),
+    ));
+    world.vm.set_load_path(&["ruby"]);
+}
+app.add_systems(Startup, embed_the_scripts);
+```
+
+The paths in the table are the paths a script requires: the VM joins a load path and the name the
+script wrote (`"ruby"` + `"helper"` + `".rb"`) and the host looks that text up, so the keys are
+paths relative to the crate with `/` in them. A leading `./` is taken off first.
+
+**A `.mrb` needs no compiler**: `with_binaries` takes a table of bytes, the VM sees the RITE magic
+and runs them, and a build with neither the `ruby-source` feature nor a `compile_with` can still
+`require` one. A `.rb` is source, so it needs a compiler, and `compile_with` is where a browser's
+comes from — there is no C build in a page, and what the playground publishes is a function the
+page defines. The closure has `Host::compile`'s own shape, because that is who calls it; a caller
+that cannot honour the options' `line` and `scopes` (a browser bridge cannot: it is given a
+source) may ignore them, and then `require` works and `eval` of a string that reads its caller's
+locals does not. Without a `compile_with` the crate's own answer is used, which is the reference
+compiler with the `ruby-source` feature and the same refusal `FileHost` gives without it.
+
+**The table is the build script's** — `rubevy-build`, the second package in this repository:
+
+```rust
+// build.rs
+fn main() {
+    rubevy_build::Embed::new("ruby").write();
+}
+```
+
+It walks `ruby/` for `.rb` files and writes `OUT_DIR/ruby_files.rs`: a `pub static RUBY_FILES` of
+`(relative path, include_str!(absolute path))`, sorted, with a `cargo:rerun-if-changed` for the
+directory and for every file in it. The name of the static, the file, the extensions and whether
+they are text or bytes (`include_bytes!`, for `.mrb`) are all settable; the defaults are what both
+sample games' build scripts wrote, which were the same 35 lines to the byte. It is **std and
+nothing else** on purpose: a build-dependency is built for the build machine, and a build script
+that named rubevy would build Bevy a second time for every game that embeds a script.
 
 ## Further reading
 
