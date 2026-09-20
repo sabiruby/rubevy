@@ -6,6 +6,31 @@ ones those documents carry, and nothing is estimated.
 
 ## Unreleased
 
+* **An optional Ruby layer, and the first one is a camera** (R9 of
+  `docs/plans/generalize-plan.md`, on branch `generalize`; the merge's commit goes here when the
+  branch comes in — `docs/worklog/2026-09-20-camera-layer.md`).
+  rubevy carries Ruby it does not run: **`rubevy::layers::CAMERA`**, taken up by the app in one
+  line at `Startup` with the new **`ScriptWorld::load_and_run(&[u8])`** (which runs any `.mrb` in
+  the VM the way the prelude is run, and takes a library of the game's own just as well). An app
+  that does not load it has no `Rubevy::Camera` — that is what makes it a layer and not the host
+  API. **Nothing in `src/` knows what a camera is and nothing has started to**: the layer is
+  `src/layers/camera.rb`, Ruby over `Rubevy.find`, `e[:Transform] =`, `e[:Projection] =` and
+  `Rubevy.ask`, and the crate's dependencies are unchanged.
+  `Rubevy::Camera.find` / `.find_all` / `.attach`, then `position`, `move_to`, `pan`, `zoom`,
+  `scale`, `follow` / `unfollow`, `world_at`, `reload` and `rejected_writes`. **`zoom 2` is twice
+  as close on a 2D camera and on a 3D one alike**, which is most of the reason it exists: an
+  orthographic camera zooms by `scale` (divided by the factor) and a perspective one by `fov`,
+  where what sets apparent size is `tan(fov / 2)` — so the layer writes
+  `2 * atan(tan(fov / 2) / factor)`, and not `fov / factor`, which would be wrong by more and
+  more as the angle grew and could pass pi. It remembers the projection's variant (Ruby cannot
+  switch one), the magnification (a write lands at the end of the frame, so `zoom 2` twice in a
+  tick would otherwise come to 2) and where it last put the camera this frame (so two `pan`s add
+  up). `world_at` is thrown at the game and the **queue** handed back unwaited: no system in
+  rubevy answers `camera.world_at`, and a `pop` on it would park that task for ever.
+  `examples/camera_from_ruby.rs` is the same example as before, rewritten through the layer and
+  with the answering side of `world_at` in it; `tests/camera_layer.rs` is eleven tests, and
+  `docs/host-api.md` has "An optional layer, and the first one".
+
 * **A script can ask what became of a write the world would not take** (before R9 of
   `docs/plans/generalize-plan.md`, on branch `generalize`; the merge's commit goes here when the
   branch comes in — `docs/worklog/2026-09-20-rejected-writes.md`).

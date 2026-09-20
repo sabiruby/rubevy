@@ -1378,6 +1378,44 @@ impl<M: 'static> ScriptWorld<M> {
         &self.rejected_writes
     }
 
+    /// Runs a program in this VM, the way the prelude is run: it is loaded, its top level runs
+    /// at once, and what it leaves behind — a module, a class, a method — is there for every
+    /// script afterwards.
+    ///
+    /// This is how an **optional layer** is taken up ([`layers`]), and a game says so at
+    /// `Startup`:
+    ///
+    /// ```no_run
+    /// # use bevy::prelude::*;
+    /// # use rubevy::ScriptWorld;
+    /// fn add_the_camera_layer(mut world: ResMut<ScriptWorld>) {
+    ///     world.load_and_run(rubevy::layers::CAMERA).expect("the layer runs");
+    /// }
+    /// # fn build(app: &mut App) {
+    /// app.add_systems(Startup, add_the_camera_layer);
+    /// # }
+    /// ```
+    ///
+    /// The bytes are a `.mrb` — rubevy's own layers, or a library of the game's, or anything
+    /// else the game compiled. It is not how a *script* is run: a script belongs to an entity,
+    /// gets a task of its own and is ticked with the rest ([`Script`]). This runs now, in the
+    /// system that called it, and comes back when the program's top level has ended, so the
+    /// program must not park (no `sleep`, no `Rubevy.ask`, nothing that waits for a frame that
+    /// has not begun). A layer that defines classes and methods does none of that.
+    ///
+    /// **Call it at `Startup`**, for the reason [`ScriptWorld::vm`] and
+    /// [`ScriptWorld::require_from`] are called there: a script that has already run has already
+    /// been past the line that would have used what this defines.
+    ///
+    /// The `Err` is what the VM said, as a sentence for a log — the program would not load, or
+    /// its top level raised.
+    pub fn load_and_run(&mut self, program: &[u8]) -> Result<(), String> {
+        match self.vm.load_and_run(program) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(self.vm.describe_error(&e)),
+        }
+    }
+
     /// Terminates a task that is still running and, where `release`, lets the collector have it.
     fn stop_task(&mut self, task: ObjId, release: bool) {
         if !self.vm.task_finished(task) {
@@ -3297,6 +3335,38 @@ fn apply_resource_writes<M: 'static>(world: &mut World) {
 /// The Ruby half of the host API, run when the VM starts: `Rubevy::Entity#[]` and the rest
 /// (`src/prelude.rb`, compiled by `tools/compile_scripts.sh`).
 const PRELUDE: &[u8] = include_bytes!("prelude.mrb");
+
+/// Ruby the crate carries but does not run: an **app** says which of these its scripts get, with
+/// [`ScriptWorld::load_and_run`] at `Startup`.
+///
+/// ```no_run
+/// # use bevy::prelude::*;
+/// # use rubevy::ScriptWorld;
+/// fn add_the_layers(mut world: ResMut<ScriptWorld>) {
+///     world.load_and_run(rubevy::layers::CAMERA).expect("the layer runs");
+/// }
+/// # fn build(app: &mut App) {
+/// app.add_systems(Startup, add_the_layers);
+/// # }
+/// ```
+///
+/// **Why they are not the prelude.** The prelude is the host API — a script has
+/// `Rubevy::Entity#[]` because it is rubevy's, the way `Rubevy.ask` is. A layer is a way of
+/// speaking about *something a game has*, and rubevy does not know what a game has. Nothing in
+/// `src/` knows what a camera is and nothing here should: the camera layer is Ruby over
+/// `Rubevy.find`, `e[:Transform] =`, `e[:Projection] =` and `Rubevy.ask`, and the crate's
+/// dependencies are the same with it as without it. A game that wants none of it loads none of
+/// it, and its scripts are then as they were — `Rubevy::Camera` does not exist.
+///
+/// Each is a `.mrb` compiled by `tools/compile_scripts.sh` from the `.rb` beside it in
+/// `src/layers/`, which is the file to read: the reasoning is in its comments, and the Ruby it
+/// defines is documented in `docs/host-api.md` ("An optional layer, and the first one").
+pub mod layers {
+    /// `Rubevy::Camera` — finding the camera, moving it, zooming it by the same word on a 2D and
+    /// a 3D one, following an entity, and asking the game where a point on the window is in the
+    /// world. The source is `src/layers/camera.rb`.
+    pub const CAMERA: &[u8] = include_bytes!("layers/camera.mrb");
+}
 
 /// What a `Rubevy::Entity` object is, in the `tag` of [`Vm::data_new`]. A host that gives its
 /// scripts Data objects of its own picks other numbers.
