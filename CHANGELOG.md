@@ -4,6 +4,19 @@ What changed in each release of `rubevy`. Every claim names the commit behind it
 the work came in on a branch) and the document under `docs/` that records it; measurements are the
 ones those documents carry, and nothing is estimated.
 
+## Unreleased
+
+* **A camera driven from Ruby, with nothing added to the crate** (R0 of
+  `docs/plans/generalize-plan.md`, on branch `generalize`; the merge's commit goes here when the
+  branch comes in — `docs/worklog/2026-09-20-camera-from-ruby.md`). `Camera2d`, `Camera3d` and `Projection` are
+  ordinary `#[reflect(Component)]` types, so `Rubevy.find(:Camera2d)`, `cam[:Transform] =` and
+  `cam[:Projection] = { Orthographic: [ { scale: 2.0 } ] }` already pan and zoom one. The new
+  `examples/camera_from_ruby.rs` and `tests/camera.rs` say so and hold the shape of the write;
+  `src/` is unchanged and `[dependencies]` is unchanged (the example and the test ask for bevy's
+  `bevy_camera` feature as a dev-dependency). What a Ruby camera layer will be built on is in the
+  worklog, including the two shapes that are refused: switching an enum's tuple variant, and
+  naming a tuple variant's field instead of giving the Array.
+
 ## 0.0.1 — 2026-09-18
 
 The first release on crates.io (tag `v0.0.1`, `2d9eb92`). Until now the crate was used from git;
