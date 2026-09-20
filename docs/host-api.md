@@ -1071,6 +1071,62 @@ source (file and line — while it waits as well as while it runs), and whether 
 It is what makes a panel like "Scout — robots/scout.rb:12 — 4,200 insn" possible, which is the
 thing this VM can show and an engine's usual scripting cannot.
 
+## What a HUD can show of a frame (`FrameStats`)
+
+`ScriptWorld::last_frame()` answers a [`FrameStats`]: what the last tick of that VM came to.
+Where `stats` is one script, this is the frame.
+
+| field | what it is |
+|---|---|
+| `frame` | bevy's `FrameCount` when the tick ran, so a reader can tell this frame's answer from last frame's |
+| `instructions` | what the tick took out of `budget`, over every script of the VM |
+| `rounds` | times round the tick's loop — run the ready tasks, answer what they parked on, run them again |
+| `reflect_answers` / `in_tick_answers` | questions answered in the tick: rubevy's own kinds (a component or resource by name, `Rubevy.find`) and the game's (`answer_in_tick`), counted apart because they are bounded apart |
+| `carried_reflect` / `carried_in_tick` | questions this frame did not reach and left for the next one, waiting at the head of its answering ("Time") |
+| `dropped` | messages the VM's full queues lost since the previous tick — the difference of `ScriptWorld::dropped` |
+| `time_ns` | the wall clock of the tick, on the clock the VM itself was given. **This is the number `frame_time` bounds** |
+| `longest_answer_ns` | the dearest single answer of the tick, or `None` where the app set no `frame_time` (then the tick reads no clock and has nothing to say) |
+| `more_to_run` | whether the VM still had a task that would run — a yes or no, because `Vm::task_pending` is a yes or no |
+| `loaded_programs` | the VM's standing count, the one number here that is not of the frame |
+
+Nothing here is a total kept for you: every field but the last is of that one tick, and an
+average or a worst case over several frames is the game's to keep, because how many frames it
+should be kept over is the game's question. Nothing of it reaches a script either — `$rubevy`
+carries the frame, the delta and the time and no more — and a game that wants its scripts to see
+what its scripts cost publishes it or answers a question with it.
+
+```rust
+fn hud(scripts: Res<ScriptWorld>) {
+    let f = scripts.last_frame();
+    info!("{} insn in {:.2} ms, {} answers", f.instructions, f.time_ns as f64 / 1e6, f.reflect_answers);
+    if f.carried_reflect + f.carried_in_tick > 0 {
+        info!("{} questions put off to the next frame", f.carried_reflect + f.carried_in_tick);
+    }
+}
+```
+
+**A paused frame is a frame**: with `budget = 0` the tick ends before its first round, so the
+counters are zero and `more_to_run` is what tells a paused VM from one whose scripts have all
+ended. **A second VM has its own**, as it has its own budget.
+
+**`time_ns` is not what a system after `RubevySet::Tick` measures.** That set holds four systems
+— the tick, the commands the scripts left, and the two kinds of write — so timing it from
+outside times all four. On one machine with a thousand scripts the two differ by a millisecond
+(`docs/verification/scale.md`), and it is the smaller number that `frame_time` is about.
+
+**Two instruments print these numbers** beside the wall clock of the frame, for anyone who wants
+to know what their own machine carries:
+
+```
+cargo run --release --example how_many_scripts        # scripted entities, from ten to three thousand
+cargo run --release --example how_many_subscribers    # subscribers and messages a frame
+```
+
+Both are native-only measuring instruments that assert nothing, both take their sizes as
+arguments, and both have a `mem` mode that runs one configuration in a process of its own.
+`docs/verification/scale.md` is a run of them on one machine, beside what the same instruments
+said before the work of 2026-09-20.
+
 ## Replacing and removing a script
 
 A game reloads a script by removing the entity's `ScriptTask` and inserting a new `Script`, and

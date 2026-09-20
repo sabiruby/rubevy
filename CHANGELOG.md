@@ -6,6 +6,42 @@ ones those documents carry, and nothing is estimated.
 
 ## Unreleased
 
+* **What a frame's tick came to, and two instruments that measure what a machine carries** (R5 of
+  `docs/plans/generalize-plan.md`, on branch `generalize`; the merge's commit goes here when the
+  branch comes in — `docs/worklog/2026-09-20-frame-stats.md`, `docs/verification/scale.md`).
+  A game could ask what one script had spent (`ScriptWorld::stats`) and nothing at all about the
+  frame the scripts share: how long the tick took, how much of the budget it used, how many
+  questions it answered and how many it had to put off, what its queues lost. Each of those is a
+  number the tick was already keeping or a clock reading the deadline already made it take, so
+  **`ScriptWorld::last_frame() -> FrameStats`** gathers them rather than measuring anything new —
+  twelve fields, listed in `docs/host-api.md` ("What a HUD can show of a frame"). Two of them are
+  worth naming here: `time_ns` is the tick alone, which is the number `frame_time` bounds and
+  **not** what a system placed after `RubevySet::Tick` measures (that set holds four systems, and
+  the difference on one machine with a thousand scripts is a millisecond); and `longest_answer_ns`
+  is the dearest single answer of the tick, which is the overshoot a late tick is allowed — the
+  way to find the slow `answer_in_tick` closure that R4 could only warn about. It is `None` where
+  the app set no `frame_time`, because then the tick reads no clock and this adds none.
+  **What collecting it costs was measured rather than assumed**: the same instrument built
+  against the commit before and the commit after, paired and repeated on a quiet machine, differs
+  by −5.2% to +1.8% with a thousand and with three thousand scripts — scattered both ways and
+  inside the spread of the before version against itself — so there is **no setting to turn it
+  off**, which would have been a number and a knob for a cost nothing could measure.
+  **The two measuring instruments the survey of 2026-09-20 wrote are now examples**:
+  `examples/how_many_scripts.rs` (scripted entities, ten to three thousand, with the tick both as
+  rubevy times it and as a game would, the frames between one script's turns, and a `mem` mode in
+  a process of its own) and `examples/how_many_subscribers.rs` (subscribers × messages a frame,
+  what one reader can take as the queue limit moves, and what a waiting message costs). They
+  assert nothing, they are native only, every size they run with is an argument whose default is
+  written down with where it came from, and the three holes the earlier stages found in them are
+  closed: a column that was mostly the instrument's own two clock reads is gone (and what one
+  such pair costs is measured and printed), the two resident-memory columns that moved by
+  hundreds of kilobytes between identical runs are a mode of their own, and the row where a
+  single repeat came out 2.3 times its neighbours now takes repeats. `docs/verification/scale.md`
+  is a run of both on one machine with the before-and-after of R1–R4 beside it, and the
+  reproduction steps carry the four traps the stages walked into. 150 tests pass (140 before, of
+  which 9 are new and one is the example in the new rustdoc), no dependency was added, there is
+  no `unsafe`, and the only public names added are `FrameStats` and `last_frame`.
+
 * **`frame_time` is a limit on the tick, not only on the runs of the VM inside it** (R4 of
   `docs/plans/generalize-plan.md`, on branch `generalize`; the merge's commit goes here when the
   branch comes in — `docs/worklog/2026-09-20-frame-time-as-a-limit.md`). A tick is a loop — run
