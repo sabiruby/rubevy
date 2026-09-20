@@ -6,8 +6,7 @@ ones those documents carry, and nothing is estimated.
 
 ## Unreleased
 
-* **A script can wait for the next frame** (R11 of `docs/plans/generalize-plan.md`, on branch
-  `generalize`; the merge's commit goes here when the branch comes in —
+* **A script can wait for the next frame** (R11 of `docs/plans/generalize-plan.md`, merged in `378c539` —
   `docs/worklog/2026-09-20-next-frame.md`, `docs/host-api.md`). `Rubevy.next_frame` parks the task
   until the next frame and answers that frame's number — the Integer `$rubevy[:frame]` carries —
   and `Rubevy.each_frame { |dt| … }` is the loop around it. Until now the only wait a script had
@@ -31,8 +30,7 @@ ones those documents carry, and nothing is estimated.
   because a script that waits with `sleep` may be two or three frames late — but what a script
   can now do is wait one frame exactly and read its own refusals there.
 
-* **The three things R10 left for R11** (on branch `generalize`; the merge's commit goes here when
-  the branch comes in — `docs/worklog/2026-09-20-r10-followups.md`, `docs/numbers.md` §9).
+* **The three things R10 left for R11** (merged in `378c539` — `docs/worklog/2026-09-20-r10-followups.md`, `docs/numbers.md` §9).
   **`examples/how_many_scripts.rs` reads the defaults instead of copying them.** Its `default`
   row wrote `200_000` and `8 ms` itself, and its name said so a third time, so the day a default
   moved the row would have gone on calling itself `default(200k/8ms)` while measuring something
