@@ -242,6 +242,51 @@ fn the_oldest_messages_are_dropped_when_nobody_reads() {
     assert_eq!(r.num(1), Some(36.0), "and it is the newest 64 that are kept, not the oldest");
 }
 
+/// Subscriptions are filed by name (`HostState::subscriptions`), so this is the shape of that
+/// filing seen from Ruby: one script may listen for several names, each name reaches only what
+/// subscribed to it, and within a name a message is built and handed out in the order the
+/// subscriptions were asked for — which is what a host's `publish_value` closure sees, since it
+/// runs once per subscriber.
+#[test]
+fn within_a_name_the_message_goes_out_in_the_order_it_was_subscribed_to() {
+    let mut app = app();
+    run(
+        &mut app,
+        r#"
+          first  = Rubevy.subscribe(:hit)
+          second = Rubevy.subscribe(:hit)
+          other  = Rubevy.subscribe(:heal)
+          Rubevy.ask("ready").pop
+          sleep 0.01                       # the host publishes once while this waits
+          Rubevy.ask("got", first.pop, second.pop, other.size).pop
+        "#,
+    );
+    until_ready(&mut app);
+    assert_eq!(
+        app.world().resource::<ScriptWorld>().subscriptions(),
+        3,
+        "three subscriptions of one script, two of them for the same name"
+    );
+
+    {
+        let mut world = app.world_mut().resource_mut::<ScriptWorld>();
+        let mut nth = 0.0;
+        world.publish_value(None, "hit", move |_vm| {
+            nth += 1.0;
+            Value::Float(nth)
+        });
+    }
+    frames(&mut app, 25);
+
+    let r = asked(&app, "got").expect("the script woke on its queues");
+    assert_eq!(
+        (r.num(0), r.num(1)),
+        (Some(1.0), Some(2.0)),
+        "the subscription asked for first was built for first"
+    );
+    assert_eq!(r.num(2), Some(0.0), "and the other name heard nothing");
+}
+
 #[test]
 fn the_subscription_goes_when_the_script_does() {
     let mut app = app();

@@ -6,6 +6,25 @@ ones those documents carry, and nothing is estimated.
 
 ## Unreleased
 
+* **Subscriptions are filed by name** (R1 of `docs/plans/generalize-plan.md`, on branch
+  `generalize`; the merge's commit goes here when the branch comes in —
+  `docs/worklog/2026-09-20-subscription-index.md`). `ScriptWorld::publish` used to walk every
+  standing subscription of the VM to find the ones listening for a name, so publishing cost the
+  number of subscriptions whether anybody was listening or not: 228 ns a message at a thousand
+  subscriptions, for a name nobody had subscribed to. The subscriptions now sit in a map from
+  name to the subscribers of that name, in the order they asked, and publishing is one lookup.
+  Measured with the survey's own instrument on the machine and settings of
+  `docs/worklog/2026-09-20-factory-survey.md` (60 frames × 3, `taskset -c 2`, release), a message
+  to a name nobody subscribed to costs 7.9 → 8.1 → 31.3 → 228.0 ns as the subscriptions go
+  1 → 10 → 100 → 1000, and afterwards 13.8 → 9.2 → 8.9 → 9.6 ns: no longer a function of how many
+  subscriptions the VM holds. Publishing to a name that *is* heard, the frame time and the number
+  of messages each script read are unchanged (within the ±2% the instrument repeats to; the
+  one-subscriber cell is noisier than the difference — the worklog says what was and was not
+  settled there). Nothing in the public API changed, and nothing was added to `[dependencies]`:
+  the map is `std::collections::HashMap`, which the crate already used in three places.
+  `tests/events.rs` gains one test for the shape the filing gives Ruby (one script listening for
+  several names, and within a name the order it subscribed in).
+
 * **Resources by name** (R8 of `docs/plans/generalize-plan.md`, on branch `generalize`; the
   merge's commit goes here when the branch comes in —
   `docs/worklog/2026-09-20-resources-by-name.md`). `Rubevy.resource(:Score)` reads a resource as

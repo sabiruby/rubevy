@@ -1160,13 +1160,18 @@ impl<M: 'static> ScriptWorld<M> {
         name: &str,
         mut build: impl FnMut(&mut Vm) -> Value,
     ) {
+        // One lookup: what it costs to publish a name is what that name's subscribers cost, and
+        // a name nobody subscribed to costs the lookup alone — not a walk of every subscription
+        // in the VM, which is what this used to be
         let queues: Vec<ObjId> = match self.vm.host_state::<HostState>() {
-            Some(state) => state
-                .subscriptions
-                .iter()
-                .filter(|s| s.name == name && (entity.is_none() || s.entity == entity))
-                .map(|s| s.queue)
-                .collect(),
+            Some(state) => match state.subscriptions.get(name) {
+                Some(subs) => subs
+                    .iter()
+                    .filter(|s| entity.is_none() || s.entity == entity)
+                    .map(|s| s.queue)
+                    .collect(),
+                None => return,
+            },
             None => return,
         };
         for queue in queues {
@@ -1211,8 +1216,16 @@ impl<M: 'static> ScriptWorld<M> {
     }
 
     /// How many subscriptions are standing, for a HUD or a test.
+    ///
+    /// Counted over the names rather than kept in a field of its own, so there is one place a
+    /// subscription can be added or let go of and no second number to keep in step. That is a
+    /// walk of the names a VM's scripts listen for — not of the subscribers, of which there may
+    /// be a thousand to a name.
     pub fn subscriptions(&self) -> usize {
-        self.vm.host_state::<HostState>().map(|s| s.subscriptions.len()).unwrap_or(0)
+        self.vm
+            .host_state::<HostState>()
+            .map(|s| s.subscriptions.values().map(Vec::len).sum())
+            .unwrap_or(0)
     }
 
     /// Lets go of what an entity's script subscribed to. Called where a script's task ends and
@@ -1228,17 +1241,25 @@ impl<M: 'static> ScriptWorld<M> {
     /// unwinds through its `ensure` and ends.
     fn unsubscribe(&mut self, entity: Entity) {
         let Some(state) = self.vm.host_state_mut::<HostState>() else { return };
-        let mut dropped = Vec::new();
-        state.subscriptions.retain(|s| {
-            if s.entity == Some(entity) {
-                dropped.push(s.queue);
-                false
-            } else {
-                true
-            }
+        let mut dropped: Vec<(u64, ObjId)> = Vec::new();
+        // every name, because one script may listen for several; a name left with no subscribers
+        // goes out of the map, so publishing to it is a miss again
+        state.subscriptions.retain(|_name, subs| {
+            subs.retain(|s| {
+                if s.entity == Some(entity) {
+                    dropped.push((s.seq, s.queue));
+                    false
+                } else {
+                    true
+                }
+            });
+            !subs.is_empty()
         });
+        // in the order the script subscribed, which is the order the tasks parked on these queues
+        // wake in (see `Subscription::seq`)
+        dropped.sort_unstable_by_key(|(seq, _queue)| *seq);
         let close = self.vm.intern("close");
-        for queue in dropped {
+        for (_seq, queue) in dropped {
             if let Err(e) = self.vm.funcall(Value::Obj(queue), close, &[], Value::Nil) {
                 let message = self.vm.describe_error(&e);
                 error!("rubevy: could not close a subscription: {message}");
@@ -1314,22 +1335,47 @@ fn enable_scheduler_gc(vm: &mut Vm) -> Result<(), String> {
 struct HostState {
     /// The queue a native writes and [`drain_commands`] reads.
     commands: Vec<HostCommand>,
-    /// What the scripts are listening for (`Rubevy.subscribe`), in the order they asked.
-    subscriptions: Vec<Subscription>,
+    /// What the scripts are listening for (`Rubevy.subscribe`), **by name**: for each name, the
+    /// subscribers of that name in the order they asked.
+    ///
+    /// It was one flat `Vec` walked by every `publish`, which made publishing cost the number of
+    /// standing subscriptions whether anybody was listening for that name or not — 228 ns a
+    /// message at a thousand subscriptions, for a name nobody had subscribed to, and 9.6 ns once
+    /// it was keyed by name (`docs/worklog/2026-09-20-subscription-index.md`, after the event
+    /// table of `docs/worklog/2026-09-20-factory-survey.md`). A game that publishes freely, as
+    /// [`ScriptWorld::publish`]'s rustdoc invites it to, was paying for every other subscriber in
+    /// the world. Keyed by name it is one lookup, and a name nobody listens for is a miss.
+    ///
+    /// A name whose last subscriber goes is taken out of the map, so this does not fill up with
+    /// the names of scripts that have ended.
+    subscriptions: std::collections::HashMap<String, Vec<Subscription>>,
+    /// How many subscriptions have ever been made in this VM, which is where each one's
+    /// [`Subscription::seq`] comes from. A counter, not a limit: nothing is refused when it
+    /// grows, and a `u64` of them is more than a running game can ask for.
+    subscriptions_made: u64,
 }
 
 /// One `Rubevy.subscribe(:hit)`: the queue it answered with, and whose script it belongs to.
 ///
 /// It lives in the VM's host state beside the command queue, because the native that makes it
 /// has the `Vm` and nothing else. [`ScriptWorld::publish`] reads it back through the same
-/// `&mut Vm`.
+/// `&mut Vm`. The name it listens for is the key it is filed under, not a field.
 #[derive(Debug, Clone)]
 struct Subscription {
     /// The entity the subscribing script is attached to, where it has one. A message sent to
     /// an entity reaches only the subscriptions of that entity's scripts.
     entity: Option<Entity>,
-    name: String,
     queue: ObjId,
+    /// Which `Rubevy.subscribe` in this VM this was, counting from the first.
+    ///
+    /// Within one name the order the subscribers were asked in is the order they sit in, so
+    /// publishing needs no number. [`ScriptWorld::unsubscribe`] does: it closes the queues of
+    /// one entity across all the names it subscribed to, and the map's names come out in
+    /// whatever order the hasher gives — a different one in every process. Closing a queue wakes
+    /// what is parked on it, so that order is the order those tasks wake in. Sorting the few
+    /// queues of one entity by this puts them back in the order the script asked for them,
+    /// which is what a flat `Vec` gave for free.
+    seq: u64,
 }
 
 fn push_command(vm: &mut Vm, c: HostCommand) {
@@ -2539,7 +2585,15 @@ fn install_host_api(vm: &mut Vm, release: ReleaseQueue) -> ObjId {
         }
         match vm.host_state_mut::<HostState>() {
             Some(state) => {
-                state.subscriptions.push(Subscription { entity: Some(entity), name, queue })
+                let seq = state.subscriptions_made;
+                state.subscriptions_made += 1;
+                // filed under the name, at the end of what is already listening for it: within
+                // one name, the order here is the order `publish` delivers in
+                state
+                    .subscriptions
+                    .entry(name)
+                    .or_default()
+                    .push(Subscription { entity: Some(entity), queue, seq });
             }
             // no host state is no plugin; let go of the queue rather than leave it rooted
             None => vm.gc_unregister(queue),
