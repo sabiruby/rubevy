@@ -1,6 +1,6 @@
 [package]
 name = "rubevy-build"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2024"
 # std and nothing else, so this is the edition's own floor: edition 2024 was stabilised in
 # Rust 1.85 (the same floor SabiRuby names). It is deliberately not rubevy's 1.95 — a build

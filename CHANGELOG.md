@@ -4,7 +4,43 @@ What changed in each release of `rubevy`. Every claim names the commit behind it
 the work came in on a branch) and the document under `docs/` that records it; measurements are the
 ones those documents carry, and nothing is estimated.
 
-## Unreleased
+## 0.1.0 — 2026-09-22
+
+The second release on crates.io, and the first one whose crate carries this file. What it adds
+over 0.0.1 is the work of `docs/plans/generalize-plan.md` (R0–R11) and
+`docs/plans/held-requests-plan.md` (H1–H3): the crate stopped being "a way to run a `.mrb` on an
+entity" and became the general bridge — the world by name in both directions (resources as well
+as components, and a refused write a script can read), the limits made real and settable, a
+question whose answer is an action that takes frames, a frame a script can wait exactly one of,
+what a frame and a script cost, the entry points both sample games had written by hand, and
+optional Ruby the app loads itself. `rubevy-build`, the build-script half of this repository, is
+published for the first time in the same release and at the same number.
+
+Bevy 0.19.1, SabiRuby 0.6, Rust 1.95 (Bevy's own `rust-version`) — all three unchanged from
+0.0.1 but the second.
+
+### Coming from 0.0.1
+
+* **The VM moved from SabiRuby 0.5.x to 0.6.** 0.6.0 removed `Vm::current_line` for `next_line`
+  and `backtrace_line`; rubevy calls neither, so nothing of rubevy's own API turns on it. But an
+  app that names `sabiruby` itself must move with it — `sabiruby = "0.6"`, and
+  `sabiruby-compiler = "0.3"`, `sabiruby-serde = "0.2"` where they are used — because two
+  different requirements for the VM are two VMs in the binary, and a `Value` of one is not a
+  `Value` of the other.
+* **Nothing of the Rust API was taken away or renamed.** Every name 0.0.1 published is still
+  there and still means the same thing; the additions are listed below. `Script` gained
+  `prelude_lines` and `ScriptEnded` gained `at`, which would be a breaking change for a struct
+  literal — but both types have always carried a private field, so no caller outside the crate
+  could write one.
+* **Three more `Rubevy.ask` kinds are rubevy's own.** 0.0.1 reserved four (`component.get`,
+  `component.has`, `components`, `entities.with`); `frame.next`, `resource.get` and
+  `writes.rejected` join them. A game that had used one of those three strings for a question of
+  its own will no longer see it in `ScriptWorld::take_requests` — rename it.
+* **`Rubevy::Camera` is new, not changed.** The camera layer arrived after 0.0.1 and its
+  `#scale` was renamed to `#magnification` before any release carried it, so there is nothing to
+  migrate; a script written against an unpublished checkout of the layer is the only thing that
+  can notice.
+* The `.crate` now carries `CHANGELOG.md`, which 0.0.1's did not.
 
 * **A question whose answer is an action that takes frames waits on the entity that asked it**
   (H1 of `docs/plans/held-requests-plan.md`, `d5bc62e` —

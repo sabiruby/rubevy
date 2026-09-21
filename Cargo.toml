@@ -12,7 +12,7 @@ members = [".", "rubevy-build"]
 
 [package]
 name = "rubevy"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2024"
 # the largest `rust-version` among the dependencies, read with `cargo metadata`:
 # bevy 0.19.1 says 1.95.0, sabiruby 0.6 says 1.85, thiserror 2 says 1.71.

@@ -2823,7 +2823,7 @@ dependencies = [
 
 [[package]]
 name = "rubevy"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "bevy",
  "sabiruby",
@@ -2834,7 +2834,7 @@ dependencies = [
 
 [[package]]
 name = "rubevy-build"
-version = "0.0.1"
+version = "0.1.0"
 
 [[package]]
 name = "rustc-hash"
@@ -2885,9 +2885,9 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "sabiruby"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1a724f5c3675b9eb1099903c16678b066589e9281b2360ef783da44a8075d32"
+checksum = "555e24d4dbfd3f782444088f257b83e7f881897e6a2579c2f60a4d4e0c6a6c27"
 dependencies = [
  "hashbrown 0.15.5",
  "libm",
@@ -2897,9 +2897,9 @@ dependencies = [
 
 [[package]]
 name = "sabiruby-compiler"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88e1692796e58d911184a4202af142adeee7c9cb8f259a7575da3d2a40843ba4"
+checksum = "91668a21f0c498020ad2e074ac002ac8c4fe7bcf05794d86a48a79a5c603b245"
 dependencies = [
  "cc",
  "sabiruby",
@@ -2918,9 +2918,9 @@ dependencies = [
 
 [[package]]
 name = "sabiruby-serde"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07a10ffae05016bb92d80d517b584faec6f477570a012269bf2df5ef5ba5b66d"
+checksum = "ac821d7139d205236393e83078bee7f96292935dcc9edb89e272fd75786d21ef"
 dependencies = [
  "sabiruby",
  "serde",
