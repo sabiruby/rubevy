@@ -15,7 +15,7 @@ name = "rubevy"
 version = "0.0.1"
 edition = "2024"
 # the largest `rust-version` among the dependencies, read with `cargo metadata`:
-# bevy 0.19.1 says 1.95.0, sabiruby 0.5.x says 1.85, thiserror 2 says 1.71.
+# bevy 0.19.1 says 1.95.0, sabiruby 0.6 says 1.85, thiserror 2 says 1.71.
 rust-version = "1.95.0"
 license = "MIT"
 description = "Run mruby bytecode (via SabiRuby) inside Bevy"
@@ -37,12 +37,12 @@ ruby-source = ["dep:sabiruby-compiler"]
 # next to this one, put the redirect in `.cargo/config.toml` (git-ignored):
 #   [patch.crates-io]
 #   sabiruby = { path = "../sabiruby" }
-sabiruby = "0.5.1"
+sabiruby = "0.6"
 bevy = { version = "0.19.1", default-features = false, features = ["bevy_asset", "bevy_log"] }
 thiserror = "2"
 # only for the `ruby-source` feature. 0.2.2 is the first compiler that names a 0.5.x VM
 # (sabiruby `docs/design/compiler.md`, "Publishing"); rubevy does not call `highlight()`.
-sabiruby-compiler = { version = "0.2.2", features = ["host"], optional = true }
+sabiruby-compiler = { version = "0.3", features = ["host"], optional = true }
 
 [dev-dependencies]
 # `multi_threaded` is bevy's, not this crate's: it is what makes bevy's task pools threads, so
@@ -55,16 +55,16 @@ sabiruby-compiler = { version = "0.2.2", features = ["host"], optional = true }
 # (bevy_internal 0.19.1 `Cargo.toml:79-83`), which is why it is not worth adding to the library.
 bevy = { version = "0.19.1", default-features = false, features = ["bevy_asset", "bevy_log", "bevy_window", "bevy_winit", "x11", "multi_threaded", "bevy_camera"] }
 # the tests compile their Ruby in process
-sabiruby-compiler = { version = "0.2.2", features = ["host"] }
+sabiruby-compiler = { version = "0.3", features = ["host"] }
 # `macros` is the proc macro behind `#[derive(RubyClass)]` / `#[ruby_methods]`, which
 # `tests/host_data.rs` uses to show that a game answers a question with an object of its own.
 # The library does not want it: a proc macro is a compiler plugin, and rubevy defines no Ruby
 # class of its own beyond `Rubevy::Entity` (which is `Vm::data_new` by hand).
-sabiruby = { version = "0.5.1", features = ["macros"] }
+sabiruby = { version = "0.6", features = ["macros"] }
 # JSON and serde on top of the VM, for `tests/vm_setup.rs` and the example in
 # `docs/host-api.md`. **rubevy does not depend on this** — a game that wants `JSON` installs it
 # into the VM itself, which is the whole point of the test.
-sabiruby-serde = "0.1.0"
+sabiruby-serde = "0.2"
 
 [profile.dev]
 debug = "line-tables-only"   # backtraces keep file:line; full DWARF made each binary ~1.7GB

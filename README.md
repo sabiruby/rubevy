@@ -95,9 +95,10 @@ rubevy = "0.0.1"
 bevy = "0.19.1"
 ```
 
-The VM comes from crates.io with it: [`sabiruby`](https://crates.io/crates/sabiruby) 0.5.1 or
-later (0.5.1 is the first with the scheduler fix that replacing ten scripts in one frame needs —
-`docs/worklog/2026-09-17-restart-burst.md`). Nothing else is required: a script that `require`s a
+The VM comes from crates.io with it: [`sabiruby`](https://crates.io/crates/sabiruby) 0.6 (0.5.1
+was the first with the scheduler fix that replacing ten scripts in one frame needs —
+`docs/worklog/2026-09-17-restart-burst.md`; 0.6 renamed `Vm::current_line` to `next_line`, which
+rubevy does not call). Nothing else is required: a script that `require`s a
 `.mrb` works out of the box.
 
 `ruby-source` is the one feature. It lets a script `require` a `.rb` as well, by bringing
