@@ -1,5 +1,9 @@
 [package]
 name = "rubevy-build"
+# The same number as rubevy's, because the two are released together out of one repository under
+# one tag and one CHANGELOG: a `rubevy-build` 0.1.0 is the one that goes with `rubevy` 0.1.0.
+# Nothing depends on the pairing — rubevy does not name this crate and this crate names nothing —
+# so it is a convention for the reader, not a requirement.
 version = "0.1.0"
 edition = "2024"
 # std and nothing else, so this is the edition's own floor: edition 2024 was stabilised in
@@ -7,10 +11,13 @@ edition = "2024"
 # script that only reads a directory has no reason to ask for Bevy's compiler.
 rust-version = "1.85"
 license = "MIT"
-description = "Build-script helper for rubevy: puts a directory of Ruby files into the binary"
+description = "Build-script helper for rubevy: writes the table that puts a game's .rb and .mrb files into the binary, for a build with no filesystem"
 keywords = ["bevy", "mruby", "ruby", "build-dependencies"]
 categories = ["development-tools::build-utils"]
 repository = "https://github.com/sabiruby/rubevy"
+# crates.io renders only the crate's own README, and this package is not the root one, so it has
+# its own rather than rubevy's.
+readme = "README.md"
 
 # No dependencies, and none are wanted. This is a build-dependency: everything it names is
 # built for the *host* before the crate that uses it starts, so a dependency on rubevy — which

@@ -5,8 +5,9 @@
 #
 # `cargo test` here is still this package's tests and nothing else (a workspace whose root is a
 # package works on the root package by default); `cargo test --workspace` runs the helper's too.
-# `cargo package` leaves the nested package out of the `.crate`, and the helper is published
-# separately if it is ever published at all.
+# `cargo package` leaves the nested package out of the `.crate`, so the helper is published as a
+# crate of its own (`cargo publish -p rubevy-build`). Neither names the other, so the order
+# between them is free.
 [workspace]
 members = [".", "rubevy-build"]
 
@@ -18,8 +19,16 @@ edition = "2024"
 # bevy 0.19.1 says 1.95.0, sabiruby 0.6 says 1.85, thiserror 2 says 1.71.
 rust-version = "1.95.0"
 license = "MIT"
-description = "Run mruby bytecode (via SabiRuby) inside Bevy"
-keywords = ["bevy", "mruby", "ruby", "scripting"]
+# One sentence, because crates.io prints it under the name and in every search result. It says
+# the four things the README then spells out: what it is for (Ruby in Bevy), what runs the Ruby
+# (mruby bytecode on SabiRuby, not a Ruby of its own), the shape a script has (a task), and what
+# a script can reach (the ECS).
+description = "Ruby scripting for Bevy: mruby bytecode on the SabiRuby VM, one task per script, with a host API onto the ECS"
+# Five is crates.io's maximum. `ecs` is the last one because the host API is components and
+# resources by name through Bevy's reflection, which is what the description ends on.
+keywords = ["bevy", "mruby", "ruby", "scripting", "ecs"]
+# The one slug of crates.io's list that fits: this is a library for making games, not a game
+# engine of its own (`docs/worklog/2026-09-18-crates-io.md` checked the list).
 categories = ["game-development"]
 repository = "https://github.com/sabiruby/rubevy"
 readme = "README.md"
@@ -31,17 +40,20 @@ default = []
 ruby-source = ["dep:sabiruby-compiler"]
 
 [dependencies]
-# The VM. 0.5.1 is the lowest that works: it carries the scheduler fix (a task that ends in nil,
-# the dormant queue) that `docs/worklog/2026-09-17-restart-burst.md` concluded belonged in the VM
-# — on 0.5.0 replacing ten scripts in one frame freezes it. To work against a checkout of the VM
-# next to this one, put the redirect in `.cargo/config.toml` (git-ignored):
+# The VM. 0.6 is the floor because 0.6.0 is a breaking release of it: `Vm::current_line` was
+# removed for `next_line` and `backtrace_line`, and a `^0.5` requirement here would mean an app
+# that names `sabiruby` 0.6 itself gets two VMs in the binary. rubevy calls neither of the two
+# new entry points, so the floor is the crate's version and not a function it needs.
+# To work against a checkout of the VM next to this one, put the redirect in
+# `.cargo/config.toml` (git-ignored):
 #   [patch.crates-io]
 #   sabiruby = { path = "../sabiruby" }
 sabiruby = "0.6"
 bevy = { version = "0.19.1", default-features = false, features = ["bevy_asset", "bevy_log"] }
 thiserror = "2"
-# only for the `ruby-source` feature. 0.2.2 is the first compiler that names a 0.5.x VM
-# (sabiruby `docs/design/compiler.md`, "Publishing"); rubevy does not call `highlight()`.
+# only for the `ruby-source` feature. 0.3 is the first compiler that names a 0.6.x VM
+# (sabiruby `docs/design/compiler.md`, "Publishing"), so it is the floor that goes with
+# `sabiruby = "0.6"` above; rubevy calls `compile_eval` and nothing else of it (`src/lib.rs`).
 sabiruby-compiler = { version = "0.3", features = ["host"], optional = true }
 
 [dev-dependencies]
