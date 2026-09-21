@@ -17,6 +17,14 @@
 待ち行列の長さを縛るのは既にある `budget` と `frame_time` である（`docs/worklog/2026-09-20-next-frame.md`）。
 §8 の集計の 44 件は **45 件**になる（(a) が 8 → 9）。
 
+**H1・H2（2026-09-22）が足した数は 1 つも無い。** `hold_requests` / `Held` に上限も閾値も既定値も
+置いていない: 待てる問いの数はスクリプトが問うた回数で、それを縛っているのは既にある `budget`
+である（`rejected_writes` が上限を置かなかったのと同じ論法。`docs/worklog/2026-09-22-held-requests.md`）。
+`ScriptEnded::at` も同じで、読むのは backtrace の先頭 1 つだけ。
+`Script::prelude_lines` は既定 `0` だが、これは「調整値の既定」ではなく**「前置きは無い」という
+事実の綴り**であり、値はゲームが `Program::prelude_lines` から渡す（分類の (b) にすら当たらない —
+rubevy が選んだ数ではない）。この表は増えない。
+
 ---
 
 ## 0. 読み方

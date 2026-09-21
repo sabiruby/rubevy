@@ -397,3 +397,120 @@ prelude 側の行を `("prelude.rb", 120)` のように返す道も考えたが�
 `grep -rn 'ScriptEnded\s*{'` を rubevy_games に対して回して、**`..` なしで分解している所は
 1 つも無い**ことを確かめた（読んでいるのは `e.entity` / `e.status` / `e.value` だけ）。
 `Script { … }` の構造体リテラルも 0 件。
+
+---
+
+## 5. H3: docs と、ブラウザで動くことの確認
+
+### 5.1 書いたもの
+
+* `docs/host-api.md` に 2 節。`answer_in_tick` の次に
+  **「Waiting for an action that takes frames (`hold_requests`, `Held`)」**（3 つ目の答え方として
+  `answer_with`・`answer_in_tick` と並ぶ位置）、`Program` の節の中に
+  **「Where a script stopped (`ScriptEnded::at`)」**（prelude の行数を引く話の続きだから）。
+* `docs/README.md` の目次 3 か所（`host-api.md` の説明、計画書の行から「案・著者待ち」を外す、
+  worklog の 1 行）。
+* `CHANGELOG.md` の Unreleased に 2 件。
+* `docs/numbers.md` に「**H1・H2 が足した数は 1 つも無い**」の段落。上限も閾値も置いていない
+  （待てる問いの数を縛るのは既にある `budget`）。`Script::prelude_lines` の既定 0 は
+  「調整値の既定」ではなく「前置きは無い」という事実の綴りなので、表に載せる数ではない。
+* 計画書 §4 の状況を 4 段階とも埋めた。
+
+**版は上げていない**（公開は著者）。上げるとしたら `0.0.1 → 0.1.0`：公開 API に型・trait・
+フィールドが増えており、`Script` と `ScriptEnded` の**フィールドが増えている**。crates.io に
+出ているのは 0.0.1 だけで、1.0 未満では左端の非ゼロが上がるのが破壊的変更の綴りなので、
+厳密には 0.1.0。ただし `_m` が非公開なので外から構造体リテラルで作れず、`..` なしの分解も
+games には 1 つも無いので、**実際に壊れる利用者はいない**。
+
+### 5.2 games を建て直しての確認（rubevy_games には 1 バイトも書いていない）
+
+`git archive HEAD`（`6822b06`、作業ツリーはきれい）をスクラッチパッドに出し、コピーの
+`Cargo.toml` の末尾に
+
+```toml
+[patch."https://github.com/sabiruby/rubevy"]
+rubevy = { path = "/home/kishima/book/kishima/rubevy-wt-held" }
+rubevy-build = { path = "/home/kishima/book/kishima/rubevy-wt-held/rubevy-build" }
+```
+
+を足して、別の `CARGO_TARGET_DIR` で建てた。
+
+| 確認 | 結果 |
+|---|---|
+| `cargo check --workspace --all-targets` | 通る。**error 0・warning 0**。3 つのゲームを 1 つずつ `-p` で建て直しても同じ（= このブランチの rubevy で games がそのまま建つ、API を壊していない） |
+| `web/build.sh garden`（`PATH` に binaryen 132、`SABIRUBY_PLAYGROUND` は隣の checkout） | 建つ。`garden/game_bg.wasm` 36,013,386 B |
+| Playwright（`~/.cache/ms-playwright` の Chromium 1243、`--use-angle=swiftshader --enable-unsafe-swiftshader`、`waitUntil:'commit'`、1280×720、120 s、サーバは 8091） | `?selftest` **48 行・FAIL 0**、`docs/verification/selftest-lines.md` の「Garden, a browser」と **diff 空**、**pageerror 0・requestfailed 0** |
+| `FACTORY_SELFTEST=1 cargo run -p factory -- --headless 30` | **19 行・FAIL 0**、一覧と diff 空 |
+| `GARDEN_SELFTEST=1 … --headless 90` | **13 行・FAIL 0**、diff 空 |
+| `SABIBOTS_SELFTEST=1 … --headless 25` | **4 行・FAIL 0**、diff 空 |
+
+`std::time::Instant`・スレッド・`std::fs` は 1 つも足していない（`tests/no_wasm_unsupported.rs`
+も通っている）。
+
+### 5.3 rubevy 側の確認
+
+```
+$ cargo build --all-targets                        # 警告 0
+$ cargo test                                       # 207 passed / 0 failed（着手前 180）
+$ cargo clippy --workspace --all-targets           # 常設の 2 件だけ
+$ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features   # 警告 0
+$ git diff main -- '*.rs' | grep '^+' | grep -c unsafe            # 0
+```
+
+**この repo に CI は無い**（`git ls-files` に `.github/` が 1 件も無い）ので、`cargo doc` の
+フラグは「docs.rs 向けに rustdoc の警告を 0 にした」という P1 の記録
+（`docs/worklog/2026-09-18-crates-io.md`）に合わせて `-D warnings` を自分で付けた。
+
+`cargo test` を通しで 2 回まわす間に `tests/restart_burst.rs` が**1 回だけ**落ちた
+（`frame 1 after the burst ran nothing for the script nobody touched: 1252 instructions before
+the frame, 1252 after`）。単独で 3 回、通しでさらに 2 回まわして再現せず、触っている所とも
+関係が無い（`restart_burst` は `Rubevy.ask` を 1 つも使わない）。時間に依るテストが混んだ
+機械で落ちた例は `docs/worklog/2026-09-18-wasm-instant.md` の `tests/pause.rs` にもある。
+**隠さずに書いておく。**
+
+---
+
+## 6. 気づいた点
+
+仕事の範囲の外で気づいたことを、直さずに書く。
+
+1. **`ScriptTask` を外すだけではスクリプトは止まらない。** `ScriptTask` の rustdoc は
+   「Removing it (or despawning the entity) stops the task」、`replace_script` の rustdoc は
+   「To **stop** a script instead of replacing it, remove its `ScriptTask` or despawn the entity;
+   there is nothing else to do」と書いているが、`Script` が残っていれば `start_scripts` が
+   次のフレームで**走らせ直す**（`PendingScripts` は `Without<ScriptTask<M>>,
+   Without<ScriptDone<M>>`）。止まるのはタスクであってスクリプトではない。
+   テストを書いていて踏んだ（`tests/held.rs` の `a_script_stopped_by_hand_is_swept` は
+   `Script` も外している）。**属する先**: rubevy（文書と実物のずれ。`src/lib.rs` の
+   `ScriptTask` 215 行あたりと `replace_script` 475 行あたり）。
+2. **答えずに捨てた `Request` はキューの登録を漏らす。** `Rubevy.ask` のネイティブが
+   `gc_register(queue)` し、外すのは `push_answer` だけなので、ゲームが `Request` を捨てると
+   VM の寿命ぶん残る。今の Factory の `Arms::forget` がこれである（`Held` に移せば消える）。
+   `Request` の rustdoc は「持ち続けてよい」と言っているが「捨ててよい」とは言っていない —
+   **捨てるときにどうすればよいかを言う口が無い**（`ScriptWorld::forget(&Request)` のような）。
+   `Held` を使わない利用者には残る穴である。**属する先**: rubevy（汎用の口）。
+3. **`Entity::try_from_bits(u64::MAX)` が `Some` を返す。** エンティティを持たないタスクの
+   問いは `HostCommand::Ask { entity: u64::MAX, … }` になり、`entity_from_bits` が
+   `Some(<存在しないエンティティ>)` を返すので、`Request::entity` は `None` ではなく
+   「存在しないエンティティ」になる。`Request::entity` の rustdoc は
+   「The entity whose script asked, **where it has one**」と書いており、`None` が来ると
+   読める。sabibots はたまたま `commands.get_entity(e).is_err()` で弾いており、garden は
+   `request.entity` を索引に使うだけなので当たらない。**属する先**: rubevy（バグ寄り。
+   `src/lib.rs` の `drain_commands`、`entity: u64::MAX` の綴りは `install_host_api` の
+   `current_entity` 側）。
+4. **捨てた問いのキューを `close` しない判断は著者に出す価値がある**（§3.1）。`unsubscribe` は
+   購読のキューを閉じて「誰も読まないキューで待つタスク」を終わらせているのに、`Rubevy.ask` の
+   キューは閉じない。スクリプト本体は終了させられるので実害が出るのは `Task.new` の子タスクだけ
+   だが、非対称である。**属する先**: rubevy（著者判断）。
+5. **`ScriptStats::location` / `frames` も `prelude_lines` を知らない。** H2 で `Script` が
+   `prelude_lines` を持つようになったので、`ScriptWorld::stats` も著者の行を返せる。
+   今は Battle（`update_hud`）と `rubevy-egui`（`VmInspector::fill`）がそれぞれ引いている。
+   H2 の範囲外なので触っていない。**属する先**: rubevy（次の段階の候補）。
+6. **`docs/README.md` の「Working on this repository」が言う常設 clippy 警告は 2 件で、
+   足すと 3 件目になる。** 今回 2 回「うっかり 3 件目を作って `type` に切り出す」をやった
+   （`drain_commands` の 2 つの Query と、テストの `Vec<(…)>`）。**この文が効いている**という
+   記録として書いておく。**属する先**: 記録のみ。
+7. **`examples/how_many_scripts` は `Held` を測らない。** 「登録しなければ費用 0」は測ったが、
+   **登録して N 台が待っているときの費用**は測っていない（掃きが毎フレーム待っている台数ぶん
+   まわる）。Factory の台数（数百）では問題にならないはずだが、数値は無い。F4 が「納品まで待つ」
+   で台数を増やすなら、`how_many_scripts` に held の行を足すのが筋。**属する先**: 計測／次の段階。

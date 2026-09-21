@@ -397,6 +397,91 @@ something needs it. An argument that is a Hash or an Array can be seen for what 
   registering `"garden.nearest"`; the Ruby side does not change.
 * What the closure costs comes out of the scripts' own frame, since it runs in the middle of it.
 
+## Waiting for an action that takes frames (`hold_requests`, `Held`)
+
+A third kind of question is one whose answer is **something happening**: `walk_to 8, 0` that does
+not come back until the walking is over, `move` that swings an arm and answers whether it put the
+thing down, `deliver` that answers when the lorry arrives. The road for it has always been there —
+keep the `Request` and answer it on a later frame — and what every game then wrote for itself was
+the same two things: an index from its own idea of a thing to the request that is waiting
+(rubevy_games' Factory keeps a `HashMap<Tile, Request>`), and the tidying up for every way the
+waiting can end badly.
+
+`App::hold_requests` puts the request where the index already is — on the entity whose script
+asked:
+
+```rust
+use rubevy::{Held, HoldRequests};
+
+app.add_plugins(RubevyPlugin::default())
+    .hold_requests("walk_to")                       // a second VM: hold_requests_for::<Mods>(…)
+    .add_systems(Update, (start_walking, finish_walking).in_set(RubevySet::Answer));
+
+/// A question has just arrived: start the action.
+fn start_walking(mut commands: Commands, asked: Query<(Entity, &Held), Added<Held>>) {
+    for (entity, held) in &asked {
+        let Some(r) = held.waiting().iter().find(|r| r.kind == "walk_to") else { continue };
+        commands.entity(entity).insert(Walking { to: Vec2::new(r.num_or(0, 0.0) as f32, …) });
+    }
+}
+
+/// The action is over: answer, and the script's next line runs on the next frame.
+fn finish_walking(mut scripts: ResMut<ScriptWorld>, mut arrived: Query<(&Where, &mut Held)>) {
+    for (here, mut held) in &mut arrived {
+        held.answer(&mut scripts, "walk_to", Answer::Bool(true));
+    }
+}
+```
+
+A registered kind does not come out of `take_requests` at all: it arrives as a `Held` component in
+`RubevySet::Tick`, so a system in `RubevySet::Answer` sees it on `Added<Held>` on the frame the
+script asked. `examples/walk_to.rs` is the whole of the above, running.
+
+**What is in it.** Every held question this entity's scripts are waiting on, oldest first. It is a
+list and not one question per kind, because one entity can wait on the same kind twice: a script's
+`Task.new` children and its subscription handlers all carry the same entity. `Held::answer` and
+`Held::take` therefore take the one that has waited longest.
+
+**`Added` and `RemovedComponents` are the two edges.** The component goes on when the first
+question arrives and comes off as soon as the last one is answered — including when the script
+asks again at once, which is what `loop { move }` does: rubevy takes it off and puts it back, so
+`Added<Held>` fires once for every question an entity that waits on one thing at a time asks. An
+entity that may be waiting on several at once is the case `Added` cannot carry (the second
+question arrives at a component that is already there); read `Changed<Held>` and `Held::waiting()`
+instead.
+
+**Who tidies up**, which is the half this exists for. A request nobody will ever answer is a task
+parked for the life of the VM and an object the collector has been told to keep, and every way the
+waiting can end takes the requests with it:
+
+| what happened | what takes the requests |
+|---|---|
+| the game answered the last one | the next tick takes the empty `Held` off |
+| the entity was despawned | Bevy, with the component |
+| `replace_script` | it removes `Held` beside `ScriptTask` |
+| the script ran to its end, raised, or overran | the tick, where it sends `ScriptEnded` |
+| the game removed `ScriptTask` by hand | the next tick, which sweeps a `Held` with no live script |
+| the VM is paused (`budget = 0`) | nothing: what is waiting goes on waiting |
+
+**A held kind still reaches `take_requests` where there is nothing to wait on**: a question from a
+task with no entity of its own, and one asked in the very tick its script ended in. Go on answering
+the kinds your system does not know rather than skipping them — every question must be answered by
+somebody, or the task that asked it is parked for ever.
+
+**What cannot be held**: the kinds rubevy answers itself, and the kinds the game registered with
+`answer_in_tick`. Both are taken off the VM's queue before this sorting happens, so both are
+answered where they were; `hold_requests` says so in the log rather than quietly doing nothing.
+
+**A game that registers nothing pays nothing.** No system is added — the holding and the sweeping
+are two short pieces of `drain_commands`, which already had the `Commands` and the questions — and
+with no kinds registered the sweep's query is empty and the sorting is one `is_empty()`. Measured
+against main with `examples/how_many_scripts`, six alternating runs in both directions: the spread
+within each version (1.4 ms of tick) is larger than the difference between them (0.1 ms).
+
+**A question that is waiting is not saved**, for the reason the middle of a task is not: a game's
+scripts have to be startable from the top. Where the *action* has got to — where the arm is, what
+it is carrying — is the game's own state and saves as it always did.
+
 ## Components by name
 
 A script reads a component as a Hash of its fields and writes one back by naming the fields it
@@ -1655,6 +1740,56 @@ Three things come back (`tests/source.rs` has each, with the real compiler's rea
 `prelude_lines` is counted off the text that really went in front, so it is right whether or not
 the prelude ended with a newline of its own, and it is the same number a panel showing a script's
 frames subtracts from the line the VM reports (rubevy_games' `VmInspector::fill`).
+
+### Where a script stopped (`ScriptEnded::at`)
+
+The third thing a game of this kind wants is the line a script *stopped* on, and that one is not
+about the compiler at all. Hand the number on to the script and the ending says it:
+
+```rust
+commands.spawn(
+    Script::new(compiled).with_name(&program.name).with_prelude_lines(program.prelude_lines),
+);
+
+fn watch_endings(mut ended: MessageReader<ScriptEnded>) {
+    for end in ended.read() {
+        match &end.at {
+            Some((file, line)) => error!("{file}:{line}: {}", end.value),
+            None => error!("{}", end.value),
+        }
+    }
+}
+```
+
+`at` is the innermost frame of the exception's backtrace that is **past the prelude**, with the
+line already in the author's numbers — the same line-drawing `in_the_authors_lines` makes for a
+compiler's message. A script that raises inside a method the prelude defines is reported at the
+line of its own file that called it, because that is the line its author can do something about.
+
+It is a file and a line rather than one `"file:line"` string, as `ScriptStats::location` is: a
+panel that opens the file at the line wants the number, and `format!("{file}:{line}")` is the one
+line the other way round.
+
+**Why rubevy can do this and a game could not.** A task that has ended keeps no frames —
+`ScriptWorld::stats` answers `frames: []` and `location: None` at the very moment the ending
+arrives — so the games worked the place out in Ruby, in a `rescue` at the bottom of their own
+prelude where the exception still had a backtrace, and left it on the task in an instance variable
+for the host to read back (about thirty lines across two files in Factory). The **exception**
+keeps its frames, though: SabiRuby stores them on the object when it is raised and builds the
+strings when somebody asks. So the tick asks, once, for a script that failed. The case the Ruby
+road could not reach comes free with it: a `Task::Overrun` is an `Exception` and not a
+`StandardError`, so no `rescue => e` ever saw one, and an arm cut off inside a `sort` used to say
+`inserter.rb:?`.
+
+`None` is four things and one answer: the script ran to its end (what it ended with is a value,
+not an exception), it never started (a `.mrb` that would not load), the program carries no debug
+info (the default — see above; a game that wants this compiles with `debug_info: true`), or every
+frame is inside the prelude (the DSL raised before the author's file was reached at all —
+`run_robot` finding no robot defined). In the last case what went wrong is still in `value`; what
+is not there is a line of the author's to point at.
+
+`Script::prelude_lines` defaults to `0`, which is "the program is the author's file" — a game
+whose scripts are plain `.mrb` files says nothing and gets the line as it is.
 
 ## `require` out of the binary (`EmbeddedHost`, `rubevy-build`)
 
