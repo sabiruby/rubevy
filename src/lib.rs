@@ -158,6 +158,28 @@ pub struct Script<M = ()> {
     pub priority: u8,
     /// Shown in logs and answered by `Task#name`.
     pub name: Option<String>,
+    /// **How many lines stand in front of the author's own first line** — a prelude the game put
+    /// there ([`Program::prelude_lines`]), and `0`, the default, where the program *is* the
+    /// author's file.
+    ///
+    /// It is the one thing [`Program`] knows that the running script did not, and it is here so
+    /// that [`ScriptEnded::at`] can say where a script stopped **in the lines the author can
+    /// see**. Without it rubevy would report a line of the compiled program, which is the very
+    /// mistake `src/source.rs` was written against: one of the sample games reported line 600 for
+    /// what its author had written on line 118.
+    ///
+    /// A game that builds its scripts with [`Program`] passes it on in the same breath:
+    ///
+    /// ```no_run
+    /// # use bevy::prelude::*;
+    /// # use rubevy::{MrbAsset, Program, Script};
+    /// # fn give_it_a_mind(commands: &mut Commands, compiled: Handle<MrbAsset>, program: &Program) {
+    /// commands.spawn(
+    ///     Script::new(compiled).with_name(&program.name).with_prelude_lines(program.prelude_lines),
+    /// );
+    /// # }
+    /// ```
+    pub prelude_lines: u32,
     /// The name tag, which is a type and never a value. `fn() -> M` rather than `M` so that the
     /// component is `Send + Sync` whatever the tag is (see the crate's `docs/plans`).
     _m: PhantomData<fn() -> M>,
@@ -177,7 +199,7 @@ impl Script<()> {
 impl<M: 'static> Script<M> {
     /// A script of the VM named `M`: `Script::<Mods>::for_vm(handle)`.
     pub fn for_vm(source: Handle<MrbAsset>) -> Script<M> {
-        Script { source, priority: 128, name: None, _m: PhantomData }
+        Script { source, priority: 128, name: None, prelude_lines: 0, _m: PhantomData }
     }
     pub fn with_priority(mut self, priority: u8) -> Self {
         self.priority = priority;
@@ -185,6 +207,11 @@ impl<M: 'static> Script<M> {
     }
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
+        self
+    }
+    /// [`Script::prelude_lines`]: `Script::new(h).with_prelude_lines(program.prelude_lines)`.
+    pub fn with_prelude_lines(mut self, lines: u32) -> Self {
+        self.prelude_lines = lines;
         self
     }
 }
@@ -195,6 +222,7 @@ impl<M> std::fmt::Debug for Script<M> {
             .field("source", &self.source)
             .field("priority", &self.priority)
             .field("name", &self.name)
+            .field("prelude_lines", &self.prelude_lines)
             .finish()
     }
 }
@@ -205,6 +233,7 @@ impl<M> Clone for Script<M> {
             source: self.source.clone(),
             priority: self.priority,
             name: self.name.clone(),
+            prelude_lines: self.prelude_lines,
             _m: PhantomData,
         }
     }
@@ -474,11 +503,16 @@ struct ScriptStartFailed<M = ()> {
 /// taken before the swap — and no new one is asked (`tests/replace.rs`). To **stop** a script
 /// instead of replacing it, remove its [`ScriptTask`] or despawn the entity; there is nothing
 /// else to do.
+///
+/// A question of a **held** kind that the old script was waiting on goes with it: [`Held`] is
+/// taken off here, so the new script does not arrive at an entity that still looks as if it were
+/// waiting for something, and the queues the old questions were parked on are let go of.
 pub fn replace_script<M: 'static>(commands: &mut Commands, entity: Entity, script: Script<M>) {
     commands
         .entity(entity)
         .remove::<ScriptTask<M>>()
         .remove::<ScriptDone<M>>()
+        .remove::<Held<M>>()
         .insert(script);
 }
 
@@ -503,6 +537,40 @@ pub struct ScriptEnded<M = ()> {
     pub entity: Entity,
     pub status: ScriptStatus,
     pub value: String,
+    /// **Where it stopped, in the lines the author can see** — the file the program was compiled
+    /// under and the line in it, e.g. `("inserter.rb", 27)`.
+    ///
+    /// It is the innermost frame of the exception's backtrace that is **past the prelude**
+    /// ([`Script::prelude_lines`]), which is the line the games used to work out for themselves:
+    /// a script that raises inside a method the prelude defines is reported at the line of its
+    /// *own* file that called it, because that is the line its author can do something about.
+    /// The same line-drawing [`in_the_authors_lines`] makes for a compiler's message, made here
+    /// for a backtrace.
+    ///
+    /// `None` where there is no such line, which is four different things and one answer:
+    ///
+    /// * the script ran to its end ([`ScriptStatus::Finished`]) — there is no backtrace, because
+    ///   what it ended with is a value and not an exception;
+    /// * it never started (a `.mrb` that would not load) — it has no lines at all;
+    /// * the program carries **no debug information**, which is the default of both compilers
+    ///   rubevy's callers use (`sabiruby_compiler::Options::debug_info`). A backtrace of a
+    ///   program built without a line table is empty, and a game that wants this is a game that
+    ///   compiles its players' scripts with `debug_info: true`;
+    /// * every frame is inside the prelude — the DSL raised before the author's file was reached
+    ///   at all (`run_inserter` finding no inserter defined). What went wrong is in
+    ///   [`ScriptEnded::value`]; what is not there is a line of the author's to point at.
+    ///
+    /// **A `Task::Overrun` has one.** A script cut off inside a native that cannot be switched
+    /// out is an `Exception` and not a `StandardError`, so a `rescue => e` in the game's own
+    /// prelude never saw it and Factory reported `inserter.rb:?` for it; the backtrace is there
+    /// all the same, and this reads it.
+    ///
+    /// It is a file and a line rather than one `"file:line"` string because that is the shape the
+    /// crate's other place is ([`ScriptStats::location`], [`ScriptStats::frames`]), because a
+    /// panel that opens the file at the line wants the number, and because a game that wants the
+    /// string writes `format!("{file}:{line}")` while one that wants the number back out of a
+    /// string writes the parser this type exists to save it.
+    pub at: Option<(String, u32)>,
     _m: PhantomData<fn() -> M>,
 }
 
@@ -512,6 +580,7 @@ impl<M> std::fmt::Debug for ScriptEnded<M> {
             .field("entity", &self.entity)
             .field("status", &self.status)
             .field("value", &self.value)
+            .field("at", &self.at)
             .finish()
     }
 }
@@ -522,9 +591,54 @@ impl<M> Clone for ScriptEnded<M> {
             entity: self.entity,
             status: self.status,
             value: self.value.clone(),
+            at: self.at.clone(),
             _m: PhantomData,
         }
     }
+}
+
+/// The author's own line in an exception's backtrace, innermost first — what [`ScriptEnded::at`]
+/// carries.
+///
+/// A task that has ended keeps no frames (`ScriptWorld::stats` answers `frames: []` and
+/// `location: None` at the very moment the ending is sent, measured 2026-09-21), but the
+/// **exception** it ended with keeps its own: SabiRuby stores the frames on the object when it is
+/// raised and builds the strings when somebody asks (`Vm::keep_backtrace`). So this asks, once,
+/// for a script that failed.
+///
+/// A frame is `file:line` or `file:line:in method`, so the place is what is left when a trailing
+/// `:in method` is taken off and the last colon is split on — reading it from the *right* rather
+/// than looking for the file's name, which may itself hold colons.
+fn authors_line(vm: &mut Vm, value: Value, prelude_lines: u32) -> Option<(String, u32)> {
+    let backtrace = vm.intern("backtrace");
+    let frames = vm.funcall(value, backtrace, &[], Value::Nil).ok()?;
+    for frame in vm.ary_vals(frames)? {
+        let Some(text) = vm.str_bytes(frame).map(|b| String::from_utf8_lossy(b).into_owned())
+        else {
+            continue;
+        };
+        let Some((file, line)) = frame_place(&text) else { continue };
+        // a frame of an irep the build kept no line table for says `:0`, which is not a place
+        if line == 0 {
+            continue;
+        }
+        // inside the prelude: not the author's file. Go on out through the frames — the line
+        // that called the prelude's method is the one the author can see
+        if line > prelude_lines {
+            return Some((file.to_string(), line - prelude_lines));
+        }
+    }
+    None
+}
+
+/// The file and the line of one backtrace frame ([`authors_line`] says how it is read).
+fn frame_place(frame: &str) -> Option<(&str, u32)> {
+    let head = match frame.rfind(":in ") {
+        Some(at) => &frame[..at],
+        None => frame,
+    };
+    let (file, line) = head.rsplit_once(':')?;
+    Some((file, line.parse().ok()?))
 }
 
 /// What a script asked the host to do. A native cannot touch the Bevy world,
@@ -751,6 +865,10 @@ impl Arg {
 /// [`ScriptWorld::take_requests`] in a system of your own, work out the answer, and give it back
 /// with [`ScriptWorld::answer`] — this frame or any later one. The script's task is parked
 /// meanwhile, so it costs nothing and the other scripts keep running.
+///
+/// **Where a question whose answer takes frames waits**: a kind registered with
+/// [`HoldRequests::hold_requests`] is put on the asking entity as a [`Held`] component instead of
+/// coming out of `take_requests`, so the index is a `Query` and rubevy does the tidying up.
 #[derive(Debug, Clone)]
 pub struct Request {
     /// The entity whose script asked, where it has one.
@@ -856,6 +974,254 @@ impl Request {
     pub fn arg_as<T: FromRuby>(&self, vm: &mut Vm, i: usize) -> Option<T> {
         let v = self.value(i)?;
         T::from_ruby(vm, v).ok()
+    }
+}
+
+/// **The questions this entity's scripts are waiting on**, for the kinds an app registered with
+/// [`HoldRequests::hold_requests`].
+///
+/// It is the place a request whose answer is *an action that takes frames* lives while the action
+/// happens — an arm swinging, a lorry driving, a door opening. Without it every game writes the
+/// same two things: a table from its own idea of a thing to the [`Request`] that is waiting
+/// (`HashMap<Tile, Request>`), and the tidying up for the four ways the waiting can end badly.
+/// Here the table is the ECS — a component on the entity that asked — so the index is a `Query`,
+/// and the tidying up is rubevy's (below).
+///
+/// ```no_run
+/// # use bevy::prelude::*;
+/// # use rubevy::{Answer, Held, HoldRequests, RubevyPlugin, RubevySet, ScriptWorld};
+/// # #[derive(Component)] struct Arm;
+/// # #[derive(Resource, Default)] struct Arrived(Vec<(Entity, bool)>);
+/// fn build(app: &mut App) {
+///     app.add_plugins(RubevyPlugin::default())
+///         .hold_requests("factory.move")                       // this kind waits on the entity
+///         .add_systems(Update, (start_swinging, finish_swinging).in_set(RubevySet::Answer));
+/// }
+///
+/// /// A question that has just arrived: start the action it asks for.
+/// fn start_swinging(asked: Query<Entity, Added<Held>>) {
+///     for _arm in &asked { /* set the thing moving */ }
+/// }
+///
+/// /// The action is over: answer, and the script's next line runs on the next frame.
+/// fn finish_swinging(
+///     mut arms: Query<&mut Held>,
+///     mut scripts: ResMut<ScriptWorld>,
+///     mut arrived: ResMut<Arrived>,
+/// ) {
+///     for (entity, placed) in arrived.0.drain(..) {
+///         if let Ok(mut held) = arms.get_mut(entity) {
+///             held.answer(&mut scripts, "factory.move", Answer::Bool(placed));
+///         }
+///     }
+/// }
+/// ```
+///
+/// **What is in it.** Every question of a held kind that the scripts *of this entity* are waiting
+/// on, oldest first. It is a list and not one request per kind, because one entity can be waiting
+/// on the same kind twice: a script may make tasks of its own (`Task.new`, `Rubevy.subscribe`'s
+/// handlers), and each of them carries the same entity, so two of them may be inside `move` at
+/// once. [`Held::answer`] therefore answers **the one that has waited longest**, which is the
+/// order the VM would have woken them in.
+///
+/// **It comes and goes with the waiting.** The component is put on when the first question
+/// arrives, in [`RubevySet::Tick`], so a system in [`RubevySet::Answer`] sees it in `Added<Held>`
+/// on the frame it was asked; it is taken off again as soon as the last question in it is
+/// answered, so `RemovedComponents<Held>` is "this entity has stopped waiting". A script that
+/// asks again at once — `loop { move }`, which is the ordinary shape — is a removal *and* an
+/// addition on the same frame, so **`Added<Held>` fires once for every question** an entity that
+/// waits on one thing at a time asks.
+///
+/// An entity that may be waiting on **several** questions at once is the case `Added` cannot
+/// carry, because the second question arrives at a component that is already there: read
+/// `Changed<Held>` and [`Held::waiting`] instead, and start what has not been started. (`Changed`
+/// is also set by the answering, which goes through a `&mut Held`; a system that starts actions
+/// is looking at which of the waiting questions it has an action for anyway.)
+///
+/// **Who tidies up.** A request nobody will ever answer is a task parked for the life of the VM
+/// and a queue object the collector may not have, so every way the waiting can end takes the
+/// requests with it:
+///
+/// | what happened | what takes the requests |
+/// |---|---|
+/// | the game answered the last one | the next tick takes the empty `Held` off |
+/// | the entity was despawned | Bevy, with the component — and this type's removal hook lets the queues go |
+/// | [`replace_script`] | it removes `Held` beside [`ScriptTask`] |
+/// | the script ran to its end, raised, or overran | the tick removes it where it sends [`ScriptEnded`] |
+/// | the game removed [`ScriptTask`] by hand | the next tick, which is where a `Held` with no live script is swept |
+/// | the VM is paused (`budget = 0`) | nothing: what is waiting goes on waiting, and is answered when the game answers it |
+///
+/// The one thing that never lands here is a question with **nothing to wait for**: a task with no
+/// entity, or one whose script had already ended when the question was sorted. Those go to
+/// [`ScriptWorld::take_requests`] as they did before this component existed, and
+/// [`ScriptWorld::hold_requests`] says why.
+///
+/// **A question is not saved.** What is waiting here cannot go into a save file, for the reason
+/// the middle of a task cannot: a game's scripts have to be startable from the top. What the
+/// *action* is — where the arm is, what it is carrying — is the game's own state and saves as it
+/// always did.
+///
+/// The name tag `M` is the VM's, as on [`ScriptTask`] and for the same reason: a [`Request`]
+/// carries an `ObjId` into one VM's heap, so `Held<Mods>` and `Held` are different components and
+/// neither can be answered through the other's [`ScriptWorld`].
+///
+/// It has **no `Reflect`**: a `Request` is an `ObjId` and a `Value` of a particular VM's heap,
+/// which is not a thing a scene or an inspector can carry, and the table above says why it is not
+/// a thing a save file can carry either.
+#[derive(Component)]
+#[component(on_remove = release_held::<M>)]
+pub struct Held<M = ()> {
+    /// The requests, oldest first. Private because taking one out must go through
+    /// [`Held::take`] or [`Held::answer`]: a `Request` that leaves here is one this type has
+    /// stopped tidying up after.
+    waiting: Vec<Request>,
+    _m: PhantomData<fn() -> M>,
+}
+
+impl<M: 'static> Held<M> {
+    /// **Answers the oldest question of `kind`**, and takes it out of here. `true` where there
+    /// was one.
+    ///
+    /// It is [`ScriptWorld::answer`] with the looking-up done: the script's `Rubevy.ask` comes
+    /// back with `answer` and its task is ready again on the next tick.
+    pub fn answer(&mut self, scripts: &mut ScriptWorld<M>, kind: &str, answer: Answer) -> bool {
+        match self.take(kind) {
+            Some(request) => {
+                scripts.answer(&request, answer);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// [`Held::answer`] with the value built inside the VM ([`ScriptWorld::answer_value`]), for
+    /// an answer that is not flat — a Hash of what the action came to.
+    ///
+    /// The closure is **not** run where there is no such question waiting, and `false` says so.
+    pub fn answer_value(
+        &mut self,
+        scripts: &mut ScriptWorld<M>,
+        kind: &str,
+        build: impl FnOnce(&mut Vm) -> Value,
+    ) -> bool {
+        match self.take(kind) {
+            Some(request) => {
+                scripts.answer_value(&request, build);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Takes the oldest question of `kind` out, to answer in some other way —
+    /// [`ScriptWorld::answer_with`] (a future), or by keeping it a while longer.
+    ///
+    /// **What comes out is yours to answer.** Once a [`Request`] has left this component nothing
+    /// tidies up after it: the table on [`Held`] is about what is still in here.
+    pub fn take(&mut self, kind: &str) -> Option<Request> {
+        let at = self.waiting.iter().position(|r| r.kind == kind)?;
+        Some(self.waiting.remove(at))
+    }
+
+    /// What this entity is waiting on, oldest first, to read without answering — the kinds, the
+    /// arguments a question carried, how many there are.
+    pub fn waiting(&self) -> &[Request] {
+        &self.waiting
+    }
+
+    /// Whether a question of `kind` is waiting.
+    pub fn has(&self, kind: &str) -> bool {
+        self.waiting.iter().any(|r| r.kind == kind)
+    }
+
+    /// How many questions are waiting, over every held kind.
+    pub fn len(&self) -> usize {
+        self.waiting.len()
+    }
+
+    /// Whether nothing is waiting. It is only ever true between the answer that emptied it and
+    /// the next tick, which takes the component off.
+    pub fn is_empty(&self) -> bool {
+        self.waiting.is_empty()
+    }
+}
+
+// as on `Script`: derived, `Debug` would ask the name tag to be `Debug` itself. There is no
+// `Clone`, on purpose — two copies of a `Request` are two chances to answer it, and answering one
+// twice pushes into a queue that has been let go of.
+impl<M> std::fmt::Debug for Held<M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Held").field("waiting", &self.waiting).finish()
+    }
+}
+
+/// Lets the collector have the queues of the questions that were still waiting, wherever a
+/// [`Held`] goes — a despawn, [`replace_script`], a script that ended, the sweep of an empty one.
+///
+/// A [`Request`]'s `queue` is registered with the collector from the moment the `Rubevy.ask`
+/// native makes it until [`ScriptWorld::answer`] pushes into it; a request that is thrown away
+/// instead never reaches that second half, and the registration would stand for the life of the
+/// VM. The `Arg::Value`s a question carried need nothing here — each is owned by a [`RootedValue`]
+/// whose `Drop` puts it on the release queue as the `Request` goes — so this is the one thing the
+/// component has to say out loud.
+fn release_held<M: 'static>(
+    mut world: bevy::ecs::world::DeferredWorld,
+    context: bevy::ecs::lifecycle::HookContext,
+) {
+    let queues: Vec<ObjId> = match world.get::<Held<M>>(context.entity) {
+        Some(held) => held.waiting.iter().map(|r| r.queue).collect(),
+        None => return,
+    };
+    if queues.is_empty() {
+        return;
+    }
+    let Some(mut scripts) = world.get_resource_mut::<ScriptWorld<M>>() else { return };
+    for queue in queues {
+        scripts.vm.gc_unregister(queue);
+    }
+}
+
+/// **Says which kinds of question wait on the entity that asked** ([`Held`]) rather than coming
+/// out of [`ScriptWorld::take_requests`].
+///
+/// ```no_run
+/// # use bevy::prelude::*;
+/// # use rubevy::{HoldRequests, RubevyPlugin};
+/// # struct Mods;
+/// # fn build(app: &mut App) {
+/// app.add_plugins(RubevyPlugin::default())
+///     .hold_requests("factory.move")              // the app's first VM
+///     .hold_requests_for::<Mods>("mods.wait");    // the VM named `Mods`
+/// # }
+/// ```
+///
+/// It is written in the plugin chain because that is where a game says what its VM is for, beside
+/// [`ScriptWorld::answer_in_tick`]'s `Startup` system; both of them end in the same place, and a
+/// game that decides later (a level that brings a kind of machine with it) calls
+/// [`ScriptWorld::hold_requests`] on the resource instead.
+pub trait HoldRequests {
+    /// The kinds of the app's **first** VM that wait on the entity that asked.
+    fn hold_requests(&mut self, kind: impl Into<String>) -> &mut Self;
+    /// The same for the VM named `M`: `hold_requests_for::<Mods>("mods.wait")`.
+    fn hold_requests_for<M: 'static>(&mut self, kind: impl Into<String>) -> &mut Self;
+}
+
+impl HoldRequests for App {
+    fn hold_requests(&mut self, kind: impl Into<String>) -> &mut Self {
+        self.hold_requests_for::<()>(kind)
+    }
+
+    fn hold_requests_for<M: 'static>(&mut self, kind: impl Into<String>) -> &mut Self {
+        match self.world_mut().get_resource_mut::<ScriptWorld<M>>() {
+            Some(mut scripts) => scripts.hold_requests(kind),
+            // the resource is made by `RubevyPlugin::build`, so this is a chain with the plugin
+            // left out or written after this call
+            None => error!(
+                "rubevy: hold_requests before the plugin of that VM was added; {} will not be held",
+                kind.into()
+            ),
+        }
+        self
     }
 }
 
@@ -1069,6 +1435,12 @@ pub struct ScriptWorld<M = ()> {
     /// of the VM, never becomes a [`Request`] in [`ScriptWorld::requests`], and so is never seen
     /// by [`ScriptWorld::take_requests`].
     in_tick_answerers: std::collections::HashMap<String, InTickAnswerer>,
+    /// The kinds that wait on the entity that asked ([`Held`], [`ScriptWorld::hold_requests`]).
+    ///
+    /// It is a set of names and nothing else, so the whole of what holding costs an app that
+    /// registered nothing is the `is_empty()` [`drain_commands`] asks it before it looks at a
+    /// question's kind at all.
+    held_kinds: std::collections::HashSet<String>,
     /// The tasks that asked for the next frame (`Rubevy.next_frame`, [`NEXT_FRAME_KIND`]) and
     /// are waiting for it, oldest first.
     ///
@@ -1266,6 +1638,7 @@ impl<M: 'static> ScriptWorld<M> {
             requests: Vec::new(),
             reflect_requests: Vec::new(),
             in_tick_answerers: std::collections::HashMap::new(),
+            held_kinds: std::collections::HashSet::new(),
             in_tick_requests: Vec::new(),
             next_frame_waiters: Vec::new(),
             reflect_cache: std::collections::HashMap::new(),
@@ -1604,6 +1977,46 @@ impl<M: 'static> ScriptWorld<M> {
         if self.in_tick_answerers.insert(kind.clone(), f).is_some() {
             warn!("rubevy: {kind} had an in-tick answerer already; the later one answers it now");
         }
+    }
+
+    /// **Makes `kind` a question that waits on the entity that asked it** — a [`Held`] component
+    /// — instead of coming out of [`ScriptWorld::take_requests`].
+    ///
+    /// [`HoldRequests::hold_requests`] is the spelling for the plugin chain, which is where an
+    /// app that knows its kinds up front says this; this is the same thing on the resource, for a
+    /// game that learns of a kind later (a level, a mod, a machine the player has just built).
+    /// Registering the same kind twice is the same as registering it once.
+    ///
+    /// **A held kind still reaches `take_requests` where there is nothing to wait on.** A
+    /// question is held on the entity whose script asked it, so one asked by a task with no
+    /// entity — a task the host spawned outside a [`Script`] — and one asked in the very tick its
+    /// script ended in — a task it made with `Task.new` can ask in the round the script raises in
+    /// — go to the game's own answering system, the way they did before there was a [`Held`]. An
+    /// answering system that holds some of its kinds should therefore go on answering the ones it
+    /// does not know rather than skipping them: every question must be answered by somebody, or
+    /// the task that asked it is parked for the life of the VM.
+    ///
+    /// The kinds rubevy answers itself (`RESERVED_KINDS`) cannot be held, and neither can one the
+    /// game registered with [`ScriptWorld::answer_in_tick`]: both are taken off the VM's queue
+    /// before the sorting that holding happens in, so a kind in either of those is answered there
+    /// and never waits. Both are said in the log rather than quietly done nothing about.
+    pub fn hold_requests(&mut self, kind: impl Into<String>) {
+        let kind = kind.into();
+        if RESERVED_KINDS.contains(&kind.as_str()) {
+            warn!("rubevy: {kind} is one of rubevy's own kinds and is answered inside the tick; it will not be held");
+            return;
+        }
+        if self.in_tick_answerers.contains_key(&kind) {
+            warn!("rubevy: {kind} has an in-tick answerer, which answers it inside the tick; it will not be held");
+            return;
+        }
+        self.held_kinds.insert(kind);
+    }
+
+    /// How many kinds wait on the entity that asked ([`ScriptWorld::hold_requests`]), for a test
+    /// or a panel that shows what a VM is set up to do.
+    pub fn held_kinds(&self) -> usize {
+        self.held_kinds.len()
     }
 
     /// Lets the collector have the values of [`Request`]s that have been dropped
@@ -2576,7 +2989,14 @@ fn give_up<M: 'static>(
     entity: Entity,
     message: String,
 ) {
-    ended.write(ScriptEnded { entity, status: ScriptStatus::Failed, value: message, _m: PhantomData });
+    // `at` is `None`: a script that never started has no lines to have stopped on
+    ended.write(ScriptEnded {
+        entity,
+        status: ScriptStatus::Failed,
+        value: message,
+        at: None,
+        _m: PhantomData,
+    });
     commands
         .entity(entity)
         .insert((ScriptDone::<M>::for_vm(), ScriptStartFailed::<M> { _m: PhantomData }));
@@ -2635,8 +3055,19 @@ fn release_values<M: 'static>(mut world: ResMut<ScriptWorld<M>>) {
 /// still wants is spelled as a `SystemState`, which an exclusive system may take beside the
 /// world. That keeps the archetype matching from frame to frame the way the `Query` parameter
 /// did; `World::query_filtered` would build it again every frame.
-type RunningTasks<M> =
-    SystemState<Query<'static, 'static, (Entity, &'static ScriptTask<M>), Without<ScriptDone<M>>>>;
+///
+/// The [`Script`] rides along for one field of it, [`Script::prelude_lines`], which is what turns
+/// a line of the compiled program into a line of the author's file when a script ends
+/// ([`ScriptEnded::at`]). It is an `Option` because nothing stops a game from taking the `Script`
+/// off and leaving the task running.
+type RunningTasks<M> = SystemState<
+    Query<
+        'static,
+        'static,
+        (Entity, &'static ScriptTask<M>, Option<&'static Script<M>>),
+        Without<ScriptDone<M>>,
+    >,
+>;
 
 /// Moves the scheduler's clock on by the frame time, runs the ready tasks for up to the frame's
 /// budget, and answers the component reads they make **while they are still running**.
@@ -2678,9 +3109,15 @@ fn tick_scripts<M: 'static>(world: &mut World, tasks: &mut RunningTasks<M>) {
     // twice, and the sweep wants the VM anyway
     // (a read-only `Query` has nothing to validate, so the `Err` arm is unreachable; it is
     // spelled rather than unwrapped because a panic here would take the frame with it)
-    let running: Vec<(Entity, ObjId)> = tasks
+    let running: Vec<(Entity, ObjId, u32)> = tasks
         .get(world)
-        .map(|q| q.iter().map(|(entity, st)| (entity, st.task)).collect())
+        .map(|q| {
+            q.iter()
+                .map(|(entity, st, script)| {
+                    (entity, st.task, script.map_or(0, |s| s.prelude_lines))
+                })
+                .collect()
+        })
         .unwrap_or_default();
 
     world.resource_scope(|world: &mut World, mut scripts: Mut<ScriptWorld<M>>| {
@@ -2833,7 +3270,7 @@ fn tick_scripts<M: 'static>(world: &mut World, tasks: &mut RunningTasks<M>) {
     {
         let mut scripts = world.resource_mut::<ScriptWorld<M>>();
         let scripts = &mut *scripts;
-        for (entity, task) in running {
+        for (entity, task, prelude_lines) in running {
             if !scripts.vm.task_finished(task) {
                 continue;
             }
@@ -2841,7 +3278,14 @@ fn tick_scripts<M: 'static>(world: &mut World, tasks: &mut RunningTasks<M>) {
             let status =
                 if scripts.vm.is_exception(value) { ScriptStatus::Failed } else { ScriptStatus::Finished };
             let text = scripts.vm.inspect_str(value).unwrap_or_else(|_| String::from("?"));
-            finished.push(ScriptEnded { entity, status, value: text, _m: PhantomData });
+            // where it stopped, read off the exception while it still has its frames — the task
+            // itself has none left by now (`ScriptEnded::at`). Only for a script that failed: a
+            // value that ran to its end is not an exception and has no backtrace to ask for
+            let at = match status {
+                ScriptStatus::Failed => authors_line(&mut scripts.vm, value, prelude_lines),
+                ScriptStatus::Finished => None,
+            };
+            finished.push(ScriptEnded { entity, status, value: text, at, _m: PhantomData });
             scripts.vm.gc_unregister(task);
             // A script that runs to its end keeps its `ScriptTask` — that is what stops it
             // starting again — so the `on_remove` hook is not reached here. What it subscribed
@@ -2853,7 +3297,11 @@ fn tick_scripts<M: 'static>(world: &mut World, tasks: &mut RunningTasks<M>) {
         let entity = message.entity;
         world.write_message(message);
         if let Ok(mut e) = world.get_entity_mut(entity) {
-            e.insert(ScriptDone::<M>::for_vm());
+            // and whatever it was waiting on is nobody's question now: a script that has ended
+            // will never read the answer, so the `Held` goes here rather than waiting for the
+            // next tick's sweep — the frame that hears `ScriptEnded` is the frame in which the
+            // entity stops looking as if it were waiting (`Held`, the table in its rustdoc)
+            e.insert(ScriptDone::<M>::for_vm()).remove::<Held<M>>();
         }
     }
 }
@@ -2917,12 +3365,55 @@ fn deliver_answers<M: 'static>(mut world: ResMut<ScriptWorld<M>>) {
     }
 }
 
+/// The entities that are waiting on a held question, with the two things that say whether the
+/// waiting still means anything: is there a task, and has it ended. It is a `type` for the reason
+/// [`PendingScripts`] is one — a query of four things is a mouthful in a signature — and it is
+/// what [`drain_commands`] sweeps.
+type HeldWaiters<'w, 's, M> = Query<
+    'w,
+    's,
+    (Entity, &'static mut Held<M>, Has<ScriptTask<M>>, Has<ScriptDone<M>>),
+>;
+
+/// The entities of this VM whose script is running right now: a filter and nothing read, which is
+/// all [`drain_commands`] needs to know whether a question has anybody to wait for.
+type LiveScripts<'w, 's, M> =
+    Query<'w, 's, (), (With<ScriptTask<M>>, Without<ScriptDone<M>>)>;
+
 /// Carries out what the scripts asked for this frame.
+///
+/// It is also where the questions of a held kind ([`Held`]) are put on the entity that asked, and
+/// where a [`Held`] that has stopped meaning anything is taken off. Both are here rather than in
+/// systems of their own so that an app which registered no held kinds pays **nothing at all** for
+/// them: this system already has the `Commands` and the questions, the sweep's query is empty
+/// while nothing is held, and the sorting is one `is_empty()` on a set of names.
 fn drain_commands<M: 'static>(
     mut commands: Commands,
     mut transforms: Query<&mut Transform>,
     mut world: ResMut<ScriptWorld<M>>,
+    mut holders: HeldWaiters<M>,
+    live: LiveScripts<M>,
 ) {
+    // **The sweep, before this frame's questions are sorted.** A `Held` is taken off where it
+    // has stopped saying anything true: the game answered the last question in it, or the script
+    // that asked is not running any more (its `ScriptTask` was removed by hand — `replace_script`
+    // and a script that ended take it off where they happen, so those two do not wait for this).
+    // Taking the component off rather than leaving it empty is what makes `Added<Held>` mean
+    // "started waiting" the next time round, and what gets the queues released (`release_held`).
+    //
+    // `try_remove`, not `remove`: an entity a script despawned this frame is already on the
+    // command queue in front of this, and a removal from a despawned entity is not news.
+    let mut swept: Vec<Entity> = Vec::new();
+    for (entity, held, has_task, ended) in &holders {
+        if held.is_empty() || !has_task || ended {
+            commands.entity(entity).try_remove::<Held<M>>();
+            swept.push(entity);
+        }
+    }
+    // what this frame's questions of a held kind are waiting on, by the entity that asked.
+    // Gathered rather than inserted as they are met, because two questions of one entity in one
+    // frame must be one component and not two insertions of one (`Task.new`, subscriptions).
+    let mut to_hold: Vec<(Entity, Request)> = Vec::new();
     for c in take_commands(&mut world.vm) {
         match c {
             HostCommand::Ask { entity, kind, args, queue } => {
@@ -2946,6 +3437,21 @@ fn drain_commands<M: 'static>(
                     world.reflect_requests.push(request);
                 } else if world.in_tick_answerers.contains_key(&request.kind) {
                     world.in_tick_requests.push(request);
+                } else if !world.held_kinds.is_empty()
+                    && world.held_kinds.contains(&request.kind)
+                    && request.entity.is_some_and(|e| live.contains(e))
+                {
+                    // a kind the app said waits on the entity that asked (`Held`).
+                    //
+                    // **Only where there is a live script to wait for.** A question from a task
+                    // with no entity of its own has nowhere to wait; so has one whose script
+                    // ended in this very tick — a task the script made with `Task.new` can ask in
+                    // the round that the script itself raises in, and the ending has already been
+                    // sent by the time this runs. Both go to the game's own answering system, the
+                    // way they always did, because every question must be answered by somebody and
+                    // a `Held` on an entity with no script is one nobody would look at.
+                    let entity = request.entity.expect("just tested");
+                    to_hold.push((entity, request));
                 } else {
                     world.requests.push(request);
                 }
@@ -2976,6 +3482,39 @@ fn drain_commands<M: 'static>(
                     }
                 }
             }
+        }
+    }
+    // **The questions of a held kind, onto the entities that asked them.** An entity that is
+    // already waiting has its component added to through the query, so the order inside a `Held`
+    // is the order the questions were asked in, whether they came a frame apart or together; one
+    // that is not gets a component with everything it asked this frame in it. The insert is
+    // `try_insert` for the reason the sweep's removal is `try_remove` — a script may have
+    // despawned the very entity whose task asked.
+    if !to_hold.is_empty() {
+        let mut fresh: Vec<(Entity, Vec<Request>)> = Vec::new();
+        for (entity, request) in to_hold {
+            // An entity whose empty `Held` the sweep above has just queued a removal for asks
+            // again in the very same frame — a script answered on the last frame and back inside
+            // `move` on this one, which is the shape a `loop` of held questions has. Its request
+            // must **not** be pushed into the component that is on its way out: the removal is
+            // queued in front of the insertion, so it would take the new question with it. It
+            // goes to `fresh` instead, and the pair of commands is a removal followed by an
+            // insertion — which is what makes `Added<Held>` fire again for the new question
+            // rather than the entity looking as though it had never stopped waiting.
+            if swept.contains(&entity) {
+                // fall through to `fresh`
+            } else if let Ok((_, mut held, _, _)) = holders.get_mut(entity) {
+                held.waiting.push(request);
+                continue;
+            }
+            if let Some((_, waiting)) = fresh.iter_mut().find(|(e, _)| *e == entity) {
+                waiting.push(request);
+            } else {
+                fresh.push((entity, vec![request]));
+            }
+        }
+        for (entity, waiting) in fresh {
+            commands.entity(entity).try_insert(Held::<M> { waiting, _m: PhantomData });
         }
     }
 }

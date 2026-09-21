@@ -1,6 +1,8 @@
-# rubevy: 「終わるまで待つ動作」の口と、止まった場所を持つ `ScriptEnded` — 実装指示書（案）
+# rubevy: 「終わるまで待つ動作」の口と、止まった場所を持つ `ScriptEnded` — 実装指示書
 
-作成 2026-09-21。**状況: 案。公開 API の名前と形なので、著者が見てから着手する。**
+作成 2026-09-21。**2026-09-22 に著者が「この形で F4 の前に入れる」と承認**（名前は案のまま:
+`hold_requests` / `Held` / `ScriptEnded::at`）。実装の記録は
+`docs/worklog/2026-09-22-held-requests.md`。
 出どころは rubevy_games の 3 本目 Factory の段階 F3（インサータの Ruby）。担当が「rubevy の話」として挙げた 2 件で、記録は
 rubevy_games `docs/worklog/2026-09-21-factory-F3.md`（`move` の待ち方の 3 案の比較、気づいた点 1・2）と `docs/plans/factory-plan.md` §7 の 09-21 F3 の最初の 2 行。
 利用者の側の実物は rubevy_games `factory/src/inserters.rs` の `Arms`（`waiting: HashMap<usize, Request>` とその後始末）と
@@ -101,4 +103,10 @@ games の側（Factory の `Arms::waiting` と prelude の 30 行を消す、F4 
 
 | 段階 | 状況 |
 |---|---|
-| H0〜H3 | 未着手。**案を著者が見てから**（2026-09-21 作成） |
+| H0 | **済**（2026-09-22、ブランチ `held`）。箱庭と Battle に「request を持ち続ける」形は**無かった**（Factory だけ）。「壊れた場所を自前で拾う」形は Factory に 30 行、Battle には生きているタスクについての引き算がある。決めた 8 点は worklog §1.3 |
+| H1 | **済**（`d5bc62e`）。`hold_requests` / `hold_requests_for::<M>` / `ScriptWorld::hold_requests` / `Held<M>`、後始末は component の removal hook 1 本。`tests/held.rs` 15 本、`examples/walk_to.rs`。登録しなければ費用 0 は前後 6 巡で確認（版の中のばらつきの方が大きい） |
+| H2 | **済**（`ba5ed0e`）。`ScriptEnded::at: Option<(String, u32)>` と `Script::prelude_lines`。`tests/script_ended_at.rs` 9 本。**案と違う点**: `prelude_lines` は `Program` が持っていて rubevy は持っていなかったので `Script` に足した（worklog §4.1）。形は文字列 1 つではなく `(file, line)`（§4.2） |
+| H3 | **済**。`docs/README.md`・`docs/host-api.md`・`CHANGELOG`（Unreleased）・`docs/numbers.md`（足した数は 0）。games をコピーした木で `cargo check --workspace --all-targets` が通り、ブラウザの箱庭が 48 行・FAIL 0・pageerror 0・requestfailed 0、Factory のヘッドレスが 19 行。**版は上げていない**（公開は著者） |
+
+games の側（Factory の `Arms::waiting` と prelude の 30 行を消す、F4 の「納品まで待つ」）は
+この計画の外で、rubevy の main が push された後。

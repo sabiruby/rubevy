@@ -6,6 +6,50 @@ ones those documents carry, and nothing is estimated.
 
 ## Unreleased
 
+* **A question whose answer is an action that takes frames waits on the entity that asked it**
+  (H1 of `docs/plans/held-requests-plan.md`, `d5bc62e` —
+  `docs/worklog/2026-09-22-held-requests.md`, `docs/host-api.md`). `App::hold_requests("walk_to")`
+  says that a kind of `Rubevy.ask` is not for `ScriptWorld::take_requests` but for the entity: it
+  arrives as a `Held` component on the thing whose script asked, `Added<Held>` is where the game
+  starts the action, and `held.answer(&mut scripts, "walk_to", …)` ends it. The road was always
+  there — a `Request` may be kept and answered on any later frame — and what was missing was the
+  place to keep it: every game wrote the same index from its own idea of a thing to the request
+  that was waiting (rubevy_games' Factory keeps a `HashMap<Tile, Request>` and about twenty lines
+  around it), and the same tidying up for the six ways the waiting can end. Now the index is a
+  `Query` and the tidying up is rubevy's: answered, despawned, `replace_script`, a script that ran
+  to its end or raised or overran, a `ScriptTask` removed by hand — every one of them takes the
+  waiting questions with it and lets go of the queue objects the collector was told to keep, which
+  a request thrown away without being answered leaves standing for the life of the VM.
+  A question with nothing to wait for — a task with no entity, a script that ended in the tick it
+  asked in — goes to `take_requests` as it always did, because every question must be answered by
+  somebody. Nothing of the old API changed; a game that registers no kinds gets no new system, an
+  empty query and one `is_empty()`, and `examples/how_many_scripts` cannot see the difference (six
+  alternating runs against main in both directions: 1.4 ms of spread within each version against
+  0.1 ms between them). `examples/walk_to.rs` is a script whose `walk_to 8, 0` does not come back
+  until the walking is over, and `tests/held.rs` has the six endings one by one, each measured by
+  what the VM is still being told to keep.
+
+* **A script's ending says where it stopped** (H2, `ba5ed0e` —
+  `docs/worklog/2026-09-22-held-requests.md`, `docs/host-api.md`). `ScriptEnded::at` is the file
+  and the line of the innermost backtrace frame past the prelude, in the numbers the author of
+  that file can see: `Some(("inserter.rb", 27))`. A task that has ended keeps no frames —
+  `ScriptWorld::stats` answers `frames: []` at the very moment the ending is sent — so
+  rubevy_games' Factory put a `rescue` at the bottom of its own prelude to read
+  `error.backtrace.first` while the backtrace was still there, took the prelude's length off the
+  line and left the answer on the task in an instance variable for the game to read back. The
+  exception keeps its own frames, though (SabiRuby stores them at the raise and builds the strings
+  when asked), so the tick reads them, once, for a script that failed. That reaches the case the
+  Ruby road could not: a `Task::Overrun` is an `Exception` and not a `StandardError`, so no
+  `rescue => e` ever saw one and Factory reported `inserter.rb:?` for an arm cut off inside a
+  `sort`.
+  `Script::prelude_lines` is the new field it needs — `Program` knew the number and nothing
+  carried it into the running script, which is why each game did the subtraction itself — and
+  `Script::new(h).with_prelude_lines(program.prelude_lines)` is how a game passes it on. Both
+  additions are additive: `_m` is private, so nothing outside the crate ever built `Script` or
+  `ScriptEnded` with a struct literal. `at` is `None` for a script that finished, one that never
+  started, a program with no line table (the default of both compilers), and a prelude that raised
+  before the author's file was reached.
+
 * **A script can wait for the next frame** (R11 of `docs/plans/generalize-plan.md`, merged in `378c539` —
   `docs/worklog/2026-09-20-next-frame.md`, `docs/host-api.md`). `Rubevy.next_frame` parks the task
   until the next frame and answers that frame's number — the Integer `$rubevy[:frame]` carries —
