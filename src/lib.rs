@@ -1,4 +1,5 @@
-//! rubevy: run mruby bytecode inside Bevy, using the [SabiRuby](sabiruby) VM.
+//! rubevy: Ruby scripting for Bevy. A script is mruby bytecode running on the
+//! [SabiRuby](sabiruby) VM as one task, with a host API onto the ECS.
 //!
 //! One VM for the whole app ([`ScriptWorld`]), and one **task** per script
 //! (mruby-task): a [`Script`] component becomes a task of the scheduler, and
@@ -29,20 +30,63 @@
 //!   answers the reads they stopped on and runs them again — so the value comes
 //!   back in the line that asked for it. A write still lands at the end of the
 //!   frame, as `Rubevy.spawn` does.
+//! * **Resources by name**: `Rubevy.resource(:Score)` and
+//!   `Rubevy.set_resource(:Score, { points: 8.0 })` are the same road with the
+//!   entity left out, for a type with `#[reflect(Resource)]`.
+//! * **What the world would not take**: a write lands at the end of the frame,
+//!   so `Rubevy.rejected_writes` is how a script reads the refusals of the
+//!   writes it made ([`ScriptWorld::rejected_writes`] is every script's).
 //! * **Events**: `Rubevy.subscribe(:hit)` answers a `Task::Queue` the game
 //!   pushes onto ([`ScriptWorld::publish`]), so a script waits for something to
 //!   happen exactly as it waits for an answer — in its own task, or in one it
-//!   made with `Task.new`.
+//!   made with `Task.new`. How much a queue holds is
+//!   [`ScriptWorld::queue_limit`] or the subscription's own `limit:`, and what
+//!   it dropped is counted ([`ScriptWorld::dropped`]).
+//! * **The next frame**: `Rubevy.next_frame` parks the task until the head of
+//!   the next tick and answers that frame's number; `Rubevy.each_frame` is the
+//!   loop around it. `sleep` cannot say this — mruby-task's clock moves in whole
+//!   ticks of 4 ms, so `sleep 0` means "until the clock moves".
 //! * `puts`/`p` output is forwarded to Bevy's log.
 //!
 //! Where a game's own systems go in the frame is [`RubevySet`]: an answering
 //! system in [`RubevySet::Answer`] makes a `Rubevy.ask` round trip cost one
-//! frame.
+//! frame. A kind of question whose answer is an *action* that takes frames goes
+//! to the entity that asked instead ([`HoldRequests::hold_requests`]): it
+//! arrives there as a [`Held`] component, `Added<Held>` is where the game starts
+//! the action, and [`Held::answer`] ends it. A kind the tick itself can answer
+//! out of the world goes to a closure ([`ScriptWorld::answer_in_tick`]) and
+//! costs no frame at all.
+//!
+//! What a frame cost is [`ScriptWorld::last_frame`] ([`FrameStats`]), what one
+//! script has cost is [`ScriptWorld::stats`] ([`ScriptStats`]), and where a
+//! script that broke stopped — in the lines the author of that file can see —
+//! is [`ScriptEnded::at`].
+//!
+//! The limits are the app's: [`ScriptWorld::budget`] (instructions a frame),
+//! [`ScriptWorld::frame_time`] (a bound on the whole tick, not only on the runs
+//! of the VM inside it) with [`ScriptWorld::overrun`],
+//! [`ScriptWorld::queue_limit`], and [`ScriptWorld::set_max_depth`] for how deep
+//! a value is followed across the boundary. Every number the crate holds, with
+//! where its default came from — or that nobody wrote it down — is
+//! `docs/numbers.md`.
 //!
 //! A script may `require` another, which reads from the asset directory
 //! ([`RubevyPlugin::with_asset_root`], `assets` by default): `.mrb` always,
 //! `.rb` only in a build with the `ruby-source` feature, which brings the
-//! reference compiler along.
+//! reference compiler along. A build with no filesystem — a browser — serves
+//! `require` out of tables built into the binary instead ([`EmbeddedHost`],
+//! [`ScriptWorld::require_from`]), which the `rubevy-build` package writes. The
+//! crate builds and runs for `wasm32-unknown-unknown` without `ruby-source`.
+//!
+//! A game that compiles the player's own Ruby has [`Program`] (a prelude put in
+//! front of an author's file, and how far down that pushed the author's first
+//! line) and [`in_the_authors_lines`] (the compiler's line numbers taken back
+//! into the author's); [`replace_script`] swaps a running one.
+//!
+//! The crate also carries Ruby it does not run: [`layers::CAMERA`], taken up by
+//! the app in one line with [`ScriptWorld::load_and_run`], gives scripts a
+//! `Rubevy::Camera`. Nothing in `src/` knows what a camera is, and an app that
+//! does not load the layer does not have one.
 //!
 //! Scripts share one VM, so they share globals and constants. That is the
 //! design, not an oversight: a game's scripts are written together. A use that
