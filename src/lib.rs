@@ -158,6 +158,28 @@ pub struct Script<M = ()> {
     pub priority: u8,
     /// Shown in logs and answered by `Task#name`.
     pub name: Option<String>,
+    /// **How many lines stand in front of the author's own first line** — a prelude the game put
+    /// there ([`Program::prelude_lines`]), and `0`, the default, where the program *is* the
+    /// author's file.
+    ///
+    /// It is the one thing [`Program`] knows that the running script did not, and it is here so
+    /// that [`ScriptEnded::at`] can say where a script stopped **in the lines the author can
+    /// see**. Without it rubevy would report a line of the compiled program, which is the very
+    /// mistake `src/source.rs` was written against: one of the sample games reported line 600 for
+    /// what its author had written on line 118.
+    ///
+    /// A game that builds its scripts with [`Program`] passes it on in the same breath:
+    ///
+    /// ```no_run
+    /// # use bevy::prelude::*;
+    /// # use rubevy::{MrbAsset, Program, Script};
+    /// # fn give_it_a_mind(commands: &mut Commands, compiled: Handle<MrbAsset>, program: &Program) {
+    /// commands.spawn(
+    ///     Script::new(compiled).with_name(&program.name).with_prelude_lines(program.prelude_lines),
+    /// );
+    /// # }
+    /// ```
+    pub prelude_lines: u32,
     /// The name tag, which is a type and never a value. `fn() -> M` rather than `M` so that the
     /// component is `Send + Sync` whatever the tag is (see the crate's `docs/plans`).
     _m: PhantomData<fn() -> M>,
@@ -177,7 +199,7 @@ impl Script<()> {
 impl<M: 'static> Script<M> {
     /// A script of the VM named `M`: `Script::<Mods>::for_vm(handle)`.
     pub fn for_vm(source: Handle<MrbAsset>) -> Script<M> {
-        Script { source, priority: 128, name: None, _m: PhantomData }
+        Script { source, priority: 128, name: None, prelude_lines: 0, _m: PhantomData }
     }
     pub fn with_priority(mut self, priority: u8) -> Self {
         self.priority = priority;
@@ -185,6 +207,11 @@ impl<M: 'static> Script<M> {
     }
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
+        self
+    }
+    /// [`Script::prelude_lines`]: `Script::new(h).with_prelude_lines(program.prelude_lines)`.
+    pub fn with_prelude_lines(mut self, lines: u32) -> Self {
+        self.prelude_lines = lines;
         self
     }
 }
@@ -195,6 +222,7 @@ impl<M> std::fmt::Debug for Script<M> {
             .field("source", &self.source)
             .field("priority", &self.priority)
             .field("name", &self.name)
+            .field("prelude_lines", &self.prelude_lines)
             .finish()
     }
 }
@@ -205,6 +233,7 @@ impl<M> Clone for Script<M> {
             source: self.source.clone(),
             priority: self.priority,
             name: self.name.clone(),
+            prelude_lines: self.prelude_lines,
             _m: PhantomData,
         }
     }
@@ -508,6 +537,40 @@ pub struct ScriptEnded<M = ()> {
     pub entity: Entity,
     pub status: ScriptStatus,
     pub value: String,
+    /// **Where it stopped, in the lines the author can see** — the file the program was compiled
+    /// under and the line in it, e.g. `("inserter.rb", 27)`.
+    ///
+    /// It is the innermost frame of the exception's backtrace that is **past the prelude**
+    /// ([`Script::prelude_lines`]), which is the line the games used to work out for themselves:
+    /// a script that raises inside a method the prelude defines is reported at the line of its
+    /// *own* file that called it, because that is the line its author can do something about.
+    /// The same line-drawing [`in_the_authors_lines`] makes for a compiler's message, made here
+    /// for a backtrace.
+    ///
+    /// `None` where there is no such line, which is four different things and one answer:
+    ///
+    /// * the script ran to its end ([`ScriptStatus::Finished`]) — there is no backtrace, because
+    ///   what it ended with is a value and not an exception;
+    /// * it never started (a `.mrb` that would not load) — it has no lines at all;
+    /// * the program carries **no debug information**, which is the default of both compilers
+    ///   rubevy's callers use (`sabiruby_compiler::Options::debug_info`). A backtrace of a
+    ///   program built without a line table is empty, and a game that wants this is a game that
+    ///   compiles its players' scripts with `debug_info: true`;
+    /// * every frame is inside the prelude — the DSL raised before the author's file was reached
+    ///   at all (`run_inserter` finding no inserter defined). What went wrong is in
+    ///   [`ScriptEnded::value`]; what is not there is a line of the author's to point at.
+    ///
+    /// **A `Task::Overrun` has one.** A script cut off inside a native that cannot be switched
+    /// out is an `Exception` and not a `StandardError`, so a `rescue => e` in the game's own
+    /// prelude never saw it and Factory reported `inserter.rb:?` for it; the backtrace is there
+    /// all the same, and this reads it.
+    ///
+    /// It is a file and a line rather than one `"file:line"` string because that is the shape the
+    /// crate's other place is ([`ScriptStats::location`], [`ScriptStats::frames`]), because a
+    /// panel that opens the file at the line wants the number, and because a game that wants the
+    /// string writes `format!("{file}:{line}")` while one that wants the number back out of a
+    /// string writes the parser this type exists to save it.
+    pub at: Option<(String, u32)>,
     _m: PhantomData<fn() -> M>,
 }
 
@@ -517,6 +580,7 @@ impl<M> std::fmt::Debug for ScriptEnded<M> {
             .field("entity", &self.entity)
             .field("status", &self.status)
             .field("value", &self.value)
+            .field("at", &self.at)
             .finish()
     }
 }
@@ -527,9 +591,54 @@ impl<M> Clone for ScriptEnded<M> {
             entity: self.entity,
             status: self.status,
             value: self.value.clone(),
+            at: self.at.clone(),
             _m: PhantomData,
         }
     }
+}
+
+/// The author's own line in an exception's backtrace, innermost first — what [`ScriptEnded::at`]
+/// carries.
+///
+/// A task that has ended keeps no frames (`ScriptWorld::stats` answers `frames: []` and
+/// `location: None` at the very moment the ending is sent, measured 2026-09-21), but the
+/// **exception** it ended with keeps its own: SabiRuby stores the frames on the object when it is
+/// raised and builds the strings when somebody asks (`Vm::keep_backtrace`). So this asks, once,
+/// for a script that failed.
+///
+/// A frame is `file:line` or `file:line:in method`, so the place is what is left when a trailing
+/// `:in method` is taken off and the last colon is split on — reading it from the *right* rather
+/// than looking for the file's name, which may itself hold colons.
+fn authors_line(vm: &mut Vm, value: Value, prelude_lines: u32) -> Option<(String, u32)> {
+    let backtrace = vm.intern("backtrace");
+    let frames = vm.funcall(value, backtrace, &[], Value::Nil).ok()?;
+    for frame in vm.ary_vals(frames)? {
+        let Some(text) = vm.str_bytes(frame).map(|b| String::from_utf8_lossy(b).into_owned())
+        else {
+            continue;
+        };
+        let Some((file, line)) = frame_place(&text) else { continue };
+        // a frame of an irep the build kept no line table for says `:0`, which is not a place
+        if line == 0 {
+            continue;
+        }
+        // inside the prelude: not the author's file. Go on out through the frames — the line
+        // that called the prelude's method is the one the author can see
+        if line > prelude_lines {
+            return Some((file.to_string(), line - prelude_lines));
+        }
+    }
+    None
+}
+
+/// The file and the line of one backtrace frame ([`authors_line`] says how it is read).
+fn frame_place(frame: &str) -> Option<(&str, u32)> {
+    let head = match frame.rfind(":in ") {
+        Some(at) => &frame[..at],
+        None => frame,
+    };
+    let (file, line) = head.rsplit_once(':')?;
+    Some((file, line.parse().ok()?))
 }
 
 /// What a script asked the host to do. A native cannot touch the Bevy world,
@@ -2880,7 +2989,14 @@ fn give_up<M: 'static>(
     entity: Entity,
     message: String,
 ) {
-    ended.write(ScriptEnded { entity, status: ScriptStatus::Failed, value: message, _m: PhantomData });
+    // `at` is `None`: a script that never started has no lines to have stopped on
+    ended.write(ScriptEnded {
+        entity,
+        status: ScriptStatus::Failed,
+        value: message,
+        at: None,
+        _m: PhantomData,
+    });
     commands
         .entity(entity)
         .insert((ScriptDone::<M>::for_vm(), ScriptStartFailed::<M> { _m: PhantomData }));
@@ -2939,8 +3055,19 @@ fn release_values<M: 'static>(mut world: ResMut<ScriptWorld<M>>) {
 /// still wants is spelled as a `SystemState`, which an exclusive system may take beside the
 /// world. That keeps the archetype matching from frame to frame the way the `Query` parameter
 /// did; `World::query_filtered` would build it again every frame.
-type RunningTasks<M> =
-    SystemState<Query<'static, 'static, (Entity, &'static ScriptTask<M>), Without<ScriptDone<M>>>>;
+///
+/// The [`Script`] rides along for one field of it, [`Script::prelude_lines`], which is what turns
+/// a line of the compiled program into a line of the author's file when a script ends
+/// ([`ScriptEnded::at`]). It is an `Option` because nothing stops a game from taking the `Script`
+/// off and leaving the task running.
+type RunningTasks<M> = SystemState<
+    Query<
+        'static,
+        'static,
+        (Entity, &'static ScriptTask<M>, Option<&'static Script<M>>),
+        Without<ScriptDone<M>>,
+    >,
+>;
 
 /// Moves the scheduler's clock on by the frame time, runs the ready tasks for up to the frame's
 /// budget, and answers the component reads they make **while they are still running**.
@@ -2982,9 +3109,15 @@ fn tick_scripts<M: 'static>(world: &mut World, tasks: &mut RunningTasks<M>) {
     // twice, and the sweep wants the VM anyway
     // (a read-only `Query` has nothing to validate, so the `Err` arm is unreachable; it is
     // spelled rather than unwrapped because a panic here would take the frame with it)
-    let running: Vec<(Entity, ObjId)> = tasks
+    let running: Vec<(Entity, ObjId, u32)> = tasks
         .get(world)
-        .map(|q| q.iter().map(|(entity, st)| (entity, st.task)).collect())
+        .map(|q| {
+            q.iter()
+                .map(|(entity, st, script)| {
+                    (entity, st.task, script.map_or(0, |s| s.prelude_lines))
+                })
+                .collect()
+        })
         .unwrap_or_default();
 
     world.resource_scope(|world: &mut World, mut scripts: Mut<ScriptWorld<M>>| {
@@ -3137,7 +3270,7 @@ fn tick_scripts<M: 'static>(world: &mut World, tasks: &mut RunningTasks<M>) {
     {
         let mut scripts = world.resource_mut::<ScriptWorld<M>>();
         let scripts = &mut *scripts;
-        for (entity, task) in running {
+        for (entity, task, prelude_lines) in running {
             if !scripts.vm.task_finished(task) {
                 continue;
             }
@@ -3145,7 +3278,14 @@ fn tick_scripts<M: 'static>(world: &mut World, tasks: &mut RunningTasks<M>) {
             let status =
                 if scripts.vm.is_exception(value) { ScriptStatus::Failed } else { ScriptStatus::Finished };
             let text = scripts.vm.inspect_str(value).unwrap_or_else(|_| String::from("?"));
-            finished.push(ScriptEnded { entity, status, value: text, _m: PhantomData });
+            // where it stopped, read off the exception while it still has its frames — the task
+            // itself has none left by now (`ScriptEnded::at`). Only for a script that failed: a
+            // value that ran to its end is not an exception and has no backtrace to ask for
+            let at = match status {
+                ScriptStatus::Failed => authors_line(&mut scripts.vm, value, prelude_lines),
+                ScriptStatus::Finished => None,
+            };
+            finished.push(ScriptEnded { entity, status, value: text, at, _m: PhantomData });
             scripts.vm.gc_unregister(task);
             // A script that runs to its end keeps its `ScriptTask` — that is what stops it
             // starting again — so the `on_remove` hook is not reached here. What it subscribed

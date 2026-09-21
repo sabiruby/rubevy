@@ -281,3 +281,119 @@ INFO rubevy: [script] leg 1: there
 INFO walk_to: arrived at Vec2(0.0, 0.0)
 INFO rubevy: [script] leg 2: there
 ```
+
+---
+
+## 4. H2: `ScriptEnded::at`
+
+### 4.1 計画書の前提が実物と違っていた — `prelude_lines` は rubevy に無い
+
+案は「prelude の行数を引く計算は `Program` が既に知っている（`in_the_authors_lines`）ので、
+ゲームはそれを書かなくてよくなる」と書いている。**知っているのはゲームであって rubevy ではない。**
+
+* `Program { source, name, prelude_lines }` はゲームが組み立ててコンパイラに渡す値で、rubevy は
+  受け取らない。走っているスクリプトについて rubevy が持っているのは
+  `Script { source, priority, name }` だけである。
+* `in_the_authors_lines(message, prelude_lines, prelude_name)` は**コンパイラのメッセージ**を
+  書き換える関数で、実行時の backtrace は扱わない。引数の `prelude_lines` は呼び手が渡す。
+
+だから `ScriptEnded::at` が「著者の行」を言うには、`prelude_lines` が**スクリプトと一緒に
+走っていなければならない**。3 つ考えて、1 つ目を採った。
+
+| 案 | 採否 |
+|---|---|
+| (a) `Script::prelude_lines`（既定 0）を足し、`with_prelude_lines` で渡す | **採用。** 足すだけで壊れない（`_m` が非公開なので外から構造体リテラルで作れず、フィールドが増えても構築は壊れない — `ScriptEnded` と同じ論法）。`Program::prelude_lines` から `ScriptEnded::at` まで線が通る |
+| (b) `at` は**プログラムの行**を返し、引き算はゲームがやる | 捨てた。`src/source.rs` の冒頭が書いている失敗（「著者が 118 行目に書いたものを 600 行目と報告した」）をそのまま再現する口になる。しかも backtrace のどの frame が著者のものかを選べないので、DSL の中で raise したときは DSL の行が出る |
+| (c) `at` に backtrace 全部（`Vec<(String, u32)>`）を入れる | 捨てた。選ぶ 20 行をゲームが書くことになり、H2 が消したかった 30 行が 20 行になるだけ。終わるたびに Vec を 1 つ作る |
+
+**`Script` にフィールドを足すことは案の範囲外**なので、原則（外の利用者にとって素直か・今の API
+を壊さないか）で決めて理由をここに残す。壊れる利用者はいない（crates.io に出ていないし、
+games には `Script { … }` の構造体リテラルも 1 つも無い — `grep` で確かめた）。
+
+### 4.2 形: 文字列 1 つか、ファイルと行か
+
+**`at: Option<(String, u32)>` にした。** 案の例は `"inserter.rb:27"` という文字列 1 つだが、
+
+* rubevy が今「場所」を返しているのは `ScriptStats::location: Option<(String, u32)>` と
+  `ScriptStats::frames: Vec<(String, u32)>` の 2 つで、**どちらも組**である。Battle の
+  `update_hud` も `rubevy-egui` の `VmInspector::fill` もこの組を受けて `format!` している;
+* 行番号を数として要る利用者がいる（エディタのパネルがその行へ飛ぶ）。文字列から取り出すのは
+  `factory/src/data.rs::line_in` が書いている 15 行で、それを書かせないための口である;
+* 文字列が要る側は `format!("{file}:{line}")` の 1 行で済む。
+
+`in_the_authors_lines` は「メッセージ全体を書き換えて返す」関数で場所を返していないので、
+「合わせる」相手は `ScriptStats` の方だと判断した。**名前は案のまま `at`。**
+
+### 4.3 終わったタスクから場所を読む道
+
+探りのテストを書いて実測した（`tests/zz_probe.rs`、コミットには入れず消した）。
+`ScriptEnded` が届く瞬間に:
+
+```
+--- raise, nested (debug_info=true) ---
+  finished=true location=None frames=[]
+  is_exception=true inspect=Ok("#<RuntimeError: boom>")
+    frame Some("t.rb:2:in inner")
+    frame Some("t.rb:5:in outer")
+    frame Some("t.rb:7")
+--- raise, no debug info (debug_info=false) ---
+    （frame 無し）
+--- normal end (debug_info=true) ---
+  is_exception=false inspect=Ok("2")
+    backtrace raised: undefined method 'backtrace' for Integer (NoMethodError)
+--- overrun (debug_info=true) ---
+  is_exception=true inspect=Ok("#<Task::Overrun: the task ran past its time limit inside a call that cannot be switched out>")
+    frame Some("t.rb:2")
+    frame Some("t.rb:2")
+```
+
+**タスクにフレームは残っていないが、例外はフレームを持っている。** SabiRuby は raise の時点で
+`[irep, pc, mid]` の組をオブジェクトの `@__bt` に置き、文字列は訊かれたときに作る
+（`Vm::keep_backtrace` / `backtrace_text`）。だから `funcall(value, :backtrace)` で読める。
+
+**`@__bt` を `ivar_get` で直接読む道は採らなかった**: 名前は VM の内部の綴りで、
+`Exception#backtrace` の方が公開の道である。しかも `factory/src/data.rs::from_raise` が既に
+この道を通っている。走るのは**失敗した終わりのときだけ**で、正常終了は `is_exception` が
+偽なので問い合わせもしない。
+
+**`Task::Overrun` にも場所がある**のが、この形のいちばんの拾い物である。`Overrun` は
+`Exception` であって `StandardError` ではないので Factory の `rescue => e` は捕まえられず、
+あの腕は `inserter.rb:?` と言っていた。rubevy が例外そのものから読むなら、そこが言える。
+
+frame の綴りは `file:line` か `file:line:in method` なので、`:in ` を**右から**探して落とし、
+残りを最後のコロンで割る（ファイル名にコロンが入っていてもよい）。`:0` の frame は
+「行表が無い irep」なので飛ばす。
+
+線引きは `in_the_authors_lines` と同じ「`prelude_lines` より大きいか」で、
+**内側から外へ**見ていって最初に見つかった著者の行を返す。DSL の中で raise したときに
+「それを呼んだ著者の行」が出るのはこれによる。
+
+### 4.4 prelude の中で壊れたら何を言うか
+
+**著者の行が 1 つも無ければ `None`。** 案がそう書いており、実物でもそれが正しかった:
+
+* **ふつうは `None` にならない。** prelude のメソッドの中で raise しても、それを呼んだのは
+  著者の行なので、外側の frame にそれがある（テスト
+  `a_raise_inside_the_prelude_is_reported_at_the_line_that_called_it`）。
+* `None` になるのは「著者のファイルに一度も入らずに prelude が raise した」ときだけで、それは
+  `run_inserter` の `raise "this file defines no inserter"` のような場合である。**指させる
+  著者の行が本当に無い**ので、何が起きたかは `value` が言い、場所は言わない。
+
+prelude 側の行を `("prelude.rb", 120)` のように返す道も考えたが、**rubevy は prelude の名前を
+知らない**（`in_the_authors_lines` はそれを引数で受け取る）ので、名前を置くなら `Script` に
+もう 1 つフィールドが要る。指させない行を出すために公開のフィールドを増やすのは釣り合わないと
+判断した。ゲームは `value` を持っている。
+
+### 4.5 テスト（`tests/script_ended_at.rs`、9 本）
+
+素の行、prelude つきで著者の行、prelude の中で raise → 呼んだ行、prelude だけで raise → `None`、
+正常終了 → `None`、デバッグ情報なし → `None`、`Task::Overrun` → 行が出る、起動できなかった
+スクリプト → `None`、そしてゲームが書く形の通し 1 本。
+
+`Program::new` の `prelude_lines` が 6 ではなく **7** であることを推測で書いて 1 回落とした
+（prelude と著者のファイルの間に空行と区切りのコメントが入る）。テストの側を直し、なぜ 7 なのかを
+コメントに書いた。
+
+`grep -rn 'ScriptEnded\s*{'` を rubevy_games に対して回して、**`..` なしで分解している所は
+1 つも無い**ことを確かめた（読んでいるのは `e.entity` / `e.status` / `e.value` だけ）。
+`Script { … }` の構造体リテラルも 0 件。
