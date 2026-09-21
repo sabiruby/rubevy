@@ -65,3 +65,9 @@ sabiruby = { version = "0.5.1", features = ["macros"] }
 # `docs/host-api.md`. **rubevy does not depend on this** — a game that wants `JSON` installs it
 # into the VM itself, which is the whole point of the test.
 sabiruby-serde = "0.1.0"
+
+[profile.dev]
+debug = "line-tables-only"   # backtraces keep file:line; full DWARF made each binary ~1.7GB
+
+[profile.dev.package."*"]
+debug = false                # no debug info for dependencies (Bevy etc.)
