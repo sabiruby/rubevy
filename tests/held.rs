@@ -314,6 +314,24 @@ fn a_script_stopped_by_hand_is_swept() {
     assert_eq!(registered(&app), 0);
 }
 
+/// **The `ScriptTask` taken off by hand and the `Script` left**, which is a restart: the plugin
+/// starts the script again on the next frame. The old task's question must not be left in the
+/// `Held` for the new script to inherit — it used to be (the sweep runs after the restart and saw
+/// a live script), and the new script's own question was filed behind it.
+#[test]
+fn a_restart_by_hand_does_not_inherit_the_old_question() {
+    let mut app = app();
+    let e = spawn_script(&mut app, "Rubevy.ask('wait', { a: 1 }).pop\nsleep 10\n");
+    until(&mut app, 20, |app| app.world().entity(e).get::<Held>().is_some());
+    app.world_mut().entity_mut(e).remove::<ScriptTask>();
+    frames(&mut app, 4);
+    assert!(app.world().entity(e).get::<ScriptTask>().is_some(), "started again");
+    let held = app.world().entity(e).get::<Held>().expect("the new script is waiting");
+    assert_eq!(held.len(), 1, "on its own question, and on nothing of the old task's");
+    // the new task, its queue and its Hash: the old task's are all let go of
+    assert_eq!(registered(&app), 3);
+}
+
 /// **The script ran to its end** while a question of its own was still waiting — a task it made
 /// with `Task.new` asked and the script came back without waiting for it. The frame that sends
 /// `ScriptEnded` is the frame the `Held` goes.

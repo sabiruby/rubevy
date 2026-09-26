@@ -480,7 +480,7 @@ waiting can end takes the requests with it:
 | `replace_script` | it removes `Held` beside `ScriptTask` |
 | `stop_script` | the same |
 | the script ran to its end, raised, or overran | the tick, where it sends `ScriptEnded` |
-| the game removed `ScriptTask` by hand | the next tick, which sweeps a `Held` with no live script |
+| the game removed `ScriptTask` by hand | its removal hook, at once — a `Script` left behind (a restart) starts again with nothing of the old task's waiting |
 | the VM is paused (`budget = 0`) | nothing: what is waiting goes on waiting |
 
 Taking the requests is dropping them, and a dropped request closes its queue: a `Task.new` child

@@ -338,11 +338,23 @@ fn stop_removed_task<M: 'static>(
     // a script that ended has been let go of already (`ScriptDone`) — this VM's marker, not the
     // one of another VM that shares the entity
     let ended = world.get::<ScriptDone<M>>(context.entity).is_some();
-    let Some(mut scripts) = world.get_resource_mut::<ScriptWorld<M>>() else { return };
-    scripts.stop_task(task, !ended);
-    // and anything it was listening for: a queue nobody will read is one the game would keep
-    // filling (`Rubevy.subscribe`)
-    scripts.unsubscribe(context.entity);
+    {
+        let Some(mut scripts) = world.get_resource_mut::<ScriptWorld<M>>() else { return };
+        scripts.stop_task(task, !ended);
+        // and anything it was listening for: a queue nobody will read is one the game would keep
+        // filling (`Rubevy.subscribe`)
+        scripts.unsubscribe(context.entity);
+    }
+    // And what it was waiting on. A `Held` left behind would be taken over by whatever runs on
+    // the entity next: where the `Script` is still there — the `ScriptTask` taken off by hand,
+    // which is a restart — the plugin starts it again on the next frame, *before* the sweep in
+    // `drain_commands` looks, so the sweep saw a live script and kept the old questions; the new
+    // script's first question was then filed behind a question of a task that no longer exists,
+    // and `Held::answer` answered the dead one first (found while writing `tests/stop.rs`,
+    // `docs/worklog/2026-09-26-release-0.2-a.md` §5). `try_remove` because this hook also runs
+    // for a despawn, which takes the component anyway, and for `replace_script` / `stop_script`,
+    // which remove it themselves.
+    world.commands().entity(context.entity).try_remove::<Held<M>>();
 }
 
 /// What a host can show of a running script (`ScriptWorld::stats`).
@@ -1286,7 +1298,7 @@ impl Request {
 /// | [`replace_script`] | it removes `Held` beside [`ScriptTask`] |
 /// | [`stop_script`] | the same |
 /// | the script ran to its end, raised, or overran | the tick removes it where it sends [`ScriptEnded`] |
-/// | the game removed [`ScriptTask`] by hand | the next tick, which is where a `Held` with no live script is swept |
+/// | the game removed [`ScriptTask`] by hand | its removal hook, at once — a `Script` left behind starts again with nothing of the old task's waiting |
 /// | the VM is paused (`budget = 0`) | nothing: what is waiting goes on waiting, and is answered when the game answers it |
 ///
 /// Taking the requests is dropping them, and **a request dropped without an answer closes its
@@ -3698,8 +3710,9 @@ fn drain_commands<M: 'static>(
 ) {
     // **The sweep, before this frame's questions are sorted.** A `Held` is taken off where it
     // has stopped saying anything true: the game answered the last question in it, or the script
-    // that asked is not running any more (its `ScriptTask` was removed by hand — `replace_script`
-    // and a script that ended take it off where they happen, so those two do not wait for this).
+    // that asked is not running any more. (Every way a script stops running takes the `Held` off
+    // where it happens — `ScriptTask`'s removal hook, `replace_script`, `stop_script`, the tick
+    // that sends `ScriptEnded` — so the second half is a guard rather than the way it is done.)
     // Taking the component off rather than leaving it empty is what makes `Added<Held>` mean
     // "started waiting" the next time round, and what gets the queues released: the requests in it
     // are dropped with it, and a dropped request's queue is closed and let go of by the next sweep
