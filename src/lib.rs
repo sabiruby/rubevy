@@ -693,18 +693,19 @@ enum HostCommand {
     Spawn { name: String, x: f32, y: f32, z: f32 },
     Despawn(u64),
     SetPosition { entity: u64, x: f32, y: f32, z: f32 },
-    /// `Rubevy.ask`: the script is parked on a queue until the game answers it.
-    Ask { entity: u64, kind: String, args: Vec<Arg>, queue: ObjId },
+    /// `Rubevy.ask`: the script is parked on a queue until the game answers it. `entity` is
+    /// `None` for a task that has none ([`task_entity`]).
+    Ask { entity: Option<u64>, kind: String, args: Vec<Arg>, queue: ObjId },
     /// `entity[:Transform] = hash`, through `Rubevy.set_component`: the value was read out of
     /// the VM by the native (a `&mut World` is a system away), and [`apply_component_writes`]
     /// writes it over the component through `ReflectComponent`. `by` is the entity of the task
     /// that wrote it, which is not the entity written to: a script may write another's
     /// component, and what a script asks about afterwards is its *own* writes
     /// ([`RejectedWrite`]).
-    SetComponent { by: u64, entity: u64, name: String, value: RubyData },
+    SetComponent { by: Option<u64>, entity: u64, name: String, value: RubyData },
     /// `Rubevy.set_resource(:Score, hash)`: the same thing for a resource, which belongs to no
     /// entity, so there is nothing to name but the type. [`apply_resource_writes`] makes it.
-    SetResource { by: u64, name: String, value: RubyData },
+    SetResource { by: Option<u64>, name: String, value: RubyData },
 }
 
 /// A component write waiting for the exclusive system that can make it
@@ -3468,7 +3469,8 @@ fn drain_commands<M: 'static>(
                 // the game registered with `answer_in_tick`. What lands in either of those two
                 // is the leftovers of a frame that ran out of budget or of time; the next
                 // frame's answer loop takes them first.
-                let request = Request { entity: entity_from_bits(entity), kind, args, queue };
+                let request =
+                    Request { entity: entity.and_then(entity_from_bits), kind, args, queue };
                 // `Rubevy.next_frame` asked in a round the tick never came back to — the frame
                 // ran out of budget or of time before its answer loop reached the queue — goes
                 // straight to the tasks waiting for the next frame. Sorting it into
@@ -3502,12 +3504,12 @@ fn drain_commands<M: 'static>(
             }
             HostCommand::SetComponent { by, entity, name, value } => {
                 if let Some(entity) = entity_from_bits(entity) {
-                    let by = entity_from_bits(by);
+                    let by = by.and_then(entity_from_bits);
                     world.component_writes.push(ComponentWrite { by, entity, name, value });
                 }
             }
             HostCommand::SetResource { by, name, value } => {
-                let by = entity_from_bits(by);
+                let by = by.and_then(entity_from_bits);
                 world.resource_writes.push(ResourceWrite { by, name, value });
             }
             HostCommand::Log(text) => info!("[script] {text}"),
@@ -3642,7 +3644,7 @@ fn take_asks(vm: &mut Vm, wanted: impl Fn(&str) -> bool) -> Vec<Request> {
             continue;
         }
         if let HostCommand::Ask { entity, kind, args, queue } = state.commands.remove(i) {
-            taken.push(Request { entity: entity_from_bits(entity), kind, args, queue });
+            taken.push(Request { entity: entity.and_then(entity_from_bits), kind, args, queue });
         }
     }
     taken
@@ -4421,7 +4423,7 @@ fn install_host_api(vm: &mut Vm, release: ReleaseQueue) -> ObjId {
         }
         let queue = vm.task_queue_new()?;
         vm.gc_register(queue);
-        let entity = match current_entity(vm) { Value::Int(bits) => bits as u64, _ => u64::MAX };
+        let entity = task_entity(vm);
         push_command(vm, HostCommand::Ask { entity, kind, args, queue });
         Ok(Value::Obj(queue))
     });
@@ -4442,7 +4444,7 @@ fn install_host_api(vm: &mut Vm, release: ReleaseQueue) -> ObjId {
             reflect::read_ruby(vm, a.get(2).copied().unwrap_or(Value::Nil), ENTITY_TAG, deep)?;
         // who is writing, which is not who is written to: `Rubevy.rejected_writes` answers a
         // script its own writes, and a script may write another entity's component
-        let by = match current_entity(vm) { Value::Int(bits) => bits as u64, _ => u64::MAX };
+        let by = task_entity(vm);
         push_command(vm, HostCommand::SetComponent { by, entity: bits, name, value });
         Ok(Value::Nil)
     });
@@ -4459,7 +4461,7 @@ fn install_host_api(vm: &mut Vm, release: ReleaseQueue) -> ObjId {
         let deep = max_depth_of(vm);
         let value =
             reflect::read_ruby(vm, a.get(1).copied().unwrap_or(Value::Nil), ENTITY_TAG, deep)?;
-        let by = match current_entity(vm) { Value::Int(bits) => bits as u64, _ => u64::MAX };
+        let by = task_entity(vm);
         push_command(vm, HostCommand::SetResource { by, name, value });
         Ok(Value::Nil)
     });
@@ -4575,7 +4577,25 @@ fn subscribe_limit(vm: &mut Vm, arg: Option<Value>) -> Result<Option<usize>, VmE
     Ok(limit)
 }
 
-/// The entity of the task the scheduler is running, as `Entity::to_bits`.
+/// The entity of the task the scheduler is running, as `Entity::to_bits`, or `None` for a task
+/// that has none — one the host spawned outside a [`Script`], or one whose `@rubevy_entity` a
+/// script cleared.
+///
+/// It is an `Option` and not a `u64` with a number standing for "nobody", which is what it was
+/// until 2026-09-26: the number was `u64::MAX`, and `u64::MAX` **is** an entity to
+/// `Entity::try_from_bits` — index 0 of generation `u32::MAX`, since Bevy keeps the index as a
+/// `NonMaxU32` whose bits are the index's complement — so a question from a task with no entity
+/// came out as a [`Request`] whose `entity` was `Some` of an entity nobody had spawned
+/// (`docs/worklog/2026-09-26-release-0.2-a.md`, R3).
+fn task_entity(vm: &Vm) -> Option<u64> {
+    match current_entity(vm) {
+        Value::Int(bits) => Some(bits as u64),
+        _ => None,
+    }
+}
+
+/// The `@rubevy_entity` of the task the scheduler is running: an Integer (`Entity::to_bits`) or
+/// nil.
 fn current_entity(vm: &Vm) -> Value {
     match vm.task_running() {
         Some(task) => vm.ivar_get(task, ENTITY_IVAR),
