@@ -1519,6 +1519,15 @@ source (file and line — while it waits as well as while it runs), and whether 
 It is what makes a panel like "Scout — robots/scout.rb:12 — 4,200 insn" possible, which is the
 thing this VM can show and an engine's usual scripting cannot.
 
+**The lines are the author's.** Where the game put a prelude in front of the author's file
+(`Script::with_prelude_lines`, "A script the game compiles itself" below), `location` and `frames`
+have it taken off, the way `ScriptEnded::at` does: a script parked inside a method the prelude
+defines — a DSL's `scan` — is at the line of its own file that called it, and the prelude's own
+frames are left out of `frames`, because a line of the prelude under the author's file name is a
+line the author cannot find. (Before 0.2.0 both were the compiled program's numbers, and a game
+took the prelude off itself.) The VM's own view, every frame numbered as the program is, is
+`world.vm.task_frames(task.task())`.
+
 ## What a HUD can show of a frame (`FrameStats`)
 
 `ScriptWorld::last_frame()` answers a [`FrameStats`]: what the last tick of that VM came to.

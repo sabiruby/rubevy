@@ -296,6 +296,11 @@ impl<M> Clone for Script<M> {
 #[component(on_remove = stop_removed_task::<M>)]
 pub struct ScriptTask<M = ()> {
     task: ObjId,
+    /// [`Script::prelude_lines`] of the script this task was started from, so that
+    /// [`ScriptWorld::stats`] — which is handed the task and not the `Script` — can answer in the
+    /// author's lines. Copied when the task starts: a task runs the program it was started with,
+    /// so the number that goes with its lines is the one the `Script` had then.
+    prelude_lines: u32,
     _m: PhantomData<fn() -> M>,
 }
 
@@ -338,17 +343,30 @@ fn stop_removed_task<M: 'static>(
 }
 
 /// What a host can show of a running script (`ScriptWorld::stats`).
+///
+/// **The lines are the author's** — the lines of the file the author wrote, with the prelude a
+/// game put in front of it ([`Script::prelude_lines`]) taken off, which is how
+/// [`ScriptEnded::at`] has always counted. A frame that stands *inside* the prelude is not a line
+/// the author can find, so it is left out rather than reported under the author's file name
+/// with a number from somebody else's text. Where the prelude is `0`, the default, nothing is
+/// taken off and nothing is left out but a frame the VM could not place (line `0`).
+///
+/// A panel that wants the VM's own view — every frame with a line table, the prelude's
+/// included, numbered as the compiled program is — reads `vm.task_frames(task.task())`
+/// through [`ScriptWorld::vm`], which is where these come from.
 #[derive(Debug, Clone, Default)]
 pub struct ScriptStats {
     /// Instructions this script has run since it started. The difference between two frames is
     /// what it spent on that frame.
     pub instructions: u64,
-    /// Where it stands in its own source: file and line, while it waits as well as while it
-    /// runs. `None` where the program carries no debug info.
+    /// Where it stands in the author's own lines: file and line, while it waits as well as while
+    /// it runs — the innermost of [`ScriptStats::frames`]. A script parked inside a method its
+    /// prelude defines (a DSL's `scan`) is reported at the line of its own file that called it.
+    /// `None` where the program carries no debug info, and where every frame is in the prelude.
     pub location: Option<(String, u32)>,
-    /// Every frame it stands in, innermost first. A script parked inside a library method (a
-    /// DSL, `sleep`) stands in the library; this is how a panel finds the line of the script's
-    /// own file that is waiting.
+    /// Every frame it stands in that is in the author's lines, innermost first. A script parked
+    /// inside a library method of another file (a `require`d helper) stands in the library;
+    /// this is how a panel finds the line of the script's own file that is waiting.
     pub frames: Vec<(String, u32)>,
     /// Whether the task has run to its end.
     pub finished: bool,
@@ -662,17 +680,27 @@ fn authors_line(vm: &mut Vm, value: Value, prelude_lines: u32) -> Option<(String
             continue;
         };
         let Some((file, line)) = frame_place(&text) else { continue };
-        // a frame of an irep the build kept no line table for says `:0`, which is not a place
-        if line == 0 {
-            continue;
-        }
-        // inside the prelude: not the author's file. Go on out through the frames — the line
-        // that called the prelude's method is the one the author can see
-        if line > prelude_lines {
-            return Some((file.to_string(), line - prelude_lines));
+        // inside the prelude, or no place at all: go on out through the frames — the line that
+        // called the prelude's method is the one the author can see
+        if let Some(line) = authors_place(line, prelude_lines) {
+            return Some((file.to_string(), line));
         }
     }
     None
+}
+
+/// A line of the compiled program as a line of the author's file, or `None` where it is not one:
+/// **the one line-drawing** both [`ScriptEnded::at`] and [`ScriptWorld::stats`] make.
+///
+/// * `0` is a frame the VM could not place (an irep the build kept no line table for, or a pc
+///   outside it — a backtrace prints it as `:0`), which is not a place.
+/// * `1..=prelude_lines` is the prelude the game put in front, which is not the author's file.
+/// * past that, the author's line is what is left when the prelude is taken off.
+fn authors_place(line: u32, prelude_lines: u32) -> Option<u32> {
+    if line == 0 || line <= prelude_lines {
+        return None;
+    }
+    Some(line - prelude_lines)
 }
 
 /// The file and the line of one backtrace frame ([`authors_line`] says how it is read).
@@ -1811,11 +1839,24 @@ impl<M: 'static> ScriptWorld<M> {
 
     /// What a script has spent and where it is, for a HUD or a debugger panel. The task comes
     /// from the entity's [`ScriptTask`].
+    ///
+    /// The lines are the author's: the prelude the task's [`Script`] said it had
+    /// ([`Script::prelude_lines`]) is taken off, as [`ScriptEnded::at`] takes it off
+    /// ([`ScriptStats`] says what that leaves out).
     pub fn stats(&self, script: &ScriptTask<M>) -> ScriptStats {
+        // `task_location` is the first of `task_frames` (SabiRuby 0.6.1, `ext_task.rs`: the same
+        // walk, stopping at the first frame with a line table), so the frames are read once and
+        // the location is the innermost that is left of them
+        let frames: Vec<(String, u32)> = self
+            .vm
+            .task_frames(script.task)
+            .into_iter()
+            .filter_map(|(file, line)| Some((file, authors_place(line, script.prelude_lines)?)))
+            .collect();
         ScriptStats {
             instructions: self.vm.task_instructions(script.task),
-            location: self.vm.task_location(script.task),
-            frames: self.vm.task_frames(script.task),
+            location: frames.first().cloned(),
+            frames,
             finished: self.vm.task_finished(script.task),
         }
     }
@@ -2999,7 +3040,8 @@ fn start_scripts<M: 'static>(
                 vm.gc_register(task);
                 // the task carries its entity, which is what `Rubevy.entity` answers
                 vm.ivar_set(task, ENTITY_IVAR, Value::Int(entity.to_bits() as i64));
-                commands.entity(entity).insert(ScriptTask::<M> { task, _m: PhantomData });
+                let prelude_lines = script.prelude_lines;
+                commands.entity(entity).insert(ScriptTask::<M> { task, prelude_lines, _m: PhantomData });
                 // it started this time: whatever went wrong before is over, and the mark that
                 // said so must not be left on the entity for a later asset change to act on
                 if had_failed {

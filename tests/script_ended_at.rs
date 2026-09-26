@@ -223,3 +223,67 @@ fn the_shape_a_game_writes() {
     // and nothing of this needed the VM afterwards
     assert!(app.world().resource::<ScriptWorld>().broken_programs() == 0);
 }
+
+// --------------------------------------------- the same lines while it runs (`ScriptWorld::stats`)
+
+/// Spawns `program` with its prelude and runs until its task is parked, then answers what
+/// `ScriptWorld::stats` says of it.
+fn stats_of(app: &mut App, program: &Program) -> rubevy::ScriptStats {
+    let h = app
+        .world_mut()
+        .resource_mut::<Assets<MrbAsset>>()
+        .add(compile(&program.source, &program.name));
+    let e = app
+        .world_mut()
+        .spawn(Script::new(h).with_name(&program.name).with_prelude_lines(program.prelude_lines))
+        .id();
+    frames(app, 4);
+    let task = *app.world().entity(e).get::<rubevy::ScriptTask>().expect("started");
+    app.world().resource::<ScriptWorld>().stats(&task)
+}
+
+/// **Parked inside a method the prelude defines** — the DSL's `scan`, which is where a script of a
+/// game that wraps its questions spends most of its life. `stats` answers the author's line that
+/// called it, in the author's numbers, the way `ScriptEnded::at` does for a script that raised;
+/// the prelude's own frame is not in `frames`, because its line is not one the author can find.
+#[test]
+fn stats_answers_in_the_authors_lines() {
+    let mut app = app();
+    let prelude = "def scan\n  Rubevy.ask('scan').pop\nend\n";
+    let players = "a = 1\nscan\n";
+    let program = Program::new(prelude, "player.rb", players, "");
+    let stats = stats_of(&mut app, &program);
+    assert_eq!(stats.location, Some((String::from("player.rb"), 2)), "the author's `scan`");
+    assert_eq!(stats.frames, vec![(String::from("player.rb"), 2)], "and not the prelude's line 2");
+}
+
+/// Parked in the author's own lines, the location is that line — moved by the prelude, not the
+/// compiled program's.
+#[test]
+fn stats_takes_the_prelude_off_a_line_of_the_authors_own() {
+    let mut app = app();
+    let prelude = "X = 1\nY = 2\n";
+    let players = "a = 1\nb = 2\nRubevy.ask('here').pop\n";
+    let program = Program::new(prelude, "player.rb", players, "");
+    assert!(program.prelude_lines > 0);
+    let stats = stats_of(&mut app, &program);
+    assert_eq!(stats.location, Some((String::from("player.rb"), 3)));
+}
+
+/// With no prelude, `stats` is what the VM says: nothing taken off, nothing left out.
+#[test]
+fn stats_without_a_prelude_is_the_vms_own() {
+    let mut app = app();
+    let program = Program::new("", "brain.rb", "def wait\n  Rubevy.ask('w').pop\nend\nwait\n", "");
+    let h = app
+        .world_mut()
+        .resource_mut::<Assets<MrbAsset>>()
+        .add(compile(&program.source, &program.name));
+    let e = app.world_mut().spawn(Script::new(h)).id();
+    frames(&mut app, 4);
+    let task = *app.world().entity(e).get::<rubevy::ScriptTask>().expect("started");
+    let world = app.world().resource::<ScriptWorld>();
+    let stats = world.stats(&task);
+    assert_eq!(stats.frames, world.vm.task_frames(task.task()));
+    assert_eq!(stats.location, world.vm.task_location(task.task()));
+}
