@@ -11,6 +11,7 @@
 |---|---|---|---|
 | **同期アクセスの S5（同期の書き込み）** | 設計の判断が要る。今は書き込みを次のフレームに回す形で困っていない | 書き込みの 1 フレームの遅れが問題になったとき | `plans/sync-access-plan.md:155, 180` |
 | **`gc_step(work)` とヒープの上限** | VM（SabiRuby）の機能で、設計の判断が要る | GC の停止時間かメモリの上限が問題になったとき | `outlook.md:183-184`、SabiRuby `docs/backlog.md` |
+| **何も待っていない `Task.new` の子は、`stop_script` でも despawn でも止まらない**（`loop` や `sleep` の中にいる子。購読や held の問いで待っている子は `Unsubscribed` / `Unanswered` で巻き戻る） | 直すには VM が要る。SabiRuby の `Task` は作った側を記録しない（`TaskData` に親が無い）ので、rubevy からは「この実体のスクリプトが作ったタスク」を見つけられない。要るのは、タスクに作り手か持ち主の id を持たせること（例: `Task.new` の時点の `Task.current` を VM が記録し、`Vm::task_children(task)` か `Vm::task_terminate_tree(task)` で辿れる形）。rubevy 側だけで prelude の `Task.new` 上書きから一覧を持つ案もあるが、終わったタスクの片付けと GC の登録を rubevy が抱えることになる | 止めた・消した実体の子が動き続けて困る例が出たとき、または SabiRuby にタスクの親子が入ったとき | `worklog/2026-09-26-release-0.2-a.md` §4.3・§7-2、rustdoc の `stop_script` |
 | 消えた entity への書き込みが黙って捨てられる | 要望待ち | 利用者が気づけずに困ったとき | `plans/generalize-plan.md:276` |
 | 遅い `answer_in_tick` のクロージャに気づく道が無い | 要望待ち | 同上 | `plans/generalize-plan.md:287` |
 | `ScriptEnded` が「始まらなかった」と「失敗した」を分けない | 要望待ち | 同上 | `plans/generalize-plan.md:289` |

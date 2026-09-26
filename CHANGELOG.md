@@ -4,6 +4,58 @@ What changed in each release of `rubevy`. Every claim names the commit behind it
 the work came in on a branch) and the document under `docs/` that records it; measurements are the
 ones those documents carry, and nothing is estimated.
 
+## Unreleased
+
+Stage A of `docs/plans/release-0.2-plan.md` (R1–R4), on the branch `rel02-fixes`; the record is
+`docs/worklog/2026-09-26-release-0.2-a.md`. Still on SabiRuby 0.6 — the move to 0.7 is stage B.
+Stage E turns this section into 0.2.0.
+
+### Added
+
+* **`stop_script(&mut commands, entity)` and `stop_script_for::<M>`** (R1, `6e57d1d`): stop a
+  script and leave the entity without one. They take off `ScriptTask` (the task is terminated and
+  its subscriptions closed), `Script`, `ScriptDone` and `Held`; no `ScriptEnded` is sent.
+* **`Rubevy::Unanswered`** (R2, `826b927`): raised in whatever is waiting on a `Rubevy.ask` whose
+  `Request` the game dropped without answering (below).
+
+### Fixed
+
+* **Removing a `ScriptTask` was documented as a stop, and is a restart** (R1, `6e57d1d`): a
+  `Script` left on the entity is started again, from its first line, on the next frame. The
+  rustdoc of `ScriptTask` and `replace_script`, `docs/host-api.md` and the README now say so, and
+  point at `stop_script`.
+* **A restart by hand inherited the old task's held questions** (`6d6e6b7`): with the `ScriptTask`
+  taken off and the `Script` left, the new task started before the sweep looked, so the dead
+  task's questions stayed in the `Held` and were answered first. `ScriptTask`'s removal hook now
+  takes the `Held` off with the task.
+* **A dropped `Request` leaked its queue and parked its task for the life of the VM** (R2,
+  `826b927`). The queue is now closed and let go of at the next frame's sweep, and the waiting
+  `pop` raises `Rubevy::Unanswered`.
+* **A task with no entity asked and wrote as an entity nobody spawned** (R3, `ee26f6f`):
+  `Request::entity` and `RejectedWrite::by` were `Some` of index 0, generation `u32::MAX`
+  (`u64::MAX` as bits, which Bevy accepts). They are `None`.
+* **`ScriptStats::location` and `frames` were the compiled program's lines** (R4, `b8992f8`). The
+  prelude is taken off (`Script::prelude_lines`, copied onto the `ScriptTask` when it starts), and
+  frames inside the prelude are left out — the same line-drawing as `ScriptEnded::at`.
+* **Lines of a `require`d file had the prelude taken off too** (`9b6008a`), in `ScriptEnded::at`
+  and in `ScriptStats`. Only the script's own file (the outermost frame's) has it taken off now.
+
+### Changed — coming from 0.1.0
+
+* **A game that took the prelude off `ScriptStats` itself must stop**, or it takes it off twice
+  (R4).
+* **A second answer to a `Request` is refused** — to the same one or to a clone, through
+  `answer`, `answer_value`, `Held::answer` or a future — with a `warn!` and nothing else, and
+  `answer_value` does not run its closure for it (`826b927`, `9b6008a`). It used to be pushed
+  into a queue the first answer had let go of.
+* **Dropping a `Request` is refusing it**: the script hears `Rubevy::Unanswered` rather than
+  waiting for ever. A `Task.new` child waiting on a `Held` question when its script ends, is
+  replaced or is stopped now hears it too (R2).
+* **`Held` has no removal hook any more.** Its queues are let go of by the `Drop` of the
+  `Request`s in it, at the next frame's sweep rather than at once (R2, `826b927`).
+* **`ScriptWorld::release_dropped_values` counts every object it let go of**, the queues of
+  unanswered questions included, where it used to count values only (R2, `826b927`).
+
 ## 0.1.0 — 2026-09-22
 
 The second release on crates.io, and the first one whose crate carries this file. What it adds
