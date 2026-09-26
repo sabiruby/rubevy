@@ -723,7 +723,7 @@ enum HostCommand {
     SetPosition { entity: u64, x: f32, y: f32, z: f32 },
     /// `Rubevy.ask`: the script is parked on a queue until the game answers it. `entity` is
     /// `None` for a task that has none ([`task_entity`]).
-    Ask { entity: Option<u64>, kind: String, args: Vec<Arg>, queue: ObjId },
+    Ask { entity: Option<u64>, kind: String, args: Vec<Arg>, question: Question },
     /// `entity[:Transform] = hash`, through `Rubevy.set_component`: the value was read out of
     /// the VM by the native (a `&mut World` is a system away), and [`apply_component_writes`]
     /// writes it over the component through `ReflectComponent`. `by` is the entity of the task
@@ -795,15 +795,26 @@ pub struct RejectedWrite {
     pub reason: String,
 }
 
-/// Where a [`RootedValue`] that has been dropped leaves its object until the next sweep
-/// ([`ScriptWorld::release_dropped_values`]).
+/// Where a [`RootedValue`] or a [`Request`] that has been dropped leaves its object until the
+/// next sweep ([`ScriptWorld::release_dropped_values`]).
 ///
 /// A `Drop` is not given the `Vm` — it is given nothing at all — so letting go of a value is
 /// two steps: dropping the last handle puts the object here, and the next sweep, which has the
 /// `&mut Vm`, calls `Vm::gc_unregister` on it. In between the object is still registered, which
 /// is the safe side of the mistake: it lives a little longer than it had to, and never a moment
 /// less.
-type ReleaseQueue = std::sync::Arc<std::sync::Mutex<Vec<ObjId>>>;
+type ReleaseQueue = std::sync::Arc<std::sync::Mutex<Vec<Release>>>;
+
+/// One thing on the [`ReleaseQueue`]: what it is decides what the sweep does with it.
+#[derive(Debug, Clone, Copy)]
+enum Release {
+    /// A value an [`Arg::Value`] carried: unregister it, and that is all.
+    Value(ObjId),
+    /// The queue of a [`Request`] that was dropped **without being answered**: close it — the
+    /// task waiting on it raises `Rubevy::Unanswered` — and then unregister it
+    /// ([`Question`] says why a dropped question is closed and not only let go of).
+    Unanswered(ObjId),
+}
 
 /// A Ruby value that an [`Arg`] carries, kept alive for as long as anything holds it.
 ///
@@ -847,7 +858,7 @@ impl Drop for Root {
             Ok(q) => q,
             Err(poisoned) => poisoned.into_inner(),
         };
-        queue.push(self.id);
+        queue.push(Release::Value(self.id));
     }
 }
 
@@ -876,6 +887,70 @@ impl RootedValue {
 impl PartialEq for RootedValue {
     fn eq(&self, other: &Self) -> bool {
         self.value == other.value
+    }
+}
+
+/// **The one registration behind a [`Request`]'s queue**, shared by every clone of it, and what
+/// happens to that queue when the last clone goes without an answer.
+///
+/// The `Rubevy.ask` native registers the queue (`Vm::gc_register`) so that the collector leaves
+/// it alone while the game holds the question. The pair to that registration used to be in one
+/// place only, [`ScriptWorld::answer`]: a `Request` a game dropped instead of answering kept its
+/// queue registered for the life of the VM, and whatever was waiting on it — a script's own task,
+/// or one it made with `Task.new` — was parked there for as long, with nothing to say so. This is
+/// the other place. It is the same two steps a [`RootedValue`] takes, for the same reason (a
+/// `Drop` has no `Vm`): the last clone going puts the queue on the release queue, and the next
+/// frame's sweep lets it go.
+///
+/// **A dropped question is closed as well as let go of** (the author's decision of 2026-09-26:
+/// "閉じる。待っている側は例外で知る"). Closing is what wakes the task parked on it, and the
+/// sweep gives the queue `Rubevy::DroppedQuestion` first (`src/prelude.rb`), whose `__pop_try`
+/// raises `Rubevy::Unanswered` in a closed queue — so the waiting task unwinds through its
+/// `ensure`s and ends, the way a task waiting on a subscription that ended does
+/// (`Rubevy::Unsubscribed`), instead of standing on a queue nothing will ever fill.
+///
+/// `answered` is what tells the two endings apart. [`ScriptWorld::answer`] sets it as it pushes
+/// the answer and lets go of the queue itself, so the `Drop` of an answered question does
+/// nothing; and because every clone shares it, **a second answer is refused** rather than pushed
+/// into a queue that has already been let go of (and whose number, once collected, may name
+/// another object).
+#[derive(Debug)]
+struct QuestionRoot {
+    queue: ObjId,
+    answered: std::sync::atomic::AtomicBool,
+    release: ReleaseQueue,
+}
+
+/// What a [`Request`] holds of its queue: shared, so that the queue is closed once — when the
+/// last clone goes — and answered at most once.
+type Question = std::sync::Arc<QuestionRoot>;
+
+impl QuestionRoot {
+    fn new(queue: ObjId, release: &ReleaseQueue) -> Question {
+        std::sync::Arc::new(QuestionRoot {
+            queue,
+            answered: std::sync::atomic::AtomicBool::new(false),
+            release: release.clone(),
+        })
+    }
+
+    /// Marks the question answered, and says whether it was the first answer.
+    fn answer(&self) -> bool {
+        !self.answered.swap(true, std::sync::atomic::Ordering::AcqRel)
+    }
+}
+
+impl Drop for QuestionRoot {
+    fn drop(&mut self) {
+        if *self.answered.get_mut() {
+            return;
+        }
+        // as in `Root::drop`: a poisoned lock is still a queue
+        let mut queue = match self.release.lock() {
+            Ok(q) => q,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        queue.push(Release::Unanswered(self.queue));
     }
 }
 
@@ -939,6 +1014,13 @@ impl Arg {
 /// with [`ScriptWorld::answer`] — this frame or any later one. The script's task is parked
 /// meanwhile, so it costs nothing and the other scripts keep running.
 ///
+/// **Dropping one is refusing it.** A `Request` that goes — the last clone of it — without having
+/// been answered closes the queue the script waits on, at the head of the next frame
+/// ([`ScriptWorld::release_dropped_values`]), and the script's `pop` raises `Rubevy::Unanswered`.
+/// So a question is never left waiting for nobody: it is answered, or it is refused out loud.
+/// (Before 0.2.0 a dropped request kept its queue registered with the collector for the life of
+/// the VM, and the task that asked waited as long.)
+///
 /// **Where a question whose answer takes frames waits**: a kind registered with
 /// [`HoldRequests::hold_requests`] is put on the asking entity as a [`Held`] component instead of
 /// coming out of `take_requests`, so the index is a `Query` and rubevy does the tidying up.
@@ -950,8 +1032,12 @@ pub struct Request {
     pub kind: String,
     /// The rest of the arguments: numbers and strings, in the order they were written.
     pub args: Vec<Arg>,
-    /// Hand this back to [`ScriptWorld::answer`]; it is the queue the script waits on.
+    /// The queue the script waits on. [`ScriptWorld::answer`] is handed the whole `Request`,
+    /// not this; it is here for a host that wants to look at the queue itself.
     pub queue: ObjId,
+    /// The registration of [`Request::queue`], shared with every clone, and what closes the
+    /// queue if the last of them goes unanswered ([`QuestionRoot`]).
+    question: Question,
 }
 
 /// What a game answers a [`Request`] with.
@@ -982,6 +1068,18 @@ pub enum Answer {
 pub type InTickAnswerer = Box<dyn Fn(&World, &Request) -> Answer + Send + Sync + 'static>;
 
 impl Request {
+    /// A request out of the `Rubevy.ask` native's command: the entity's bits made an `Entity`,
+    /// where the task had one.
+    fn new(entity: Option<u64>, kind: String, args: Vec<Arg>, question: Question) -> Request {
+        Request {
+            entity: entity.and_then(entity_from_bits),
+            kind,
+            args,
+            queue: question.queue,
+            question,
+        }
+    }
+
     /// The `i`th argument as a number, where it is one.
     pub fn num(&self, i: usize) -> Option<f64> {
         self.args.get(i).and_then(Arg::as_num)
@@ -1118,11 +1216,18 @@ impl Request {
 /// | what happened | what takes the requests |
 /// |---|---|
 /// | the game answered the last one | the next tick takes the empty `Held` off |
-/// | the entity was despawned | Bevy, with the component — and this type's removal hook lets the queues go |
+/// | the entity was despawned | Bevy, with the component |
 /// | [`replace_script`] | it removes `Held` beside [`ScriptTask`] |
 /// | the script ran to its end, raised, or overran | the tick removes it where it sends [`ScriptEnded`] |
 /// | the game removed [`ScriptTask`] by hand | the next tick, which is where a `Held` with no live script is swept |
 /// | the VM is paused (`budget = 0`) | nothing: what is waiting goes on waiting, and is answered when the game answers it |
+///
+/// Taking the requests is dropping them, and **a request dropped without an answer closes its
+/// queue** at the next frame's sweep ([`ScriptWorld::release_dropped_values`]): a task still
+/// parked on it — one the script made with `Task.new`, since the script's own task has been
+/// stopped or has ended in every row where a question goes unanswered — raises
+/// `Rubevy::Unanswered` and unwinds, rather than waiting for an answer that no longer has
+/// anywhere to come from.
 ///
 /// The one thing that never lands here is a question with **nothing to wait for**: a task with no
 /// entity, or one whose script had already ended when the question was sorted. Those go to
@@ -1142,7 +1247,6 @@ impl Request {
 /// which is not a thing a scene or an inspector can carry, and the table above says why it is not
 /// a thing a save file can carry either.
 #[derive(Component)]
-#[component(on_remove = release_held::<M>)]
 pub struct Held<M = ()> {
     /// The requests, oldest first. Private because taking one out must go through
     /// [`Held::take`] or [`Held::answer`]: a `Request` that leaves here is one this type has
@@ -1220,37 +1324,13 @@ impl<M: 'static> Held<M> {
 }
 
 // as on `Script`: derived, `Debug` would ask the name tag to be `Debug` itself. There is no
-// `Clone`, on purpose — two copies of a `Request` are two chances to answer it, and answering one
-// twice pushes into a queue that has been let go of.
+// `Clone`, on purpose — two copies of a `Held` are two lists of the same questions, each of which
+// would look as if it were still waiting after the other had answered (a second answer is refused
+// since 0.2.0, `QuestionRoot`, but a list that says "waiting" about an answered question is still
+// wrong).
 impl<M> std::fmt::Debug for Held<M> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Held").field("waiting", &self.waiting).finish()
-    }
-}
-
-/// Lets the collector have the queues of the questions that were still waiting, wherever a
-/// [`Held`] goes — a despawn, [`replace_script`], a script that ended, the sweep of an empty one.
-///
-/// A [`Request`]'s `queue` is registered with the collector from the moment the `Rubevy.ask`
-/// native makes it until [`ScriptWorld::answer`] pushes into it; a request that is thrown away
-/// instead never reaches that second half, and the registration would stand for the life of the
-/// VM. The `Arg::Value`s a question carried need nothing here — each is owned by a [`RootedValue`]
-/// whose `Drop` puts it on the release queue as the `Request` goes — so this is the one thing the
-/// component has to say out loud.
-fn release_held<M: 'static>(
-    mut world: bevy::ecs::world::DeferredWorld,
-    context: bevy::ecs::lifecycle::HookContext,
-) {
-    let queues: Vec<ObjId> = match world.get::<Held<M>>(context.entity) {
-        Some(held) => held.waiting.iter().map(|r| r.queue).collect(),
-        None => return,
-    };
-    if queues.is_empty() {
-        return;
-    }
-    let Some(mut scripts) = world.get_resource_mut::<ScriptWorld<M>>() else { return };
-    for queue in queues {
-        scripts.vm.gc_unregister(queue);
     }
 }
 
@@ -2079,8 +2159,8 @@ impl<M: 'static> ScriptWorld<M> {
     /// script ended in — a task it made with `Task.new` can ask in the round the script raises in
     /// — go to the game's own answering system, the way they did before there was a [`Held`]. An
     /// answering system that holds some of its kinds should therefore go on answering the ones it
-    /// does not know rather than skipping them: every question must be answered by somebody, or
-    /// the task that asked it is parked for the life of the VM.
+    /// does not know rather than skipping them: a question nobody answers is one the task that
+    /// asked it hears about only as `Rubevy::Unanswered`, when the `Request` is dropped.
     ///
     /// The kinds rubevy answers itself (`RESERVED_KINDS`) cannot be held, and neither can one the
     /// game registered with [`ScriptWorld::answer_in_tick`]: both are taken off the VM's queue
@@ -2105,8 +2185,9 @@ impl<M: 'static> ScriptWorld<M> {
         self.held_kinds.len()
     }
 
-    /// Lets the collector have the values of [`Request`]s that have been dropped
-    /// ([`Arg::Value`]), and answers how many. **The plugin does this at the head of every
+    /// Lets the collector have what dropped [`Request`]s held — the values they carried
+    /// ([`Arg::Value`]), and the queue of every one that was dropped **without being answered** —
+    /// and answers how many objects it let go of. **The plugin does this at the head of every
     /// frame, before the scripts run**; a game has nothing to call.
     ///
     /// It is here because the two halves of letting a value go happen in different places: the
@@ -2115,18 +2196,73 @@ impl<M: 'static> ScriptWorld<M> {
     /// nothing is ever collected while a request still names it — a value simply outlives its
     /// request by up to one frame. A host driving `ScriptWorld` without [`RubevyPlugin`]'s
     /// systems calls this itself, or the registrations pile up.
+    ///
+    /// **An unanswered question's queue is closed here**, before it is let go of: the task parked
+    /// on it wakes and raises `Rubevy::Unanswered` in the `pop` it was waiting in, rather than
+    /// waiting for the life of the VM on a queue nobody holds any more. A task that wants to go
+    /// on without the answer rescues it:
+    ///
+    /// ```ruby
+    /// begin
+    ///   found = Rubevy.ask("scan", 40.0).pop
+    /// rescue Rubevy::Unanswered
+    ///   found = nil                       # the game let the question go
+    /// end
+    /// ```
     pub fn release_dropped_values(&mut self) -> usize {
-        let ids = {
+        let released = {
             let mut queue = match self.release.lock() {
                 Ok(q) => q,
                 Err(poisoned) => poisoned.into_inner(),
             };
             std::mem::take(&mut *queue)
         };
-        for id in &ids {
-            self.vm.gc_unregister(*id);
+        // looked up once per sweep and only where there is a question to close, which is the
+        // rare case: an app whose every question is answered never reaches the lookup
+        let mut dropped_question: Option<Option<Value>> = None;
+        for release in &released {
+            match *release {
+                Release::Value(id) => self.vm.gc_unregister(id),
+                Release::Unanswered(queue) => {
+                    let module = *dropped_question.get_or_insert_with(|| {
+                        let rubevy = self.vm.intern("Rubevy");
+                        let name = self.vm.intern("DroppedQuestion");
+                        match self.vm.const_get(self.vm.core.object, rubevy) {
+                            Some(Value::Obj(m)) => self.vm.const_get(m, name),
+                            _ => None,
+                        }
+                    });
+                    self.close_unanswered(queue, module);
+                    self.vm.gc_unregister(queue);
+                }
+            }
         }
-        ids.len()
+        released.len()
+    }
+
+    /// Closes the queue of a question the game dropped, having given it `Rubevy::DroppedQuestion`
+    /// first so that the `pop` waiting on it raises rather than answering nil
+    /// ([`QuestionRoot`] says why).
+    ///
+    /// The module goes on **before** the close because the close is what wakes the waiting task,
+    /// and what the task does when it next runs is call `__pop_try` again from inside the `pop` it
+    /// was parked in (mruby-task's `Task::Queue#pop` is a Ruby loop around it) — so it is
+    /// `__pop_try` that has to know, and it has to know by the time the task runs. The waiter
+    /// runs in the tick, well after this sweep, so the order is not a race; it is written this
+    /// way round so that it would not become one.
+    fn close_unanswered(&mut self, queue: ObjId, module: Option<Value>) {
+        if let Some(module) = module {
+            let extend = self.vm.intern("extend");
+            if let Err(e) = self.vm.funcall(Value::Obj(queue), extend, &[module], Value::Nil) {
+                let message = self.vm.describe_error(&e);
+                error!("rubevy: could not mark a dropped question: {message}");
+            }
+        }
+        let close = self.vm.intern("close");
+        if let Err(e) = self.vm.funcall(Value::Obj(queue), close, &[], Value::Nil) {
+            let message = self.vm.describe_error(&e);
+            error!("rubevy: could not close a dropped question: {message}");
+        }
     }
 
     /// How many `Rubevy::Entity` objects the collector has taken since the VM started, as the
@@ -2137,7 +2273,13 @@ impl<M: 'static> ScriptWorld<M> {
     }
 
     /// Answers a request: the script's `Rubevy.ask` returns this value and its task becomes
-    /// ready again. The queue is let go of here, so answer each request once.
+    /// ready again. The queue is let go of here.
+    ///
+    /// **A request is answered once.** A second answer — to the same `Request`, or to a clone of
+    /// it — is not given: it says so in the log and does nothing, because the queue it would go
+    /// into has been let go of. A request that is dropped **without** an answer closes its queue
+    /// instead, and the script waiting on it raises `Rubevy::Unanswered`
+    /// ([`ScriptWorld::release_dropped_values`]); dropping is how a game refuses a question.
     pub fn answer(&mut self, request: &Request, answer: Answer) {
         let value = answer_value(&mut self.vm, answer, self.entity_class);
         self.push_answer(request, value);
@@ -2174,6 +2316,12 @@ impl<M: 'static> ScriptWorld<M> {
     }
 
     fn push_answer(&mut self, request: &Request, value: Value) {
+        // a second answer — through a clone, or the same `Request` twice — would push into a
+        // queue the first one let go of, whose number may by now be another object's
+        if !request.question.answer() {
+            warn!("rubevy: {} was answered twice; the second answer is not given", request.kind);
+            return;
+        }
         if let Err(e) = self.vm.task_queue_push(request.queue, value) {
             let message = self.vm.describe_error(&e);
             error!("rubevy: could not answer {}: {message}", request.kind);
@@ -3486,7 +3634,9 @@ fn drain_commands<M: 'static>(
     // that asked is not running any more (its `ScriptTask` was removed by hand — `replace_script`
     // and a script that ended take it off where they happen, so those two do not wait for this).
     // Taking the component off rather than leaving it empty is what makes `Added<Held>` mean
-    // "started waiting" the next time round, and what gets the queues released (`release_held`).
+    // "started waiting" the next time round, and what gets the queues released: the requests in it
+    // are dropped with it, and a dropped request's queue is closed and let go of by the next sweep
+    // (`QuestionRoot`).
     //
     // `try_remove`, not `remove`: an entity a script despawned this frame is already on the
     // command queue in front of this, and a removal from a despawned entity is not news.
@@ -3503,7 +3653,7 @@ fn drain_commands<M: 'static>(
     let mut to_hold: Vec<(Entity, Request)> = Vec::new();
     for c in take_commands(&mut world.vm) {
         match c {
-            HostCommand::Ask { entity, kind, args, queue } => {
+            HostCommand::Ask { entity, kind, args, question } => {
                 // parked scripts wait here until a system of the game answers
                 // (`ScriptWorld::take_requests` / `answer`) — except the kinds that are
                 // answered inside the tick, which are sorted out here rather than left for a
@@ -3511,8 +3661,7 @@ fn drain_commands<M: 'static>(
                 // the game registered with `answer_in_tick`. What lands in either of those two
                 // is the leftovers of a frame that ran out of budget or of time; the next
                 // frame's answer loop takes them first.
-                let request =
-                    Request { entity: entity.and_then(entity_from_bits), kind, args, queue };
+                let request = Request::new(entity, kind, args, question);
                 // `Rubevy.next_frame` asked in a round the tick never came back to — the frame
                 // ran out of budget or of time before its answer loop reached the queue — goes
                 // straight to the tasks waiting for the next frame. Sorting it into
@@ -3685,8 +3834,8 @@ fn take_asks(vm: &mut Vm, wanted: impl Fn(&str) -> bool) -> Vec<Request> {
             i += 1;
             continue;
         }
-        if let HostCommand::Ask { entity, kind, args, queue } = state.commands.remove(i) {
-            taken.push(Request { entity: entity.and_then(entity_from_bits), kind, args, queue });
+        if let HostCommand::Ask { entity, kind, args, question } = state.commands.remove(i) {
+            taken.push(Request::new(entity, kind, args, question));
         }
     }
     taken
@@ -4465,8 +4614,11 @@ fn install_host_api(vm: &mut Vm, release: ReleaseQueue) -> ObjId {
         }
         let queue = vm.task_queue_new()?;
         vm.gc_register(queue);
+        // from here the registration is the `Request`'s: answered, it is let go of by the answer;
+        // dropped, by the sweep, which closes the queue as well (`QuestionRoot`)
+        let question = QuestionRoot::new(queue, &release);
         let entity = task_entity(vm);
-        push_command(vm, HostCommand::Ask { entity, kind, args, queue });
+        push_command(vm, HostCommand::Ask { entity, kind, args, question });
         Ok(Value::Obj(queue))
     });
     // `entity[:Transform] = hash` goes through here (`src/prelude.rb`). It is a command rather

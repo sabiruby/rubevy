@@ -166,7 +166,8 @@ module Rubevy
   class Unsubscribed < StandardError; end
 
   # What `Rubevy.subscribe` extends the queue it answers with (one object, not the class: an
-  # `Rubevy.ask` queue is an ordinary `Task::Queue` and keeps the gem's own meaning).
+  # `Rubevy.ask` queue is an ordinary `Task::Queue` and keeps the gem's own meaning — unless the
+  # game drops the question unanswered, which is `DroppedQuestion` below).
   #
   # mruby-task's `Queue#close` wakes everything parked on the queue and makes `pop` answer nil
   # from then on — the gem's way of saying "no more", and the reason rubevy closes a queue it
@@ -206,6 +207,37 @@ module Rubevy
     def dropped
       n = @rubevy_dropped
       n.nil? ? 0 : n
+    end
+  end
+
+  # Raised in whatever is waiting on a `Rubevy.ask` when the game lets the question go without
+  # answering it — drops the `Request` rather than handing it to `ScriptWorld::answer`. Nothing
+  # will ever answer that queue, so a `pop` that went on waiting would wait for as long as the VM
+  # lives; this is the same news `Unsubscribed` is for a subscription, and it is raised for the
+  # same reason: the waiting task unwinds, runs its `ensure`, and ends — or rescues it and goes on
+  # without the answer.
+  #
+  #   begin
+  #     found = Rubevy.ask("scan", 40.0).pop
+  #   rescue Rubevy::Unanswered
+  #     found = nil
+  #   end
+  class Unanswered < StandardError; end
+
+  # What the host extends a dropped question's queue with, just before it closes it
+  # (`ScriptWorld::release_dropped_values` in src/lib.rs). It is put on that one queue and only
+  # then, so an answered question — every question, in a game that answers what it is asked —
+  # is an ordinary `Task::Queue` with nothing in front of its `pop`.
+  #
+  # It is `__pop_try` and not `pop` that it stands in front of, because the task it is for is
+  # already *inside* `pop`: mruby-task's `Task::Queue#pop` is a Ruby loop that calls `__pop_try`
+  # until it gets an item, and a task parked on the queue wakes (on the close) inside that loop
+  # and calls `__pop_try` again. A `pop` of the module's own would be looked up by the next
+  # `pop`, not by the one already running.
+  module DroppedQuestion
+    def __pop_try(*args)
+      raise Unanswered, "the game let this question go without answering it" if closed? && empty?
+      super
     end
   end
 end

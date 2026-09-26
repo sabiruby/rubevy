@@ -263,8 +263,9 @@ fn a_question_that_carried_a_hash() {
     assert_eq!(registered(&app), 1);
 }
 
-/// **Despawned while waiting.** Bevy takes the component with the entity, the removal hook lets
-/// the queue and the value go, and nothing of the script is left registered.
+/// **Despawned while waiting.** Bevy takes the component with the entity, the requests in it are
+/// dropped with it — which puts their queues and values on the release queue — and after the next
+/// sweep nothing of the script is left registered.
 #[test]
 fn a_despawned_entity_leaves_no_question_behind() {
     let mut app = app();
@@ -325,6 +326,23 @@ fn a_script_that_ends_takes_its_waiting_questions_with_it() {
     assert!(app.world().entity(e).get::<Held>().is_none(), "it went with the ending");
     frames(&mut app, 3);
     assert_eq!(registered(&app), 0);
+}
+
+/// **The child that was waiting hears about it.** The `Held` goes with the ending, its requests
+/// are dropped unanswered, and a dropped request closes its queue: the `Task.new` child parked on
+/// it raises `Rubevy::Unanswered` at the next sweep and unwinds through its `ensure`, rather than
+/// standing on a queue nobody will answer (since 0.2.0; `tests/unanswered.rs` is the rest of it).
+#[test]
+fn the_child_waiting_on_a_held_question_hears_unanswered() {
+    let mut app = app();
+    let e = spawn_script(
+        &mut app,
+        "Task.new do\n  begin\n    Rubevy.ask('wait').pop\n  rescue Rubevy::Unanswered\n    Rubevy.ask('heard').pop\n  end\nend\nsleep 0.02\n",
+    );
+    until(&mut app, 40, |app| app.world().entity(e).get::<ScriptDone>().is_some());
+    until(&mut app, 20, |app| app.world().resource::<Seen>().kinds.iter().any(|k| k == "heard"));
+    frames(&mut app, 3);
+    assert_eq!(registered(&app), 0, "the child ended, and nothing of it is registered");
 }
 
 /// **The script raised** in the same tick as it asked. There is no script left to wait for, so

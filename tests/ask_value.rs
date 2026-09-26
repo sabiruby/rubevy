@@ -157,10 +157,12 @@ fn numbers_strings_and_entities_keep_their_fast_paths() {
     assert_eq!(r.entity_arg(4), Some(e));
     assert_eq!(r.value(5), Some(Value::Nil));
     assert_eq!(r.value(6), Some(Value::True));
-    // an immediate has no object to register, so nothing is waiting for a sweep
+    // an immediate has no object to register, so no value is waiting for a sweep — what is, is
+    // the question's own queue, which was dropped without an answer (since 0.2.0 that closes it
+    // and lets it go at the same sweep: `tests/unanswered.rs`)
     drop(held);
     let world = &mut *app.world_mut().resource_mut::<ScriptWorld>();
-    assert_eq!(world.release_dropped_values(), 0, "nil and true own nothing");
+    assert_eq!(world.release_dropped_values(), 1, "nil and true own nothing; the queue is let go of");
 }
 
 /// A value carried by a request that nobody ever answers is still let go of when the request is
@@ -176,7 +178,11 @@ fn a_request_that_is_never_answered_still_releases_its_value() {
     drop(held);
 
     let world = &mut *app.world_mut().resource_mut::<ScriptWorld>();
-    assert_eq!(world.release_dropped_values(), 1, "the Hash was let go of unanswered");
+    assert_eq!(
+        world.release_dropped_values(),
+        2,
+        "the Hash was let go of unanswered, and so was the queue nobody answered"
+    );
 }
 
 /// A `Request` may be cloned and kept in two places; the value goes when the last of them does.
@@ -198,5 +204,5 @@ fn a_cloned_request_holds_the_value_until_the_last_clone_is_gone() {
     }
     drop(copy);
     let world = &mut *app.world_mut().resource_mut::<ScriptWorld>();
-    assert_eq!(world.release_dropped_values(), 1, "and the last clone lets it go");
+    assert_eq!(world.release_dropped_values(), 2, "and the last clone lets it go, with its queue");
 }

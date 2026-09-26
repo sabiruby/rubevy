@@ -82,10 +82,29 @@ actually run.
 **Rules.**
 
 * Answer each request once. `ScriptWorld::answer` lets go of the queue (`gc_unregister`) as it
-  answers, so a second answer to the same request is a mistake.
+  answers, so a second answer to the same request — or to a clone of it — is not given: it is a
+  line in the log and nothing else.
 * A request you cannot answer yet is yours to keep; nothing expires. If the script should not wait
   forever, it can say so on the Ruby side: `Rubevy.ask(…).pop(timeout_ms: 500)` answers nil when
   the deadline passes.
+* **Dropping a request is refusing it.** When the last clone of a `Request` goes without having
+  been answered, the queue is closed at the head of the next frame, and the `pop` waiting on it
+  raises `Rubevy::Unanswered` — so the task unwinds through its `ensure`s instead of waiting for
+  the life of the VM on a queue nothing holds any more. A script that can go on without the answer
+  rescues it:
+
+  ```ruby
+  begin
+    found = Rubevy.ask("scan", 40.0).pop
+  rescue Rubevy::Unanswered            # the game let the question go
+    found = nil
+  end
+  ```
+
+  It is `Rubevy::Unsubscribed`'s twin (Events, below), and a different class on purpose: a script
+  that rescues the end of a subscription is not asking to swallow a refused question too. Before
+  0.2.0 a dropped request kept its queue registered with the collector and its task parked for
+  the life of the VM, silently.
 * `kind` is a string; the arguments after it are numbers, strings, entities, or any other Ruby
   value ([`Arg`]), and `Request::num(i)` / `Request::text(i)` / `Request::entity_arg(i)` /
   `Request::value(i)` read them — each answers `None` for an argument of another sort. An answer
@@ -463,10 +482,14 @@ waiting can end takes the requests with it:
 | the game removed `ScriptTask` by hand | the next tick, which sweeps a `Held` with no live script |
 | the VM is paused (`budget = 0`) | nothing: what is waiting goes on waiting |
 
+Taking the requests is dropping them, and a dropped request closes its queue: a `Task.new` child
+still parked on one — the script's own task has been stopped or has ended in every row where a
+question goes unanswered — raises `Rubevy::Unanswered` at the next frame and unwinds.
+
 **A held kind still reaches `take_requests` where there is nothing to wait on**: a question from a
 task with no entity of its own, and one asked in the very tick its script ended in. Go on answering
-the kinds your system does not know rather than skipping them — every question must be answered by
-somebody, or the task that asked it is parked for ever.
+the kinds your system does not know rather than skipping them — a question nobody answers is one
+its task hears about only as `Rubevy::Unanswered`, when the `Request` is dropped.
 
 **What cannot be held**: the kinds rubevy answers itself, and the kinds the game registered with
 `answer_in_tick`. Both are taken off the VM's queue before this sorting happens, so both are
@@ -854,7 +877,8 @@ a script (`assets/scripts/events.rb`) with a brain and a reflex.
   It is the subscription's queue that says this, not every queue: `Rubevy.subscribe` extends the
   one it answers with `Rubevy::Subscription` (`pop`, `shift`, `deq`, `dropped`). A queue from
   `Rubevy.ask` is an ordinary `Task::Queue` and keeps mruby-task's own meaning, where a closed
-  queue answers `pop` with nil.
+  queue answers `pop` with nil — until the game drops the question without answering it, which
+  closes it with `Rubevy::Unanswered` (the rules of `Rubevy.ask`, above).
 
 ### How much a queue holds, and what it lost
 
