@@ -26,7 +26,7 @@ behind every claim, is
   (`ScriptWorld::loaded_programs`). A `.mrb` that will not load is reported once rather than
   every frame (`broken_programs`), and tried again if the asset changes.
 * **Replacing and stopping**: `replace_script(&mut commands, entity, script)` swaps a script;
-  removing `ScriptTask` or despawning the entity ends the task.
+  `stop_script(&mut commands, entity)` stops one (removing `ScriptTask` alone only restarts it).
 * The collector runs at the scheduler's idle points (`GC.scheduler_driven`).
 
 ### From a script to the game and back

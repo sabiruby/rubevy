@@ -285,8 +285,11 @@ impl<M> Clone for Script<M> {
 
 /// The task a [`Script`] became. Added by the plugin once the asset arrives.
 ///
-/// Removing it (or despawning the entity) stops the task: it is terminated in the VM, so a script
-/// replaced by a new [`Script`] — a reload, a restart — does not keep running beside the new one.
+/// Removing it (or despawning the entity) stops the **task**: it is terminated in the VM, so a
+/// script replaced by a new [`Script`] — a reload, a restart — does not keep running beside the new
+/// one. It does not stop the **script**: a [`Script`] still on the entity is turned into a task
+/// again on the next frame, from its first line, which is how [`replace_script`] works. To stop a
+/// script, [`stop_script`] — which takes the [`Script`] off as well.
 ///
 /// The name tag `M` says which VM the task belongs to. It is what keeps an [`ObjId`] of one VM
 /// from being handed to another: an `ObjId` is an index into a VM's own heap, so the same number
@@ -563,8 +566,9 @@ struct ScriptStartFailed<M = ()> {
 ///
 /// A question the old script had already asked may still be answered once — the [`Request`] was
 /// taken before the swap — and no new one is asked (`tests/replace.rs`). To **stop** a script
-/// instead of replacing it, remove its [`ScriptTask`] or despawn the entity; there is nothing
-/// else to do.
+/// instead of replacing it, [`stop_script`], or despawn the entity. Removing the [`ScriptTask`]
+/// alone is not a stop: the [`Script`] left behind is started again, from the top, on the next
+/// frame.
 ///
 /// A question of a **held** kind that the old script was waiting on goes with it: [`Held`] is
 /// taken off here, so the new script does not arrive at an entity that still looks as if it were
@@ -576,6 +580,68 @@ pub fn replace_script<M: 'static>(commands: &mut Commands, entity: Entity, scrip
         .remove::<ScriptDone<M>>()
         .remove::<Held<M>>()
         .insert(script);
+}
+
+/// **Stops an entity's script**, of the app's first VM, and leaves the entity without one.
+///
+/// ```no_run
+/// # use bevy::prelude::*;
+/// # use rubevy::stop_script;
+/// fn back_to_the_title(mut commands: Commands, scene: Entity) {
+///     stop_script(&mut commands, scene);
+/// }
+/// ```
+///
+/// It is [`replace_script`] without the new script. The [`ScriptTask`] comes off — its removal
+/// hook terminates the task in the VM and closes what the script subscribed to — and so does the
+/// [`Script`], which is the half that removing the task by hand leaves behind: a `Script` with no
+/// task is one the plugin starts, so the entity would run the same script again, from its first
+/// line, on the next frame. That is what happened in one embedding, which stopped a scene's
+/// script on the way back to its title screen and found the scene playing again a frame later;
+/// the rustdoc here used to say that removing the `ScriptTask` was all a stop took.
+///
+/// What goes with it, and what does not:
+///
+/// * **The script's own task ends**, on the frame the command is applied: terminated, not
+///   unwound (`Task#terminate` runs no `ensure`), and let go of.
+/// * **Its subscriptions are closed**, so a task it made with `Task.new` that is waiting on one
+///   raises `Rubevy::Unsubscribed` and unwinds.
+/// * **What it was waiting on in a [`Held`] is dropped**, so a `Task.new` child parked on one
+///   raises `Rubevy::Unanswered` at the next frame's sweep and unwinds. A question the game had
+///   already taken out with [`ScriptWorld::take_requests`] is the game's: answer it (the answer
+///   goes nowhere) or drop it.
+/// * [`ScriptDone`] comes off too, so the entity looks exactly like one that was never given a
+///   script, and a [`Script`] inserted later starts as any new one does.
+/// * **No [`ScriptEnded`] is sent.** The script did not end; the game ended it, and knows.
+/// * **A `Task.new` child that is not waiting on anything of the above** — one that loops, or
+///   sleeps — is not stopped: the VM does not record which task made which (SabiRuby's `Task` has
+///   no parent), so there is nothing to find it by. It still carries the entity, and what it asks
+///   from now on is a question with no live script behind it ([`ScriptWorld::hold_requests`]).
+///   A script whose children must stop with it has them wait on a subscription.
+///
+/// A second VM's script is stopped with [`stop_script_for`]: `stop_script_for::<Mods>(&mut
+/// commands, e)`, which leaves the first VM's script on the same entity alone.
+pub fn stop_script(commands: &mut Commands, entity: Entity) {
+    stop_script_for::<()>(commands, entity);
+}
+
+/// [`stop_script`] for the VM named `M`.
+///
+/// It is a function of its own rather than a type parameter on [`stop_script`] for the reason
+/// [`Script::new`] and [`Script::for_vm`] are two: Rust does not fall back to a type parameter's
+/// default in an expression, so a generic `stop_script(&mut commands, e)` would be a type it
+/// cannot infer. [`replace_script`] needs no second name because its `Script<M>` argument says
+/// which VM it is.
+pub fn stop_script_for<M: 'static>(commands: &mut Commands, entity: Entity) {
+    // the task first: its removal hook reads whether `ScriptDone` is there (a task that ended
+    // has been let go of already), so the marker has to still be on the entity when it runs
+    commands
+        .entity(entity)
+        .remove::<ScriptTask<M>>()
+        .remove::<Script<M>>()
+        .remove::<ScriptDone<M>>()
+        .remove::<ScriptStartFailed<M>>()
+        .remove::<Held<M>>();
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1218,6 +1284,7 @@ impl Request {
 /// | the game answered the last one | the next tick takes the empty `Held` off |
 /// | the entity was despawned | Bevy, with the component |
 /// | [`replace_script`] | it removes `Held` beside [`ScriptTask`] |
+/// | [`stop_script`] | the same |
 /// | the script ran to its end, raised, or overran | the tick removes it where it sends [`ScriptEnded`] |
 /// | the game removed [`ScriptTask`] by hand | the next tick, which is where a `Held` with no live script is swept |
 /// | the VM is paused (`budget = 0`) | nothing: what is waiting goes on waiting, and is answered when the game answers it |

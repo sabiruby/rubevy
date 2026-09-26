@@ -478,6 +478,7 @@ waiting can end takes the requests with it:
 | the game answered the last one | the next tick takes the empty `Held` off |
 | the entity was despawned | Bevy, with the component |
 | `replace_script` | it removes `Held` beside `ScriptTask` |
+| `stop_script` | the same |
 | the script ran to its end, raised, or overran | the tick, where it sends `ScriptEnded` |
 | the game removed `ScriptTask` by hand | the next tick, which sweeps a `Held` with no live script |
 | the VM is paused (`budget = 0`) | nothing: what is waiting goes on waiting |
@@ -849,7 +850,7 @@ a script (`assets/scripts/events.rb`) with a brain and a reflex.
   `ScriptWorld::QUEUE_LIMIT` (64), and both ends can move it: see **How much a queue holds**
   below.
 * A subscription is let go of when the script's task ends and when its `ScriptTask` is removed
-  (a reload, a despawn). A script that runs off its end keeps its `ScriptTask` — that is what
+  (a reload, a stop, a despawn). A script that runs off its end keeps its `ScriptTask` — that is what
   stops it starting again — so both places matter. `ScriptWorld::subscriptions()` says how many
   are standing.
 * **The queue is closed when the subscription goes, and a `pop` waiting on it raises
@@ -1610,9 +1611,14 @@ said before the work of 2026-09-20.
 
 ## Replacing and removing a script
 
-A game reloads a script by removing the entity's `ScriptTask` and inserting a new `Script`, and
-ends one by despawning the entity. Either way `ScriptTask`'s `on_remove` hook terminates the task
-in the VM (`Task#terminate`) and lets the collector have it.
+A game reloads a script with `replace_script`, stops one with `stop_script`, and ends one with its
+entity by despawning the entity. Underneath all three, `ScriptTask`'s `on_remove` hook terminates
+the task in the VM (`Task#terminate`) and lets the collector have it.
+
+**Removing the `ScriptTask` stops the task, not the script.** A `Script` still on the entity is a
+script the plugin has not started, so it is turned into a task again on the next frame and runs
+from its first line. That is what replacing is made of, and it is why stopping has a function of
+its own.
 
 **Replacing is `replace_script`**, which is those lines under a name:
 
@@ -1635,8 +1641,33 @@ that would not load: "One program, one irep"). That mark is rubevy's own and not
 but the effect is: an entity whose script was broken bytecode is given a fresh start by
 `replace_script`, the same as one whose script ran to its end.
 
-**Stopping** a script is still just removing its `ScriptTask` or despawning the entity: there is
-no function for it because there is nothing else to do.
+**Stopping is `stop_script`**, which takes the `Script` off with the task:
+
+```rust
+use rubevy::stop_script;
+
+stop_script(&mut commands, entity);          // a second VM: stop_script_for::<Mods>(&mut commands, entity)
+```
+
+Until 0.2.0 this document said a stop was removing the `ScriptTask`, and there was no function
+for it. One embedding did exactly that on the way back to its title screen, and the scene it had
+stopped was playing again, from the top, on the next frame.
+
+What `stop_script` takes with it:
+
+* the script's own task, terminated (not unwound: `Task#terminate` runs no `ensure`) and let go
+  of;
+* its subscriptions, closed — a `Task.new` child waiting on one raises `Rubevy::Unsubscribed`;
+* what it was waiting on in a `Held`, dropped — a child parked on one raises `Rubevy::Unanswered`
+  at the next frame;
+* `ScriptDone`, so that the entity looks like one that never had a script, and a `Script`
+  inserted later starts as a new one does.
+
+No `ScriptEnded` is sent: the script did not end, the game ended it. A question the game had
+already taken with `take_requests` is still the game's, to answer (the answer goes nowhere) or to
+drop. And **a `Task.new` child that is waiting on none of the above** — one that loops or sleeps
+— is not stopped: SabiRuby's `Task` does not record which task made which, so there is nothing to
+find it by. A script whose children must stop with it has them wait on a subscription.
 
 Before that hook the task was only forgotten by the ECS: it stayed in the scheduler's queues and
 kept running, still carrying its entity, so a reloaded robot had two brains asking for the same
