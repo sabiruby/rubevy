@@ -685,7 +685,8 @@ pub struct ScriptEnded<M = ()> {
     /// a script that raises inside a method the prelude defines is reported at the line of its
     /// *own* file that called it, because that is the line its author can do something about.
     /// The same line-drawing [`in_the_authors_lines`] makes for a compiler's message, made here
-    /// for a backtrace.
+    /// for a backtrace. A frame of a file the script `require`d is not the prelude and has none
+    /// in front of it: a raise inside a helper is reported at the helper's own line.
     ///
     /// `None` where there is no such line, which is four different things and one answer:
     ///
@@ -752,33 +753,55 @@ impl<M> Clone for ScriptEnded<M> {
 fn authors_line(vm: &mut Vm, value: Value, prelude_lines: u32) -> Option<(String, u32)> {
     let backtrace = vm.intern("backtrace");
     let frames = vm.funcall(value, backtrace, &[], Value::Nil).ok()?;
+    let mut places: Vec<(String, u32)> = Vec::new();
     for frame in vm.ary_vals(frames)? {
         let Some(text) = vm.str_bytes(frame).map(|b| String::from_utf8_lossy(b).into_owned())
         else {
             continue;
         };
         let Some((file, line)) = frame_place(&text) else { continue };
-        // inside the prelude, or no place at all: go on out through the frames — the line that
-        // called the prelude's method is the one the author can see
-        if let Some(line) = authors_place(line, prelude_lines) {
-            return Some((file.to_string(), line));
-        }
+        places.push((file.to_string(), line));
     }
-    None
+    // inside the prelude, or no place at all: go on out through the frames — the line that
+    // called the prelude's method is the one the author can see
+    authors_places(places, prelude_lines).into_iter().next()
 }
 
-/// A line of the compiled program as a line of the author's file, or `None` where it is not one:
-/// **the one line-drawing** both [`ScriptEnded::at`] and [`ScriptWorld::stats`] make.
+/// Frames, innermost first, as places the author can find: **the one line-drawing** both
+/// [`ScriptEnded::at`] and [`ScriptWorld::stats`] make.
 ///
-/// * `0` is a frame the VM could not place (an irep the build kept no line table for, or a pc
-///   outside it — a backtrace prints it as `:0`), which is not a place.
-/// * `1..=prelude_lines` is the prelude the game put in front, which is not the author's file.
-/// * past that, the author's line is what is left when the prelude is taken off.
-fn authors_place(line: u32, prelude_lines: u32) -> Option<u32> {
-    if line == 0 || line <= prelude_lines {
-        return None;
-    }
-    Some(line - prelude_lines)
+/// The prelude is taken off **only the script's own file**. That file is the one the outermost
+/// frame stands in — the script's top level, which is where every frame of a task starts — so
+/// a frame of a file the script `require`d (a helper, a library) is passed through as the VM
+/// numbered it: the prelude was put in front of the script, not in front of the helper. Until
+/// 2026-09-26 every frame had the prelude taken off whatever its file, so a script with a
+/// prelude of 30 lines waiting on line 50 of `helper.rb` was reported at `helper.rb:20`
+/// (`docs/worklog/2026-09-26-release-0.2-a.md` §8).
+///
+/// A frame of the script's own file is then:
+///
+/// * `0` — a frame the VM could not place (an irep the build kept no line table for, or a pc
+///   outside it; a backtrace prints it as `:0`): left out, as it is from any file.
+/// * `1..=prelude_lines` — the prelude the game put in front, which is not the author's file:
+///   left out.
+/// * past that — the author's line, which is what is left when the prelude is taken off.
+fn authors_places(frames: Vec<(String, u32)>, prelude_lines: u32) -> Vec<(String, u32)> {
+    let own = frames.last().map(|(file, _)| file.clone());
+    frames
+        .into_iter()
+        .filter_map(|(file, line)| {
+            if line == 0 {
+                return None;
+            }
+            if own.as_deref() != Some(file.as_str()) {
+                return Some((file, line));
+            }
+            if line <= prelude_lines {
+                return None;
+            }
+            Some((file, line - prelude_lines))
+        })
+        .collect()
 }
 
 /// The file and the line of one backtrace frame ([`authors_line`] says how it is read).
@@ -2006,12 +2029,7 @@ impl<M: 'static> ScriptWorld<M> {
         // `task_location` is the first of `task_frames` (SabiRuby 0.6.1, `ext_task.rs`: the same
         // walk, stopping at the first frame with a line table), so the frames are read once and
         // the location is the innermost that is left of them
-        let frames: Vec<(String, u32)> = self
-            .vm
-            .task_frames(script.task)
-            .into_iter()
-            .filter_map(|(file, line)| Some((file, authors_place(line, script.prelude_lines)?)))
-            .collect();
+        let frames = authors_places(self.vm.task_frames(script.task), script.prelude_lines);
         ScriptStats {
             instructions: self.vm.task_instructions(script.task),
             location: frames.first().cloned(),
@@ -2360,6 +2378,9 @@ impl<M: 'static> ScriptWorld<M> {
     /// instead, and the script waiting on it raises `Rubevy::Unanswered`
     /// ([`ScriptWorld::release_dropped_values`]); dropping is how a game refuses a question.
     pub fn answer(&mut self, request: &Request, answer: Answer) {
+        if self.refuse_second_answer(request) {
+            return;
+        }
         let value = answer_value(&mut self.vm, answer, self.entity_class);
         self.push_answer(request, value);
     }
@@ -2390,13 +2411,34 @@ impl<M: 'static> ScriptWorld<M> {
     /// [`ScriptWorld::answer`]: answer each request once. Nothing in the closure may park a
     /// task — it is host code, not a script.
     pub fn answer_value(&mut self, request: &Request, build: impl FnOnce(&mut Vm) -> Value) {
+        // before the closure, so that a refused answer builds nothing in the VM
+        if self.refuse_second_answer(request) {
+            return;
+        }
         let value = build(&mut self.vm);
         self.push_answer(request, value);
     }
 
+    /// Whether `request` has been answered already, saying so in the log where it has. A second
+    /// answer — through a clone, or the same `Request` twice — would push into a queue the first
+    /// one let go of, whose number may by now be another object's.
+    ///
+    /// It is asked **before** the answer is built, so a refused one costs nothing in the VM, and
+    /// it only reads: the question is marked answered in [`ScriptWorld::push_answer`], after the
+    /// value exists. Marking it here would leave a question whose `build` panicked marked
+    /// answered and never pushed — registered for ever and never closed. Nothing can answer in
+    /// between the two, because both take `&mut ScriptWorld`.
+    fn refuse_second_answer(&self, request: &Request) -> bool {
+        let answered = request.question.answered.load(std::sync::atomic::Ordering::Acquire);
+        if answered {
+            warn!("rubevy: {} was answered twice; the second answer is not given", request.kind);
+        }
+        answered
+    }
+
     fn push_answer(&mut self, request: &Request, value: Value) {
-        // a second answer — through a clone, or the same `Request` twice — would push into a
-        // queue the first one let go of, whose number may by now be another object's
+        // the check that refuses a second answer is `refuse_second_answer`, made before the value
+        // was built; this is the mark, and still a guard of its own
         if !request.question.answer() {
             warn!("rubevy: {} was answered twice; the second answer is not given", request.kind);
             return;

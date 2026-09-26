@@ -1549,7 +1549,8 @@ thing this VM can show and an engine's usual scripting cannot.
 have it taken off, the way `ScriptEnded::at` does: a script parked inside a method the prelude
 defines — a DSL's `scan` — is at the line of its own file that called it, and the prelude's own
 frames are left out of `frames`, because a line of the prelude under the author's file name is a
-line the author cannot find. (Before 0.2.0 both were the compiled program's numbers, and a game
+line the author cannot find. Only the script's own file has the prelude taken off: a frame of a
+file it `require`d is that file's line as it stands. (Before 0.2.0 both were the compiled program's numbers, and a game
 took the prelude off itself.) The VM's own view, every frame numbered as the program is, is
 `world.vm.task_frames(task.task())`.
 

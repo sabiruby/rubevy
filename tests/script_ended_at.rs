@@ -287,3 +287,61 @@ fn stats_without_a_prelude_is_the_vms_own() {
     assert_eq!(stats.frames, world.vm.task_frames(task.task()));
     assert_eq!(stats.location, world.vm.task_location(task.task()));
 }
+
+// ----------------------------------------------- a file the script `require`d is not the script
+
+/// A helper the script `require`s, compiled with a line table and served out of the binary. Its
+/// line 12 is where it waits or raises — past the prelude's length, which is what made the old
+/// arithmetic give a wrong number rather than none at all.
+fn helper_host(body: &str) -> rubevy::EmbeddedHost {
+    let source = format!("{}def helper_go\n  {body}\nend\n", "# padding\n".repeat(10));
+    let opts = sabiruby_compiler::Options {
+        filename: "helper.rb".into(),
+        debug_info: true,
+        ..Default::default()
+    };
+    let bytes = sabiruby_compiler::compile(source.as_bytes(), &opts).expect("compiles");
+    let table: &'static [(&'static str, &'static [u8])] =
+        Box::leak(vec![("ruby/helper.mrb", &*Box::leak(bytes.into_boxed_slice()))].into_boxed_slice());
+    rubevy::EmbeddedHost::new(&[]).with_binaries(table)
+}
+
+/// A program of the author's behind a prelude, which `require`s the helper and calls it on its
+/// own line 2.
+fn requiring_program() -> Program {
+    Program::new("X = 1\nY = 2\n", "player.rb", "require 'helper'\nhelper_go\n", "")
+}
+
+/// **`stats`**: the helper's frame is the helper's line as the VM numbered it, and only the
+/// script's own file has the prelude taken off.
+#[test]
+fn stats_leaves_a_required_files_lines_alone() {
+    let mut app = app();
+    app.world_mut().resource_mut::<ScriptWorld>().require_from(helper_host("Rubevy.ask('w').pop"), &["ruby"]);
+    let program = requiring_program();
+    assert!(program.prelude_lines > 0 && program.prelude_lines < 12);
+    let stats = stats_of(&mut app, &program);
+    assert_eq!(
+        stats.frames,
+        vec![(String::from("helper.rb"), 12), (String::from("player.rb"), 2)],
+        "the helper's own line, and the author's line that called it"
+    );
+    assert_eq!(stats.location, Some((String::from("helper.rb"), 12)));
+}
+
+/// **`ScriptEnded::at`**: a raise inside the helper is the helper's line — it is not the
+/// prelude, so there is nothing to skip past and nothing to take off.
+#[test]
+fn a_raise_in_a_required_file_is_reported_at_its_own_line() {
+    let mut app = app();
+    app.world_mut().resource_mut::<ScriptWorld>().require_from(helper_host("raise 'from the helper'"), &["ruby"]);
+    let program = requiring_program();
+    let h = app
+        .world_mut()
+        .resource_mut::<Assets<MrbAsset>>()
+        .add(compile(&program.source, &program.name));
+    app.world_mut().spawn(Script::new(h).with_prelude_lines(program.prelude_lines));
+    let (_, value, at) = ending(&mut app, 30);
+    assert!(value.contains("from the helper"), "{value}");
+    assert_eq!(at, Some((String::from("helper.rb"), 12)));
+}

@@ -240,3 +240,27 @@ fn a_second_answer_is_refused() {
     until(&mut app, 60, |app| !seen(app, "after").is_empty());
     assert_eq!(seen(&app, "after"), vec![Some(String::from("1.0 nil"))]);
 }
+
+/// A second `answer_value` does not run its closure: the refusal comes before anything is built
+/// in the VM, the same as for `answer`.
+#[test]
+fn a_second_answer_value_does_not_build() {
+    let mut app = app();
+    spawn_script(&mut app, "Rubevy.ask('keep').pop\nsleep 10\n");
+    until(&mut app, 20, |app| !app.world().resource::<Kept>().0.is_empty());
+    let r = app.world_mut().resource_mut::<Kept>().0.pop().expect("kept");
+    let copy = r.clone();
+    let mut built = 0;
+    {
+        let mut world = app.world_mut().resource_mut::<ScriptWorld>();
+        world.answer_value(&r, |_vm| {
+            built += 1;
+            sabiruby::Value::Int(1)
+        });
+        world.answer_value(&copy, |_vm| {
+            built += 1;
+            sabiruby::Value::Int(2)
+        });
+    }
+    assert_eq!(built, 1, "the second closure was not run");
+}
