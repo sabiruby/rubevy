@@ -1719,6 +1719,16 @@ thousand entities), and resident memory at the start went from 2.21 kB an entity
 is left of the starting cost is `Vm::task_spawn` — a context and a stack for each script, which
 they do not share.
 
+**Handing an old program back.** The table keeps a program after its last script has gone, so
+applying the same text again costs nothing. A game that replaces its scripts' text over and over
+— an editor, a player's programs — can give the old ones back with
+`ScriptWorld::unload_programs()` once it has replaced or stopped the scripts (SabiRuby 0.7's
+`Vm::unload`). The VM decides what is still needed: a program a task is running in, or one that
+left a method (`def`) or a block behind, stays and is asked about again on the next call. A
+program handed back and started again is loaded again. The VM may run a collection for each
+program it has to look at, so it is a call for the moment of the swap, not for every frame
+(`tests/unload.rs`).
+
 **A program that will not load is remembered too**, and for the same reason: so that it is met
 once. A `.mrb` that is a truncated download, or bytes another version's compiler wrote, used to be
 logged and passed over, which left the entity exactly as `start_scripts` had found it — so the

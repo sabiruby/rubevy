@@ -56,6 +56,22 @@ Stage E turns this section into 0.2.0.
 * **`ScriptWorld::release_dropped_values` counts every object it let go of**, the queues of
   unanswered questions included, where it used to count values only (R2, `826b927`).
 
+### Stage B — SabiRuby 0.7 (R5)
+
+On the branch `rel02-b`; the record is `docs/worklog/2026-09-27-release-0.2-bcd.md`.
+
+* **Requires `sabiruby` 0.7** (with `sabiruby-compiler` 0.4 for `ruby-source`), `68597eb`. An app
+  that names `sabiruby` itself moves to 0.7 with it. `Vm::hash_get` now returns a `Result`: a
+  component or resource written from a Hash whose key's `hash` / `eql?` raises is refused with
+  that error instead of reading the entry as nil.
+* **A read waits inside `initialize` and `instance_exec`** and the other blocks SabiRuby 0.7
+  opened (sabiruby `docs/design/wait-anywhere.md`), `68597eb`. What is still a boundary (`sort { }`,
+  a native's own callbacks, a host function calling Ruby) raises `can't wait inside …`, naming
+  the place; it was `blocking pop cannot be called from within a C function boundary`.
+  `docs/host-api.md` and the comments of `src/prelude.rb` and `src/layers/camera.rb` say so.
+* **`ScriptWorld::unload_programs()`** (new, `65e81d7`): hands back to the VM the programs of
+  `loaded_programs` that nothing can run any more (`Vm::unload`). Opt-in; `tests/unload.rs`.
+
 ## 0.1.0 — 2026-09-22
 
 The second release on crates.io, and the first one whose crate carries this file. What it adds

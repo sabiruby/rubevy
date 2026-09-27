@@ -23,7 +23,8 @@ behind every claim, is
 * **Priorities**: `Script::with_priority` (0 first, 128 by default), mruby-task's.
 * **One irep per program, however many entities run it**: the plugin keeps the programs it has
   loaded by their bytes, so a thousand entities on one `.mrb` load it once
-  (`ScriptWorld::loaded_programs`). A `.mrb` that will not load is reported once rather than
+  (`ScriptWorld::loaded_programs`); `unload_programs` hands the ones nothing runs any more back
+  to the VM. A `.mrb` that will not load is reported once rather than
   every frame (`broken_programs`), and tried again if the asset changes.
 * **Replacing and stopping**: `replace_script(&mut commands, entity, script)` swaps a script;
   `stop_script(&mut commands, entity)` stops one (removing `ScriptTask` alone only restarts it).
