@@ -14,6 +14,7 @@
 | **何も待っていない `Task.new` の子は、`stop_script` でも despawn でも止まらない**（`loop` や `sleep` の中にいる子。購読や held の問いで待っている子は `Unsubscribed` / `Unanswered` で巻き戻る） | 直すには VM が要る。SabiRuby の `Task` は作った側を記録しない（`TaskData` に親が無い）ので、rubevy からは「この実体のスクリプトが作ったタスク」を見つけられない。要るのは、タスクに作り手か持ち主の id を持たせること（例: `Task.new` の時点の `Task.current` を VM が記録し、`Vm::task_children(task)` か `Vm::task_terminate_tree(task)` で辿れる形）。rubevy 側だけで prelude の `Task.new` 上書きから一覧を持つ案もあるが、終わったタスクの片付けと GC の登録を rubevy が抱えることになる | 止めた・消した実体の子が動き続けて困る例が出たとき、または SabiRuby にタスクの親子が入ったとき | `worklog/2026-09-26-release-0.2-a.md` §4.3・§7-2、rustdoc の `stop_script` |
 | **古いプログラムを自動で VM に返す**（今は `ScriptWorld::unload_programs` をゲームが呼ぶ） | 差し替えを rubevy は知らない（表のキーは bytes）、返したものを再び走らせると読み直しと空の irep 208 バイトが毎回かかる | 呼び忘れて irep が溜まる例が出たとき | `worklog/2026-09-27-release-0.2-bcd.md` §1.4 |
 | ポインタが 2D だけ（3D は near plane の x・y） | 3D の「カーソルの下の地面」は面の選び方がゲームのもの | 3D のゲームが欲しがったとき | `worklog/2026-09-27-release-0.2-bcd.md` §2.2 |
+| control 層（`src/layers/control.rb`）が handler の例外を出すとき、行番号が前置き込みのプログラム全体の行になる | 0.2.0 の後に、ある組み込み先が乗り換えて見つけた（2026-09-27）。組み込み先は例外を自分で捕まえて回避している | 次に control 層を触るとき（`ScriptEnded::at` と同じく前置きの行を引く） | ある組み込み先の worklog |
 | 消えた entity への書き込みが黙って捨てられる | 要望待ち | 利用者が気づけずに困ったとき | `plans/generalize-plan.md:276` |
 | 遅い `answer_in_tick` のクロージャに気づく道が無い | 要望待ち | 同上 | `plans/generalize-plan.md:287` |
 | `ScriptEnded` が「始まらなかった」と「失敗した」を分けない | 要望待ち | 同上 | `plans/generalize-plan.md:289` |
