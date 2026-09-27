@@ -172,7 +172,7 @@ cargo add rubevy
 
 ```toml
 [dependencies]
-rubevy = "0.1"
+rubevy = "0.2"
 bevy = "0.19.1"
 ```
 
@@ -188,7 +188,7 @@ compiler, built as C) along — so it wants a C toolchain, and it does not build
 and ship the `.mrb`.
 
 ```toml
-rubevy = { version = "0.1", features = ["ruby-source"] }
+rubevy = { version = "0.2", features = ["ruby-source"] }
 ```
 
 The version is 0.1: the API is still moving, and what each release contains — including what to

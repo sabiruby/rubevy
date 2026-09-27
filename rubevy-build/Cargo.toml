@@ -4,7 +4,7 @@ name = "rubevy-build"
 # one tag and one CHANGELOG: a `rubevy-build` 0.1.0 is the one that goes with `rubevy` 0.1.0.
 # Nothing depends on the pairing — rubevy does not name this crate and this crate names nothing —
 # so it is a convention for the reader, not a requirement.
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 # std and nothing else, so this is the edition's own floor: edition 2024 was stabilised in
 # Rust 1.85 (the same floor SabiRuby names). It is deliberately not rubevy's 1.95 — a build

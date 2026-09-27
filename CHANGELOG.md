@@ -4,11 +4,10 @@ What changed in each release of `rubevy`. Every claim names the commit behind it
 the work came in on a branch) and the document under `docs/` that records it; measurements are the
 ones those documents carry, and nothing is estimated.
 
-## Unreleased
+## 0.2.0 — 2026-09-27
 
-Stage A of `docs/plans/release-0.2-plan.md` (R1–R4), on the branch `rel02-fixes`; the record is
-`docs/worklog/2026-09-26-release-0.2-a.md`. Still on SabiRuby 0.6 — the move to 0.7 is stage B.
-Stage E turns this section into 0.2.0.
+Published: `rubevy` 0.2.0 and `rubevy-build` 0.2.0 (unchanged, moved with `rubevy` as the two always go together). On SabiRuby 0.7.0 (`sabiruby` 0.7, `sabiruby-compiler` 0.4). The plan was `docs/plans/release-0.2-plan.md`; the records are `docs/worklog/2026-09-26-release-0.2-a.md` and `docs/worklog/2026-09-27-release-0.2-bcd.md`.
+
 
 ### Added
 
