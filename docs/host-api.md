@@ -1114,7 +1114,13 @@ Rubevy::Control.run                      # park here; the handlers go on hearing
   handler into a method with `define_method` for that reason, and 0.7 made it unnecessary
   (`tests/control_layer.rs`).
 * **A handler that raises is logged and goes on hearing**: `Rubevy.log` with the event, the
-  exception and its first backtrace line. One bad message does not take the rest down.
+  exception and where it was raised, e.g. `on(:n): RuntimeError: odd (player.rb:2)`. One bad
+  message does not take the rest down. **The place is the author's line**, drawn by the rule
+  `ScriptEnded::at` follows: the game's prelude (`Script::prelude_lines`) is taken off the
+  script's own file, a raise inside a method the prelude defines is reported at the author's line
+  that called it, and a file the script `require`d keeps its own line. No place is given where
+  there is none of the author's (no line table, or every frame in the prelude). Before the fix
+  after 0.2.0 it was the exception's first backtrace line as the VM numbers it, prelude and all.
 * **`Rubevy::Control.run` parks the script's task for good.** A script's subscriptions are let
   go of when its task ends, and the handlers end with them (`Rubevy::Unsubscribed`, rescued
   inside the layer) — so a script that is only handlers ends with `run`, and a script that has a

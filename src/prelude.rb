@@ -265,6 +265,10 @@ class Task
       parent = Task.current
       entity = parent && parent.instance_variable_get(:@rubevy_entity)
       task.instance_variable_set(:@rubevy_entity, entity) unless entity.nil?
+      # and how many lines of the script's program are the game's prelude
+      # (`PRELUDE_LINES_IVAR` in src/lib.rs), for the Ruby that reports the author's lines itself
+      lines = parent && parent.instance_variable_get(:@rubevy_prelude_lines)
+      task.instance_variable_set(:@rubevy_prelude_lines, lines) unless lines.nil?
       task
     end
   end

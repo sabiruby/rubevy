@@ -4,6 +4,12 @@ What changed in each release of `rubevy`. Every claim names the commit behind it
 the work came in on a branch) and the document under `docs/` that records it; measurements are the
 ones those documents carry, and nothing is estimated.
 
+## Unreleased
+
+### Fixed
+
+- **The control layer logs a handler's exception at the author's line.** `on(:event)`'s handlers (`rubevy::layers::CONTROL`) logged the first backtrace line as the VM numbers it, so a script behind a game's prelude was reported at its line in the whole program, prelude included. It is now drawn by the rule `ScriptEnded::at` and `ScriptStats` follow — the prelude (`Script::prelude_lines`) taken off the script's own file, a `require`d file's line left as it is — through the same function (`authors_places` in `src/lib.rs`); the host puts the prelude's length on the script's task (`@rubevy_prelude_lines`, copied by `Task.new` as `@rubevy_entity` is). Found by an embedding after 0.2.0; `tests/control_layer.rs`, `docs/worklog/2026-09-27-control-lines.md`.
+
 ## 0.2.0 — 2026-09-27
 
 Published: `rubevy` 0.2.0 and `rubevy-build` 0.2.0 (unchanged, moved with `rubevy` as the two always go together). On SabiRuby 0.7.0 (`sabiruby` 0.7, `sabiruby-compiler` 0.4). The plan was `docs/plans/release-0.2-plan.md`; the records are `docs/worklog/2026-09-26-release-0.2-a.md` and `docs/worklog/2026-09-27-release-0.2-bcd.md`.

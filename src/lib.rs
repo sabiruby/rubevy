@@ -755,6 +755,17 @@ impl<M> Clone for ScriptEnded<M> {
 fn authors_line(vm: &mut Vm, value: Value, prelude_lines: u32) -> Option<(String, u32)> {
     let backtrace = vm.intern("backtrace");
     let frames = vm.funcall(value, backtrace, &[], Value::Nil).ok()?;
+    let places = backtrace_places(vm, frames)?;
+    // inside the prelude, or no place at all: go on out through the frames — the line that
+    // called the prelude's method is the one the author can see
+    authors_places(places, prelude_lines).into_iter().next()
+}
+
+/// The places of a backtrace as Ruby gives it — an Array of `file:line[:in method]` strings,
+/// what `Exception#backtrace` and `caller` answer — innermost first. `None` where it is not an
+/// Array (an exception that was never raised answers `nil`); a frame that is not a string or
+/// has no line is left out.
+fn backtrace_places(vm: &mut Vm, frames: Value) -> Option<Vec<(String, u32)>> {
     let mut places: Vec<(String, u32)> = Vec::new();
     for frame in vm.ary_vals(frames)? {
         let Some(text) = vm.str_bytes(frame).map(|b| String::from_utf8_lossy(b).into_owned())
@@ -764,9 +775,7 @@ fn authors_line(vm: &mut Vm, value: Value, prelude_lines: u32) -> Option<(String
         let Some((file, line)) = frame_place(&text) else { continue };
         places.push((file.to_string(), line));
     }
-    // inside the prelude, or no place at all: go on out through the frames — the line that
-    // called the prelude's method is the one the author can see
-    authors_places(places, prelude_lines).into_iter().next()
+    Some(places)
 }
 
 /// Frames, innermost first, as places the author can find: **the one line-drawing** both
@@ -789,6 +798,20 @@ fn authors_line(vm: &mut Vm, value: Value, prelude_lines: u32) -> Option<(String
 /// * past that — the author's line, which is what is left when the prelude is taken off.
 fn authors_places(frames: Vec<(String, u32)>, prelude_lines: u32) -> Vec<(String, u32)> {
     let own = frames.last().map(|(file, _)| file.clone());
+    authors_places_in(frames, own, prelude_lines)
+}
+
+/// [`authors_places`] where the script's own file is named rather than read off the outermost
+/// frame — for frames whose outermost is **not** the script's top level. A handler of the
+/// control layer (`src/layers/control.rb`) runs in a task of its own, started by the layer, so
+/// the outermost frame of its exception is the layer's; the script's file is the outermost
+/// frame of the task that called `on`, which the layer keeps (`caller`) and hands to
+/// `Rubevy.__authors_place`. The rule is the same one; only where `own` comes from differs.
+fn authors_places_in(
+    frames: Vec<(String, u32)>,
+    own: Option<String>,
+    prelude_lines: u32,
+) -> Vec<(String, u32)> {
     frames
         .into_iter()
         .filter_map(|(file, line)| {
@@ -3291,6 +3314,17 @@ const ENTITY_IVAR: &str = "@rubevy_entity";
 /// (`docs/numbers.md`).
 const DROPPED_IVAR: &str = "@rubevy_dropped";
 
+/// The instance variable a script's task carries its [`Script::prelude_lines`] in, set where the
+/// task is started and copied by `Task.new` into the tasks it makes (`src/prelude.rb`), as
+/// [`ENTITY_IVAR`] is. It is for the Ruby that reports lines itself — the control layer's
+/// handlers (`src/layers/control.rb`), which log an exception and go on rather than end the
+/// script — so that it can take the prelude off the same way [`ScriptEnded::at`] does, through
+/// `Rubevy.__authors_place` and [`authors_places_in`].
+///
+/// Fixed for the reason [`ENTITY_IVAR`] is: `src/prelude.rb` and `src/layers/control.rb` read
+/// this very name (`docs/numbers.md`).
+const PRELUDE_LINES_IVAR: &str = "@rubevy_prelude_lines";
+
 /// The [`Script`]s of this VM that are not running and have not ended: what [`start_scripts`]
 /// looks at each frame.
 ///
@@ -3337,6 +3371,9 @@ fn start_scripts<M: 'static>(
                 // the task carries its entity, which is what `Rubevy.entity` answers
                 vm.ivar_set(task, ENTITY_IVAR, Value::Int(entity.to_bits() as i64));
                 let prelude_lines = script.prelude_lines;
+                // and how many lines of its program are the game's prelude, for the Ruby that
+                // reports the author's lines itself (the control layer's handlers)
+                vm.ivar_set(task, PRELUDE_LINES_IVAR, Value::Int(prelude_lines as i64));
                 commands.entity(entity).insert(ScriptTask::<M> { task, prelude_lines, _m: PhantomData });
                 // it started this time: whatever went wrong before is over, and the mark that
                 // said so must not be left on the entity for a later asset change to act on
@@ -4700,6 +4737,25 @@ fn install_host_api(vm: &mut Vm, release: ReleaseQueue) -> ObjId {
         };
         push_command(vm, HostCommand::Log(text));
         Ok(Value::Nil)
+    });
+    // `Rubevy.__authors_place(backtrace, origin, prelude_lines)`: the author's innermost line of
+    // `backtrace` as `"file:line"`, or nil — the line [`ScriptEnded::at`] would give, for an
+    // exception that does not end the script. `origin` is a backtrace of the script's own task
+    // (`caller` there), whose outermost frame names the script's file; see
+    // [`authors_places_in`]. Not part of the host API: the control layer's, which is Ruby
+    vm.define_closure(sc, "__authors_place", |vm, _s, a, _b| {
+        let frames = a.first().copied().unwrap_or(Value::Nil);
+        let origin = a.get(1).copied().unwrap_or(Value::Nil);
+        let prelude_lines = match a.get(2) {
+            Some(Value::Int(n)) if *n > 0 => u32::try_from(*n).unwrap_or(u32::MAX),
+            _ => 0,
+        };
+        let Some(places) = backtrace_places(vm, frames) else { return Ok(Value::Nil) };
+        let own = backtrace_places(vm, origin).and_then(|o| o.last().map(|(file, _)| file.clone()));
+        Ok(match authors_places_in(places, own, prelude_lines).into_iter().next() {
+            Some((file, line)) => vm.str_from(format!("{file}:{line}")),
+            None => Value::Nil,
+        })
     });
     vm.define_closure(sc, "spawn", |vm, _s, a, _b| {
         let name = match a.first() {

@@ -79,6 +79,16 @@ module Rubevy
       name = event.to_sym
       queue = limit.nil? ? Rubevy.subscribe(name) : Rubevy.subscribe(name, limit: limit)
       stage = self
+      # where to say a handler went wrong: in the author's lines, as `ScriptEnded::at` says where
+      # a script did. The handler's own task starts in this file, so the script's file is read
+      # here, off the task that called `on` (the outermost frame of `caller`), with the length of
+      # the game's prelude the host put on that task; `Rubevy.__authors_place` then draws the
+      # line with the same rule as `ScriptEnded::at` (`authors_places` in src/lib.rs).
+      # `caller(0)` and not `caller`: this file is compiled without a line table, so its frames
+      # are not in the backtrace at all, and `caller`'s arithmetic (the reference's, which takes
+      # the frames it drops to be there) then cuts the script's own frame off and answers `[]`
+      origin = caller(0)
+      prelude_lines = Task.current.instance_variable_get(:@rubevy_prelude_lines) || 0
       task = Task.new(name: "on(:#{name})", priority: Task.current.priority) do
         begin
           loop do
@@ -87,7 +97,7 @@ module Rubevy
               stage.instance_exec(payload, &block)
             rescue => e
               # the handler is logged and goes on hearing: one bad message does not stop the rest
-              where = e.backtrace && e.backtrace[0]
+              where = Rubevy.__authors_place(e.backtrace, origin, prelude_lines)
               Rubevy.log "on(:#{name}): #{e.class}: #{e.message}#{where ? " (#{where})" : ""}"
             end
           end
