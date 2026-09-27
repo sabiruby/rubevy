@@ -4,7 +4,9 @@ What changed in each release of `rubevy`. Every claim names the commit behind it
 the work came in on a branch) and the document under `docs/` that records it; measurements are the
 ones those documents carry, and nothing is estimated.
 
-## Unreleased
+## 0.2.1 — 2026-09-27
+
+Published: `rubevy` 0.2.1 (a fix and documentation, no public API change). `rubevy-build` stays at 0.2.0 (no change).
 
 ### Fixed
 
