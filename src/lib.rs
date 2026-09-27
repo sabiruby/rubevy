@@ -485,8 +485,8 @@ pub struct FrameStats {
     pub more_to_run: bool,
     /// [`ScriptWorld::loaded_programs`] as the tick ended — the one number here that is not of
     /// the frame. It is in this struct so that a HUD that shows one thing a frame shows it
-    /// too: it climbs, for the life of the app, by one for every distinct program a game
-    /// compiles, and each of them holds an irep the VM has no way to give back.
+    /// too: it climbs by one for every distinct program a game compiles, and comes down only
+    /// when the game hands unused ones back ([`ScriptWorld::unload_programs`]).
     pub loaded_programs: usize,
 }
 
@@ -1801,12 +1801,15 @@ pub struct ScriptWorld<M = ()> {
     /// `.mrb`: 2.21 kB of resident memory an entity when each loaded its own, 1.46 kB when they
     /// shared one).
     ///
-    /// Nothing is ever taken out of it, and nothing needs to be: a program that changed is other
-    /// bytes, so it misses and is loaded. What that leaves behind is the irep of the version
-    /// before it, and **SabiRuby has no way to drop an irep** (0.5.2: nothing in the crate ever
-    /// removes from `Vm::ireps`), so the VM would keep it whether this map did or not. Keeping it
-    /// is what makes an editor that applies the same text twice — or applies a change and takes
-    /// it back — cost nothing the second time.
+    /// Nothing is taken out of it on its own: a program that changed is other bytes, so it
+    /// misses and is loaded, and the irep of the version before it stays. Keeping it is what
+    /// makes an editor that applies the same text twice — or applies a change and takes it
+    /// back — cost nothing the second time. Since SabiRuby 0.7 the VM can give an irep back
+    /// (`Vm::unload`), and [`ScriptWorld::unload_programs`] is how a game asks for that; it is
+    /// the game's call and not a sweep of rubevy's, because a program that is handed back and
+    /// then run again is loaded again, and each unload leaves an empty entry in the VM
+    /// (SabiRuby `CHANGELOG.md`, 0.7.0) — a game that starts and ends one short script over
+    /// and over would pay that on every round.
     programs: std::collections::HashMap<Box<[u8]>, sabiruby::object::IrepId>,
     /// Every program this VM could **not** load, by the same key [`ScriptWorld::programs`] uses,
     /// to what the VM said was wrong with it.
@@ -2003,10 +2006,32 @@ impl<M: 'static> ScriptWorld<M> {
     ///
     /// One per program and not one per script: the scripts of one `.mrb` share its irep. It is
     /// also the number of ireps that the starting of scripts has left in the VM, which is the
-    /// number to watch where a game applies a player's edits over and over — the VM has no way
-    /// to give an irep back, so each **new** text is one more, for the life of the app.
+    /// number to watch where a game applies a player's edits over and over: each **new** text is
+    /// one more, until the game hands the unused ones back with
+    /// [`ScriptWorld::unload_programs`].
     pub fn loaded_programs(&self) -> usize {
         self.programs.len()
+    }
+
+    /// Hands back to the VM the programs of [`ScriptWorld::loaded_programs`] that nothing can
+    /// run any more, and answers how many went. It is the call for a game that replaces its
+    /// scripts' text — an editor's Apply, a player's program swapped for another — after the old
+    /// scripts have been stopped or replaced ([`stop_script`], [`replace_script`]).
+    ///
+    /// Whether a program is still needed is the VM's to say (`Vm::unload`): one a task is
+    /// running in, or one a Proc is made of — a method its text defined with `def`, a block a
+    /// task keeps — stays, and is asked about again on the next call. A program that goes and
+    /// is later started again (a [`Script`] of the same bytes) is loaded again; that is correct
+    /// and costs the load. The VM may run a collection for each program it has to look at, so
+    /// this is a call for the moment the scripts were replaced, not one for every frame.
+    ///
+    /// Programs run by [`ScriptWorld::load_and_run`] (layers, libraries) are not in this table
+    /// and are never handed back.
+    pub fn unload_programs(&mut self) -> usize {
+        let vm = &mut self.vm;
+        let before = self.programs.len();
+        self.programs.retain(|_, irep| vm.unload(*irep).is_err());
+        before - self.programs.len()
     }
 
     /// How many distinct programs this VM has tried to load and could not.
