@@ -151,7 +151,7 @@ R3 が測ったのは次の 2 つで、**どちらも 64 を指していない**
 
 | 名前 | 位置 | 値 | どこで変えるか | 分類 | 出どころ |
 |---|---|---|---|---|---|
-| `DEFAULT_CLICK_SLOP`（`Pointer::click_slop` の既定） | `src/pointer.rs` | 6.0（ウィンドウの論理ピクセル） | `Pointer<C>` の `click_slop` | (b) | **不明**（**引用**のみ: rubevy_games の `games-shell::camera::CLICK_SLOP` と同じ値。そちらも出どころを「記録が無い」と書いている。測っていない） |
+| `DEFAULT_CLICK_SLOP`（`Pointer::click_slop` の既定） | `src/pointer.rs` | 6.0（ウィンドウの論理ピクセル） | `Pointer<C>` の `click_slop` | (b) | **不明**（出どころは rubevy_games の箱庭の `CLICK_SLOP`（`garden/src/window.rs`）。理由は「a few pixels」だけで、6.0 の根拠は記録が無い。測っていない。`games-shell::camera::CLICK_SLOP` は今はこの値を指しているので出どころではない — 2026-09-27 に循環した参照を直した） |
 | `Pointer::buttons` の既定 | `src/pointer.rs` | 名前のある 5 つのボタン全部 | `Pointer<C>` の `buttons` | (b) | 数ではなく「全部」の綴り。`MouseButton::Other(n)` は入れていない（番号に意味を持たせるのはゲーム） |
 
 ---

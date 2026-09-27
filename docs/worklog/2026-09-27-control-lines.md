@@ -120,6 +120,29 @@ games の確認は、games の作業ツリー（別の担当が `post-02` で作
 `[patch."https://github.com/sabiruby/rubevy"]` で手元の rubevy（と `rubevy-build`）を向けて建てた。
 `CARGO_TARGET_DIR` も写し専用（`ctl/games-target`）。写しは games の main `1d0fadd` のもの。
 
+## 5.1 同じブランチで: ポインタの文書（games の乗り換えから）
+
+games が `rubevy::pointer` に乗り換えた（games main `232ce84`）ところで出た文書の直しを、同じブランチに
+入れた。コードの振る舞いは変えていない。
+
+* **カメラを `Update` で動かすと 1 フレーム遅れる。** `watch_the_pointer`（`src/pointer.rs`）は
+  `PreUpdate` で走り、カメラの `GlobalTransform` を読む。bevy がそれを計算し直すのは `PostUpdate`
+  なので、`PreUpdate` で見えるのは前のフレームの終わりのカメラ。`Pointer::at` と `WorldMove` は
+  1 フレーム遅れて追いつき、押し下げ・クリック・ドロップの位置も前のフレームの眺めを通したもの。
+  `PointerPlugin` と `Pointer::at` の rustdoc、`docs/host-api.md` のポインタの節に書いた。
+* **`DEFAULT_CLICK_SLOP` の出どころが循環していた。** rustdoc は「games-shell の値」を出どころに
+  していたが、games-shell は今 rubevy のこの定数を指している。本当の出どころは rubevy_games の
+  箱庭の `CLICK_SLOP`（`garden/src/window.rs:92`。理由は「a few pixels」、6.0 の根拠は記録無し）。
+  rustdoc、`docs/numbers.md` の行、`docs/host-api.md` の「inherited」をそれに合わせた。
+* `docs/backlog.md` に 2 行: `WorldGrab` / `WorldClick` が画面の位置を持たない（あれば 3D のゲームが
+  クリックの判定だけ使って光線は自分で飛ばせる。箱庭はこのため自前のまま）、「この押し下げは UI が
+  取った」の印が無い（読む側ごとに games-shell の `WorldClicks` のような上張りが要る）。実装はしない。
+
+確認: `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --features pointer` が通る、
+`cargo test --features pointer --test pointer` 3 passed。箱庭のブラウザ確認を、ポインタを使うように
+なった games main `232ce84` の `git archive` の写し（`ctl/games2`、同じ patch）でもう一度回した:
+`selftest: ok` 47 行と `done`、FAIL 0、pageerror 0・requestfailed 0（404 は `favicon.ico` の 1 件）。
+
 ## 6. 気づいた点
 
 1. **層の `.mrb` に行の表が無い。** `tools/compile_scripts.sh` は `mrbc` に `-g` を付けないので、

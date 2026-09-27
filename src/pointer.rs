@@ -75,9 +75,10 @@ pub struct WorldMove {
 }
 
 /// **The default of [`Pointer::click_slop`]**, in logical pixels of the window. It is not
-/// measured: it is the value rubevy_games' `games-shell` uses (`CLICK_SLOP`), which that crate
-/// says it inherited without a recorded source (`docs/numbers.md`). A game moves it on the
-/// resource.
+/// measured. It comes from rubevy_games' garden (`CLICK_SLOP` in `garden/src/window.rs`), whose
+/// reason is "a few pixels" and whose 6.0 has **no recorded basis** (`docs/numbers.md`).
+/// rubevy_games' `games-shell` now takes its own value from this constant, so it is not a source.
+/// A game moves it on the resource.
 pub const DEFAULT_CLICK_SLOP: f32 = 6.0;
 
 /// **What the pointer is doing**, and where it is in the world, as seen through the camera
@@ -89,7 +90,8 @@ pub struct Pointer<C = Camera> {
     /// it comes back: a thing picked up does not snap back half way.
     pub click_slop: f32,
     /// Where the cursor is in the world, or `None` while it is outside the window (or there is no
-    /// camera `C` to see it through).
+    /// camera `C` to see it through). It is read through the camera as it stood at `PreUpdate`,
+    /// so it is a frame behind a camera the game moves in `Update` ([`PointerPlugin`]).
     pub at: Option<Vec2>,
     /// Which buttons make grabs, clicks and drops. Every button by default; a game that gives
     /// only the left one a meaning says so here.
@@ -137,6 +139,14 @@ struct Press {
 /// — `PointerPlugin::<Camera>` (the default) for the first active camera there is,
 /// `PointerPlugin::<MyBoardCamera>` for the one the game marked. The system runs in
 /// `PreUpdate`, after bevy's input, so the messages are there for `Update`.
+///
+/// **A frame behind a camera that moves in `Update`.** The world point is read through the
+/// camera's `GlobalTransform`, which bevy works out in `PostUpdate`, so at `PreUpdate` it is where
+/// the camera stood at the end of the last frame. A game that moves its camera in `Update` (a
+/// pan, a zoom, a follow) sees [`Pointer::at`] and [`WorldMove`] catch up one frame later; with
+/// the cursor still, the move shows as a [`WorldMove`] in the frame after the camera moved. The
+/// messages of a press are read the same way, so a click made while the camera moves is placed
+/// where the cursor was over last frame's view.
 pub struct PointerPlugin<C = Camera>(PhantomData<fn() -> C>);
 
 impl<C> Default for PointerPlugin<C> {

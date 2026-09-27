@@ -1148,8 +1148,15 @@ component `C` (`PointerPlugin::<Camera>`, the default, for the first active came
 A press always begins with a grab and ends as exactly one click or one drop. A press that has
 gone past the slop is a drag for good, even if it comes back. `Pointer<C>` (a resource) has the
 point now (`at`, `None` while the cursor is outside the window), the slop (6 by default,
-inherited and not measured, `docs/numbers.md`) and the buttons listened to (all five named ones
+from rubevy_games' garden and not measured, `docs/numbers.md`) and the buttons listened to (all five named ones
 by default). The system runs in `PreUpdate` after bevy's input.
+
+**It is a frame behind a camera that moves in `Update`.** The point is read through the camera's
+`GlobalTransform`, which bevy works out in `PostUpdate`, so in `PreUpdate` it is the camera as it
+stood at the end of the last frame. A game that pans, zooms or follows in `Update` sees
+`Pointer::at` and `WorldMove` catch up one frame later (and a still cursor's `WorldMove` for a
+camera move arrives the frame after the move); a grab, click or drop made while the camera moves
+is placed through last frame's view.
 
 **Why it is Rust and a feature, and not a Ruby layer.** The world point is the camera's
 projection worked backwards (`Camera::viewport_to_world_2d`), which no component holds — the
