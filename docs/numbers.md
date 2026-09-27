@@ -145,6 +145,14 @@ R3 が測ったのは次の 2 つで、**どちらも 64 を指していない**
 | `follow` の `every` の既定 | `src/layers/camera.rb:213` | 0（＝時計が進むたび） | 呼び出しの引数 | (b) | *理由のみ*: 「Nothing here decides how fast or how far behind a camera should follow」（`camera.rb:199-201`）。0 は「毎回」であって調整値ではない |
 | `follow` の `offset` の既定 | `src/layers/camera.rb:218` | `[0.0, 0.0]` | 呼び出しの引数 | (b) | **引用**: R9 が「今のずれを保つ」から「ずれ無し」に変えた（`worklog/2026-09-20-camera-layer.md`） |
 
+**0.2.0 の段階 C（2026-09-27）で足したもの。** `src/layers/control.rb` に数は無い（`on` の `limit:` の既定 `nil` は「VM の `queue_limit` に従う」の綴り）。
+`src/pointer.rs`（feature `pointer`）に 2 つ:
+
+| 名前 | 位置 | 値 | どこで変えるか | 分類 | 出どころ |
+|---|---|---|---|---|---|
+| `DEFAULT_CLICK_SLOP`（`Pointer::click_slop` の既定） | `src/pointer.rs` | 6.0（ウィンドウの論理ピクセル） | `Pointer<C>` の `click_slop` | (b) | **不明**（**引用**のみ: rubevy_games の `games-shell::camera::CLICK_SLOP` と同じ値。そちらも出どころを「記録が無い」と書いている。測っていない） |
+| `Pointer::buttons` の既定 | `src/pointer.rs` | 名前のある 5 つのボタン全部 | `Pointer<C>` の `buttons` | (b) | 数ではなく「全部」の綴り。`MouseButton::Other(n)` は入れていない（番号に意味を持たせるのはゲーム） |
+
 ---
 
 ## 6. `rubevy-build` の既定の名前（全部 (b)）

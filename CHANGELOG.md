@@ -72,6 +72,19 @@ On the branch `rel02-b`; the record is `docs/worklog/2026-09-27-release-0.2-bcd.
 * **`ScriptWorld::unload_programs()`** (new, `65e81d7`): hands back to the VM the programs of
   `loaded_programs` that nothing can run any more (`Vm::unload`). Opt-in; `tests/unload.rs`.
 
+### Stage C — two optional layers (R6)
+
+* **`rubevy::layers::CONTROL`** (new): `on(:event) { |payload| … }` in a script — one task per
+  handler, subscribed in the script's task, `self` the script's `Rubevy::Control`, a handler that
+  raises logged and still listening, the handlers ending with the script; `Rubevy::Control.run`
+  parks a script that is only handlers. The block runs through `instance_exec`, which SabiRuby 0.7
+  lets a task wait inside, so no `define_method` is needed. `tests/control_layer.rs`,
+  `docs/host-api.md` "The control layer".
+* **`rubevy::pointer`** (new, feature `pointer`): `PointerPlugin::<C>` and `Pointer<C>` — the mouse
+  in world units through the camera marked `C`, as `WorldGrab`, `WorldClick`, `WorldDrop` and
+  `WorldMove`. Off by default; it brings `bevy_camera` and bevy's `mouse`. `tests/pointer.rs`,
+  `examples/pointer.rs`, `docs/host-api.md` "The pointer".
+
 ## 0.1.0 — 2026-09-22
 
 The second release on crates.io, and the first one whose crate carries this file. What it adds

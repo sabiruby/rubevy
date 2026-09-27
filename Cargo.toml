@@ -38,6 +38,10 @@ default = []
 # `require` of a `.rb` file, which needs the reference compiler (a C build). Without it a script
 # may still `require` a `.mrb`.
 ruby-source = ["dep:sabiruby-compiler"]
+# `rubevy::pointer`: the mouse in world units through a camera (`PointerPlugin`, four messages).
+# It needs to know what a window, a camera and a mouse button are, which the rest of the crate
+# does not, so it is off by default and brings those parts of bevy only when asked for.
+pointer = ["bevy/bevy_camera", "bevy/mouse"]
 
 [dependencies]
 # The VM. 0.7 is the floor because 0.7.0 is a breaking release of it: `Vm::hash_get` returns
@@ -78,6 +82,11 @@ sabiruby = { version = "0.7", features = ["macros"] }
 # `docs/host-api.md`. **rubevy does not depend on this** — a game that wants `JSON` installs it
 # into the VM itself, which is the whole point of the test.
 sabiruby-serde = "0.3"
+
+# the one example that needs the `pointer` feature: `cargo run --example pointer --features pointer`
+[[example]]
+name = "pointer"
+required-features = ["pointer"]
 
 [profile.dev]
 debug = "line-tables-only"   # backtraces keep file:line; full DWARF made each binary ~1.7GB

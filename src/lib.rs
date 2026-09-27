@@ -117,6 +117,8 @@
 //! the section, and `examples/two_vms.rs` the working app.
 
 mod embed;
+#[cfg(feature = "pointer")]
+pub mod pointer;
 mod reflect;
 mod source;
 
@@ -4616,6 +4618,11 @@ pub mod layers {
     /// a 3D one, following an entity, and asking the game where a point on the window is in the
     /// world. The source is `src/layers/camera.rb`.
     pub const CAMERA: &[u8] = include_bytes!("layers/camera.mrb");
+
+    /// `on(:event) { |payload| … }` and `Rubevy::Control` — a script written as handlers of what
+    /// the game publishes ([`ScriptWorld::publish`](crate::ScriptWorld::publish)), each handler a
+    /// task that may wait. The source is `src/layers/control.rb`.
+    pub const CONTROL: &[u8] = include_bytes!("layers/control.mrb");
 }
 
 /// What a `Rubevy::Entity` object is, in the `tag` of [`Vm::data_new`]. A host that gives its

@@ -1009,9 +1009,9 @@ spelling.
   that called it, so no `sleep`, no `Rubevy.ask`, nothing that waits for a frame — and nothing
   that reads the world, since reading is waiting. A layer reads the world from a method a script
   calls later, as `Rubevy::Camera.attach` does.
-* **`initialize` cannot read the world** (see "Components by name"), so a layer whose objects
-  need a read at birth is built the way the camera is: a class method that calls `new` and then
-  a reading method on the result.
+* **`initialize` may read the world since SabiRuby 0.7** (see "Components by name"); the camera
+  layer's `attach` — a class method that calls `new` and then a reading method on the result —
+  predates that and is kept as the published name.
 
 ### The camera layer
 
@@ -1078,6 +1078,92 @@ waiting. The camera is in the question because a game may have several. Answerin
 and **nobody answers it by default**: a `pop` on the queue of a question no system answers parks
 that task for ever. So pop it where the game says it answers this, or in a task of its own.
 `examples/camera_from_ruby.rs` shows the answering side.
+
+### The control layer (`on`, `Rubevy::Control`)
+
+```rust
+fn add_the_control_layer(mut world: ResMut<ScriptWorld>) {
+    world.load_and_run(rubevy::layers::CONTROL).expect("the layer runs");
+}
+```
+
+A script that is mostly "when the game says X, do Y" — a level's rules, a tutorial, what a
+designer writes — reads as a list of handlers:
+
+```ruby
+on(:scored) do |points, by|              # a list payload fills the block's arguments
+  twice = Rubevy.ask("double", points).pop   # a handler may wait
+  @total = (@total || 0) + twice             # `self` is this script's stage
+end
+on(:report) { |_| Rubevy.log "total #{@total}" }
+Rubevy::Control.run                      # park here; the handlers go on hearing
+```
+
+* **`on(event, limit: nil) { |payload| … }`** subscribes to `event` now, in the calling task
+  (`Rubevy.subscribe(event, limit:)`), and starts a task that waits on it (`Task.new`, named
+  `on(:event)`, at the script's priority). Each message is handed to the block as one argument,
+  so a list payload fills `|x, y|` the way any block's arguments fill from an Array, and
+  `|payload|` gets it whole. It answers the task.
+* **A handler is a task**, so it may do anything a task may: `Rubevy.ask(...).pop`, read a
+  component, `sleep`. While it waits, the other handlers and the script go on.
+* **`self` in a handler is the script's `Rubevy::Control`** — one per script, made on its first
+  `on` and kept on its task — so instance variables are shared between that script's handlers and
+  no one else's. (At a script's top level `self` is `main`, one object for the whole VM.) The
+  block runs through `instance_exec`, which a task could not wait inside before SabiRuby 0.7; an
+  embedding that wrote this shape three times before it was made general had to turn every
+  handler into a method with `define_method` for that reason, and 0.7 made it unnecessary
+  (`tests/control_layer.rs`).
+* **A handler that raises is logged and goes on hearing**: `Rubevy.log` with the event, the
+  exception and its first backtrace line. One bad message does not take the rest down.
+* **`Rubevy::Control.run` parks the script's task for good.** A script's subscriptions are let
+  go of when its task ends, and the handlers end with them (`Rubevy::Unsubscribed`, rescued
+  inside the layer) — so a script that is only handlers ends with `run`, and a script that has a
+  loop of its own does not need it. Stopping, replacing or despawning the script ends the
+  handlers the same way.
+* `Rubevy::Control.current.dropped` is the sum of `Rubevy::Subscription#dropped` over the
+  script's `on`s, and `.handlers` the tasks.
+
+## The pointer (`rubevy::pointer`, feature `pointer`)
+
+```rust
+app.add_plugins(PointerPlugin::<Board>::default());   // `Board`: the marker on the camera
+```
+
+Four Bevy messages, with the point in world units as seen through the one camera that has the
+component `C` (`PointerPlugin::<Camera>`, the default, for the first active camera there is):
+
+| message | when |
+|---|---|
+| `WorldGrab { at, button, camera }` | a button went down |
+| `WorldClick { at, button, camera }` | it came up within `Pointer::click_slop` logical pixels of where it went down |
+| `WorldDrop { at, from, button, camera }` | it came up after travelling further — the end of a drag |
+| `WorldMove { at, from, dragging, camera }` | the point under the cursor moved (the cursor, or the camera under it) |
+
+A press always begins with a grab and ends as exactly one click or one drop. A press that has
+gone past the slop is a drag for good, even if it comes back. `Pointer<C>` (a resource) has the
+point now (`at`, `None` while the cursor is outside the window), the slop (6 by default,
+inherited and not measured, `docs/numbers.md`) and the buttons listened to (all five named ones
+by default). The system runs in `PreUpdate` after bevy's input.
+
+**Why it is Rust and a feature, and not a Ruby layer.** The world point is the camera's
+projection worked backwards (`Camera::viewport_to_world_2d`), which no component holds — the
+camera layer has to ask the game for it (`world_at`). So this is a Bevy plugin behind the
+`pointer` cargo feature, which brings `bevy_camera` and bevy's `mouse` into the build; without the
+feature rubevy's dependencies are what they were. It speaks to the game's systems; a game that
+wants its scripts to hear the mouse publishes what it wants, under the names it wants:
+
+```rust
+fn pass_the_pointer_on(mut clicks: MessageReader<WorldClick>, mut scripts: ResMut<ScriptWorld>) {
+    for c in clicks.read() {
+        scripts.publish(None, "clicked", Answer::List(vec![c.at.x as f64, c.at.y as f64]));
+    }
+}
+```
+
+`examples/pointer.rs` has both halves, with a control-layer script on the other end
+(`cargo run --example pointer --features pointer`). It is 2D: for a 3D camera the point is on the
+near plane, and a game that wants the ground under the cursor casts its own ray
+(`Camera::viewport_to_world`).
 
 ## A dynamic proxy (`Rubevy::Proxy`)
 

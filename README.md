@@ -125,7 +125,12 @@ behind every claim, is
   taken up in one line with `ScriptWorld::load_and_run`, gives scripts `Rubevy::Camera` — `pan`,
   `zoom` that means the same on a 2D and a 3D camera, `follow`, `world_at`. An app that does not
   load it has no `Rubevy::Camera`, and nothing in `src/` knows what a camera is
-  (`cargo run --example camera_from_ruby`).
+  (`cargo run --example camera_from_ruby`). `rubevy::layers::CONTROL` lets a script be written
+  as handlers — `on(:scored) { |points| … }`, each a task that may wait — of what the game
+  publishes.
+* **The mouse in world units** (feature `pointer`): `PointerPlugin::<C>` sends `WorldGrab`,
+  `WorldClick`, `WorldDrop` and `WorldMove` as seen through the camera marked `C`
+  (`cargo run --example pointer --features pointer`).
 * **The browser**: the crate builds and runs for `wasm32-unknown-unknown` without
   `ruby-source`, and a test fails if `src/` names anything a browser lacks
   (`tests/no_wasm_unsupported.rs`).
