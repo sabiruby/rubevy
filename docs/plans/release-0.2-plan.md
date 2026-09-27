@@ -42,4 +42,5 @@ SabiRuby 0.7.0（SabiRuby の `docs/plans/release-0.7-plan.md`）では、task �
 | 段階 | 状況 |
 |---|---|
 | A | **済み（2026-09-26）**。R1 `stop_script` / `stop_script_for`、R2 捨てた問いはキューを閉じて `Rubevy::Unanswered`、R3 entity の無い問いは `None`、R4 `ScriptStats` の前置きの引き算（`require` したファイルは引かない）。計画外: 手で再起動したときに古い `Held` が残る不具合、2 度目の答えを断る。テスト 236、wasm（garden）pageerror 0・selftest 48 行。記録は `../worklog/2026-09-26-release-0.2-a.md`、CHANGELOG の Unreleased |
-| B〜E | 未着手 |
+| B〜D | **済み（2026-09-27）**。R5 SabiRuby 0.7、`unload_programs`、R6 control 層と `pointer`、games を 0.7 に（`docs/worklog/2026-09-27-release-0.2-bcd.md`） |
+| E | **済み（2026-09-27）**。`rubevy` 0.2.0・`rubevy-build` 0.2.0 を公開、tag `v0.2.0` |
