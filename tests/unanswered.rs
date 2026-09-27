@@ -264,3 +264,25 @@ fn a_second_answer_value_does_not_build() {
     }
     assert_eq!(built, 1, "the second closure was not run");
 }
+
+/// SabiRuby 0.7 lets a task wait inside `instance_exec` (sabiruby `docs/design/wait-anywhere.md`),
+/// and the `pop` it waits in there is the same `Task::Queue#pop`: a question dropped while the
+/// task is parked inside the block raises `Rubevy::Unanswered` out of the block as well.
+#[test]
+fn a_dropped_question_raises_inside_instance_exec() {
+    let mut app = app();
+    spawn_script(
+        &mut app,
+        r#"
+          class Holder; end
+          begin
+            Holder.new.instance_exec { Rubevy.ask("drop").pop }
+          rescue Rubevy::Unanswered => e
+            Rubevy.ask("after", e.class.to_s).pop
+          end
+          sleep 10
+        "#,
+    );
+    until(&mut app, 20, |app| !seen(app, "after").is_empty());
+    assert_eq!(seen(&app, "after"), vec![Some(String::from("Rubevy::Unanswered"))]);
+}

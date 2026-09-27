@@ -43,11 +43,12 @@ module Rubevy
     # A camera object on an entity the caller already holds, its projection read
     # (`Rubevy::Camera.attach(e, :Camera3d)`).
     #
-    # This and not `new` is the way to make one, and the reason is the VM: `Class#new` is a
-    # native, so everything `initialize` does happens inside a C function — and a task cannot be
-    # parked across one ("blocking pop cannot be called from within a C function boundary",
-    # SabiRuby `docs/design/fibers.md`). Reading a component is a parking, so `initialize` cannot
-    # read one and `reload` is called from out here, where the frame is an ordinary Ruby frame.
+    # This and not `new` is the way to make one. It was the VM's reason up to SabiRuby 0.6:
+    # `Class#new` ran `initialize` inside a native, a task could not be parked there, and reading
+    # a component is a parking, so `reload` is called from out here. SabiRuby 0.7 runs
+    # `initialize` in an ordinary frame (sabiruby `docs/design/wait-anywhere.md`), so `new` could
+    # read now; `attach` stays because it is the name the layer has published, and `new` keeps
+    # reading nothing so that making a camera object is not a round trip until one is wanted.
     def self.attach(entity, kind = nil)
       new(entity, kind).reload
     end

@@ -669,15 +669,24 @@ because spelling the round trip out reads better where it matters. The Ruby side
 `src/prelude.rb`, compiled to `.mrb` and run when the VM starts, so a script has these without
 requiring anything.
 
-**A read cannot wait inside `initialize`**, and that one is not fixable from here. `Class#new` is
-a native, so everything `initialize` does happens inside a C function — and the boundary a `[]`
-written in Ruby no longer puts around itself is still there around `new`. A script that reads a
-component in `initialize` does not get nil and does not raise something a `rescue` would name:
-the task dies with `blocking pop cannot be called from within a C function boundary`, the entity
-gets a `ScriptEnded` of `Failed`, and from the Ruby side the script simply stopped. Blocks,
-`times`, `while`, and any ordinary method are all fine — the boundary is `new` itself, not depth.
-So a class whose objects need the world at birth is built in two steps, which is what
-`Rubevy::Camera.attach` is:
+**Where a read can wait, and where it cannot.** Since SabiRuby 0.7 a task waits inside
+`initialize` (`Foo.new`), `instance_exec` / `instance_eval` / `class_exec`, `Method#call`,
+`public_send`, `Class.new { }`, `index { }`, `catch { }` and the other blocks listed in SabiRuby's
+[`docs/design/wait-anywhere.md`](https://github.com/sabiruby/sabiruby/blob/main/docs/design/wait-anywhere.md),
+as well as in plain blocks, `each`, `times`, `loop`, `while` and any ordinary method, which it
+always could. What is still a native boundary is a block or method that a native written in Rust
+calls back from the middle of its own loop: `sort { }`, `gsub { }` / `sub { }` / `scan { }`, the
+`to_s` that `join` calls, the `==` that `include?` calls, and a host function of the game's own
+(`Vm::define_fn`) that calls Ruby. A read there raises `RuntimeError` with a message that names
+the place — `can't wait inside Array#sort!'s call to a block (Task::Queue#pop)` — which a `rescue`
+can catch; unrescued, the entity gets a `ScriptEnded` of `Failed` that says where. (Up to
+SabiRuby 0.6 `initialize` and `instance_exec` were boundaries too, and the message was
+`blocking pop cannot be called from within a C function boundary` everywhere.)
+
+A class whose objects need the world at birth may now read it in `initialize`. The two-step
+build that `Rubevy::Camera.attach` is — a `new` that holds and reads nothing, and a class method
+that reads after it — is still a good shape where making the object should not cost a round
+trip:
 
 ```ruby
 class Body
@@ -1097,7 +1106,8 @@ a service reached over the `ask` channel — and register everything else.
 
 It rests on one property of the VM: a `method_missing` written in Ruby is dispatched in the frame
 the call was made in, not in a nested run loop, so the body may park the task on `pop` (SabiRuby
-`docs/design/fibers.md`, "Native boundaries"). Before that the same file raised
+`docs/design/fibers.md`, "Native boundaries", and `docs/design/wait-anywhere.md` for every path
+that can wait since 0.7). Before that the same file raised
 `blocking pop cannot be called from within a C function boundary`.
 
 ## What the script sees of the frame

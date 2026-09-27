@@ -184,7 +184,9 @@ fn read_at(vm: &mut Vm, v: Value, entity_tag: u32, left: usize) -> Result<RubyDa
                 // Array on the Ruby heap for this loop to read once and drop.
                 let mut out = Vec::with_capacity(keys.len());
                 for k in keys {
-                    let value = vm.hash_get(other, k).unwrap_or(Value::Nil);
+                    // the key's own `hash` / `eql?` run here (SabiRuby 0.7), and what they raise
+                    // is this read's error, not a missing entry
+                    let value = vm.hash_get(other, k)?.unwrap_or(Value::Nil);
                     let k = read_at(vm, k, entity_tag, deeper)?;
                     let value = read_at(vm, value, entity_tag, deeper)?;
                     out.push((k, value));

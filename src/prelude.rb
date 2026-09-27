@@ -4,9 +4,10 @@
 #
 # Why Ruby and not `Vm::define_fn`. Every reading method here waits for an answer, and waiting
 # is the one thing a native cannot do: `Rubevy.ask` parks the task on a queue, and the VM
-# refuses a blocking `pop` inside a native ("blocking pop cannot be called from within a C
-# function boundary", sabiruby src/builtins/ext_task.rs). A native would have to hand the queue
-# back and let the script `pop` it, which is not what `e[:Transform]` should be. So the work
+# refuses a blocking `pop` inside a host function that calls Ruby back ("can't wait inside
+# <the native>'s call to ... (Task::Queue#pop)" since SabiRuby 0.7; sabiruby
+# `docs/design/wait-anywhere.md`, "What is still a boundary"). A native would have to hand the
+# queue back and let the script `pop` it, which is not what `e[:Transform]` should be. So the work
 # stays on the Rust side (`answer_reflect_requests`, which the tick's answer loop calls between
 # two runs of the VM; src/lib.rs) and the waiting is here — the same reason `Rubevy::Proxy` is
 # Ruby.

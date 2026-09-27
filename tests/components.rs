@@ -320,3 +320,58 @@ fn a_read_asked_before_the_first_tick_is_answered_by_it() {
         "the task woke in the very tick it parked in"
     );
 }
+
+/// Since SabiRuby 0.7 a task waits inside `initialize` (`Class#new`) and `instance_exec` too
+/// (sabiruby `docs/design/wait-anywhere.md`), so a component read works there. It used to end
+/// the script with `blocking pop cannot be called from within a C function boundary`.
+#[test]
+fn a_read_waits_inside_initialize_and_instance_exec() {
+    let mut app = app();
+    let entity = app.world_mut().spawn(Hp { current: 7.0, max: 10.0 }).id();
+    run(
+        &mut app,
+        entity,
+        r#"
+          class Body
+            attr_reader :hp
+            def initialize(e)
+              @hp = e[:Hp][:current]
+            end
+          end
+          b = Body.new(Rubevy.entity)
+          max = Rubevy.entity.instance_exec { self[:Hp][:max] }
+          Rubevy.ask("read", b.hp, max).pop
+        "#,
+    );
+    frames(&mut app, 10);
+
+    let seen = app.world().resource::<Seen>();
+    let r = seen.0.first().expect("the script asked");
+    assert_eq!((r.num(0), r.num(1)), (Some(7.0), Some(10.0)));
+}
+
+/// What is still a native boundary says which one: a read inside `sort { }` raises an error
+/// that names `sort`, and a script can rescue it.
+#[test]
+fn a_read_inside_sort_names_the_boundary() {
+    let mut app = app();
+    let entity = app.world_mut().spawn(Hp { current: 7.0, max: 10.0 }).id();
+    run(
+        &mut app,
+        entity,
+        r#"
+          begin
+            [1, 2].sort { |a, b| Rubevy.entity[:Hp]; a <=> b }
+          rescue => e
+            Rubevy.ask("raised", e.message).pop
+          end
+        "#,
+    );
+    frames(&mut app, 10);
+
+    let seen = app.world().resource::<Seen>();
+    let r = seen.0.first().expect("the script asked");
+    assert_eq!(r.kind, "raised");
+    let message = r.text(0).expect("a message");
+    assert!(message.starts_with("can't wait inside") && message.contains("sort"), "{message}");
+}
