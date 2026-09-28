@@ -329,9 +329,13 @@ free, but none needs a new kind of VM.
    suite and the book are what make "safe" a claim with evidence. Needs: heap cap,
    per-task budgets (task), a `Host` policy for what scripts may reach.
    *Now (mostly):* a script cannot hang the frame. Instruction-counted timeslices stop an
-   endless loop; time limits stop what they cannot (`Array.new(1) { loop { } }` used to freeze
-   SabiRuby Battle; now that robot gets `Task::Overrun`, which a plain `rescue` does not
-   swallow, and the match goes on); a replaced or removed script's task is terminated; an
+   endless loop; time limits stop what they cannot — a task stuck in Ruby that a native called
+   back, such as a `to_s` that never returns called from `join` (`[obj].join`) or a `sort { }`
+   block, used to freeze the whole game; now that task gets `Task::Overrun`, which a plain
+   `rescue` does not swallow, and the other tasks run on the next frame (SabiRuby's
+   `tests/task.rs` checks the `join` case). The example was `Array.new(1) { loop { } }` until
+   SabiRuby 0.7, where `Array.new(n) { }` stopped being a native boundary and its block is
+   switched out by the ordinary timeslice; a replaced or removed script's task is terminated; an
    exception ends only its own script; a question the game drops unanswered raises
    `Rubevy::Unanswered` in the task waiting on it rather than leaving it parked for the life of
    the VM (0.2.0). Since 2026-09-17 a script that is not the game's own can
