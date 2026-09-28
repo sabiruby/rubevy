@@ -3,41 +3,67 @@
 Written 2026-09-12 from the SabiRuby plans (`sabiruby/docs/`: `eval-require-plan.md` for
 the `Host` trait, `gems.md` for mruby-task, `utf8-plan.md`, and
 `sabiruby-playground/docs/visualizer-plan.md` for snapshot/trace), and brought up to date on
-2026-09-14. The Japanese companion is `outlook.ja.md`; how a script and the game actually meet,
+2026-09-28. The Japanese companion is `outlook.ja.md`; how a script and the game actually meet,
 and what that gains over embedding the C mruby, is `rust-bridge.ja.md` (Japanese).
 
-**rubevy today (v1, 2026-09-14; the second VM 2026-09-17):** one VM for the app by default
+**rubevy today (0.2.1 on crates.io, 2026-09-27; the shape below dates from v1, 2026-09-14, and the second VM from 2026-09-17):** one VM for the app by default
 (`ScriptWorld`, a plain Bevy resource — `Vm` is `Send + Sync`) and as many more as the app names,
 each behind a type marker (`RubevyPlugin::<Mods>::for_vm("assets/mods")`, `ScriptWorld<Mods>`),
 one mruby-task task per `Script` entity with a priority, `sleep` on
 Bevy's `Time`, a budget of instructions and time limits per frame, `Rubevy.ask` for a script to
 ask the game something and wait, `ScriptStats` for what a script spends and where it stands,
 the task terminated when its `ScriptTask` is removed or the entity despawned, `puts` to the log
-and a `ScriptEnded` message. The game that uses all of it is SabiRuby Battle
-(`sabiruby/rubevy_games`), which also runs in the browser: https://sabiruby.github.io/rubevy_games/sabibots/ (the second game, Garden, at `…/garden/`; the entry page lists both)
+and a `ScriptEnded` message. The games that use it are the three of `sabiruby/rubevy_games` —
+SabiRuby Battle, Garden and Factory — and all three also run in the browser:
+https://sabiruby.github.io/rubevy_games/ (`…/sabibots/`, `…/garden/`, `…/factory/`).
 
-## Status at a glance (2026-09-15)
+**Releases** (`CHANGELOG.md` has what each one carries):
+
+| version | date | what |
+|---|---|---|
+| 0.0.1 | 2026-09-18 | the first release on crates.io |
+| 0.1.0 | 2026-09-22 | the general bridge (`docs/plans/generalize-plan.md`, `held-requests-plan.md`); `rubevy-build`, the build script that embeds `.rb` in the binary, published for the first time |
+| 0.2.0 | 2026-09-27 | on SabiRuby 0.7.0; the control layer, the pointer, `stop_script`, `Rubevy::Unanswered`, `unload_programs` (`docs/plans/release-0.2-plan.md`); `rubevy-build` 0.2.0 |
+| 0.2.1 | 2026-09-27 | a fix: the control layer logs a handler's exception at the author's line (no API change) |
+
+What 0.2.0 added: **the control layer** (`rubevy::layers::CONTROL`: `on(:event) { |payload| … }`
+in a script, one task per handler, the block run through `instance_exec`); **the pointer**
+(feature `pointer`: the mouse in world units through a marked camera, as `WorldGrab`,
+`WorldClick`, `WorldDrop`, `WorldMove`); **`stop_script`** (stop a script and leave the entity
+without one — taking `ScriptTask` off alone is a restart, and the documents now say so); **a
+question the game drops unanswered** raises `Rubevy::Unanswered` in whatever waits on it, where
+the task used to wait for the life of the VM; and **`ScriptWorld::unload_programs`**, which hands
+back to the VM the programs nothing runs any more (called by the game; doing it by itself is in
+`docs/backlog.md`). What came before it and this document does not otherwise name — the reads
+that return in the same tick (`docs/plans/sync-access-plan.md`), more than one VM
+(`docs/plans/multi-vm-plan.md`), `hold_requests` / `Held`, `answer_in_tick`, resources by name,
+`Rubevy.rejected_writes`, `Rubevy.next_frame`, `FrameStats`, `ScriptEnded::at`, the camera layer
+and `EmbeddedHost` — is in `docs/host-api.md`. What was decided to wait (a heap cap, `gc_step`,
+synchronous writes and the rest) is `docs/backlog.md`, one line each.
+
+## Status at a glance (2026-09-28)
 
 | | item | state |
 |---|---|---|
-| bridge 1 | `Host` | **partly**: `compile` (feature `ruby-source`) and `read_file` from the asset directory; the scheduler's clock from Bevy. Randomness is the VM's own (fixed seed or `srand`), not Bevy's RNG |
-| bridge 2 | hot reload | **in the restart form**: a script is replaced by removing its `ScriptTask` and inserting a new `Script` (the old task is terminated). SabiRuby Battle reloads on file save and applies editor text in memory. Redefining methods in place is not done |
-| bridge 3 | ECS bridge | **done**: deferred writes, `Rubevy.ask` (request/answer, not in the original list), `Rubevy::Entity` as a `Data` object, and components by name |
+| bridge 1 | `Host` | **partly**: `compile` (feature `ruby-source`) and `read_file` from the asset directory, or `require` out of tables built into the binary (`EmbeddedHost`, written by `rubevy-build`); the scheduler's clock from Bevy. Randomness is the VM's own (fixed seed or `srand`), not Bevy's RNG |
+| bridge 2 | hot reload | **in the restart form**: `replace_script` starts a script over (the old task is terminated), `stop_script` stops one, `unload_programs` hands back programs nothing runs. SabiRuby Battle reloads on file save and applies editor text in memory. Redefining methods in place is not done |
+| bridge 3 | ECS bridge | **done**: deferred writes, `Rubevy.ask` (request/answer, not in the original list), `Rubevy::Entity` as a `Data` object, components and resources by name, reads that return in the same tick, `hold_requests` / `Held` for an answer that is an action taking frames. Queries written as blocks are not done; synchronous writes wait (`docs/backlog.md`) |
 | bridge 4 | reflection | **done**: `e[:Transform]`, `e[:X] = hash`, `has?`, `components`, `Rubevy.find` — through `ReflectComponent`, with no glue per type |
-| bridge 5 | coroutine-style scripts | **done in task form** (`sleep`, waiting on `ask(...).pop`) |
-| bridge 6 | mruby-task | **done**, with time limits and `Task::Overrun` since 2026-09-14, and a second VM per name tag since 2026-09-17 |
-| bridge 7 | events | **done in queue form**: `Rubevy.subscribe(:hit)` answers a queue a game `publish`es onto, read in the script's own task or in one it made. No Ruby blocks as callbacks, and no `ScriptError` |
-| bridge 8 | GC in slices | **the timing half**: collections at the scheduler's idle points (`GC.scheduler_driven`). Still stop-the-world; no `gc_step` |
-| bridge 9 | in-game debugger | **the playground has the inspector**; in a game, what a script spends and the lines it keeps returning to |
+| bridge 5 | coroutine-style scripts | **done in task form** (`sleep`, `Rubevy.next_frame`, waiting on `ask(...).pop`), and since SabiRuby 0.7 (2026-09-27) inside `instance_exec`, `instance_eval`, `Method#call`, `Class#new`, `index { }` and the like; what cannot wait (`sort { }`, a native's own callbacks) raises an error that names the place |
+| bridge 6 | mruby-task | **done**, with time limits and `Task::Overrun` since 2026-09-14, and more VMs, one per name tag, since 2026-09-17 |
+| bridge 7 | events | **done in queue form**: `Rubevy.subscribe(:hit)` answers a queue a game `publish`es onto, read in the script's own task or in one it made; since 0.2.0 the control layer's `on(:event) { }` runs a block as a task of its own. How much a queue holds is the app's and the script's to say, and what it drops is counted. No `ScriptError` |
+| bridge 8 | GC in slices | **the timing half**: collections at the scheduler's idle points (`GC.scheduler_driven`). Still stop-the-world; `gc_step` waits (`docs/backlog.md`) |
+| bridge 9 | in-game debugger | **the playground has the inspector**; in a game, what a script spends and the lines it keeps returning to, what a frame came to (`FrameStats`) and where a script stopped (`ScriptEnded::at`) |
 | bridge 10 | text | **done** (UTF-8 strings, feature `utf8`, default on) |
-| bridge 11 | web | **done**: SabiRuby Battle's browser build, the compiler as a second wasm module |
+| bridge 11 | web | **done**: all three games of rubevy_games build for the browser, the compiler as a second wasm module |
 | possibility 1 | live image | **partly** (in-game editor, reload) |
 | possibility 2 | snapshots | not started (determinism is in place) |
-| possibility 3 | one cartridge, three machines | **two of three** (PC and browser) |
-| possibility 4 | safe user and AI content | **mostly** (budgets and time limits, and a VM of its own for the script that is not the game's; no heap cap) |
-| possibility 5 | thousands of small minds | **done** |
+| possibility 3 | one cartridge, three machines | **two of three** (PC and browser, three games) |
+| possibility 4 | safe user and AI content | **mostly** (budgets and time limits, a VM of its own for the script that is not the game's, `Rubevy::Unanswered` for a question the game drops; no heap cap — `docs/backlog.md`) |
+| possibility 5 | thousands of small minds | **done** (all three games; in Factory every inserter is a script) |
 | possibility 6 | learning by seeing the machine | **done in the playground** |
 | possibility 7 | prototype in CRuby | unchanged |
+| direction | Ruby as a DSL: waiting inside blocks | **done** (SabiRuby 0.7, 2026-09-27; see "Direction") |
 
 ## What rubevy builds (the bridge), in order
 
@@ -50,7 +76,9 @@ and a `ScriptEnded` message. The game that uses all of it is SabiRuby Battle
    two things: mruby-task's ticks follow Bevy's `Time` (`task_external_clock`,
    `task_advance_ticks`), and a monotonic clock on Bevy's `Instant` measures the time limits
    (`task_set_clock`). Randomness is not taken from the host. SabiRuby Battle compiles its
-   `.rb` in the game (in the browser, through the playground's compiler module).
+   `.rb` in the game (in the browser, through the playground's compiler module). Since 0.1.0
+   `EmbeddedHost` serves `require` out of tables built into the binary, which `rubevy-build`
+   writes from a build script — the only `require` a browser can have.
 2. **Hot reload.** Bevy's asset watcher → recompile. First version restarts the VM
    (state lost); with `eval`/`load`, redefine methods in place and keep state — reopening
    a class is ordinary Ruby, the method just points at a new irep.
@@ -58,7 +86,9 @@ and a `ScriptEnded` message. The game that uses all of it is SabiRuby Battle
    a new `Script` starts the script over, and an `on_remove` hook terminates the old task
    (before that hook the old one kept running unseen; `tests/replace.rs`). SabiRuby Battle
    watches its Ruby directory with `notify`, and its editor applies text to one robot in
-   memory. Redefining in place, keeping state, is still to do.
+   memory. Since 0.1.0 the swap is one call (`replace_script`), and since 0.2.0 `stop_script`
+   stops a script without starting it again and `ScriptWorld::unload_programs` hands back to the
+   VM the programs nothing runs any more. Redefining in place, keeping state, is still to do.
 3. **ECS bridge.** Ruby objects wrapping Rust values (mruby's `RData`; an
    `ObjKind::Data` with `Drop`) carry `Entity`, components and resources. `&mut World` is
    lent to the `Host` only while an exclusive system steps VMs; writes from Ruby are
@@ -106,6 +136,8 @@ and a `ScriptEnded` message. The game that uses all of it is SabiRuby Battle
    *Now:* done through tasks rather than raw fibers (the two cannot be mixed across a task
    switch; see the VM's `gems.md`). `sleep` waits in real time, and waiting on `ask(...).pop`
    costs nothing until the game answers — a robot's brain is a plain loop with no callbacks.
+   `Rubevy.next_frame` (0.1.0) waits exactly one frame. Since SabiRuby 0.7 (rubevy 0.2.0) a task
+   also waits inside `instance_exec`, `initialize` and the other blocks listed under "Direction".
 6. **mruby-task.** Many scripts in one VM with priorities; the tick is the frame and the
    loop is `run_once` per frame, not the blocking `Task.run`. Keeps the one-VM-per-entity
    option (stronger isolation, more memory) next to one-VM-many-tasks.
@@ -131,25 +163,32 @@ and a `ScriptEnded` message. The game that uses all of it is SabiRuby Battle
    blocks as callbacks are not done and may not be wanted: a block called from the host cannot
    wait, and waiting is the whole point of a task. An exception a script does not handle still
    ends its task and becomes a `ScriptEnded { status: Failed }` message; there is no
-   `ScriptError`.
+   `ScriptError`. (Later: how much a queue holds became the app's — `ScriptWorld::queue_limit` —
+   and the script's — `Rubevy.subscribe(:hit, limit: n)` — to say, and what it drops is counted,
+   in 0.1.0. Blocks came back in 0.2.0 without the problem above: the control layer's
+   `on(:event) { |payload| … }` runs each handler as a task of its own, subscribed in the
+   script's task, so the block can wait.)
 8. **GC in slices.** A `gc_step(work)` entry on the VM (the book's `mrb_gc_step` shape;
    today's collector is stop-the-world) so a frame never pays a whole collection; stress
    mode in development to find missing roots early.
    *Now:* the collector is still stop-the-world, but it runs at the scheduler's idle points
    (`GC.scheduler_driven`) rather than inside an allocation, with a debt limit for a scheduler
-   that never idles. Stress mode exists. `gc_step` does not.
+   that never idles. Stress mode exists. `gc_step` does not; it is the VM's to add and waits in
+   `docs/backlog.md`.
 9. **In-game debugger.** The playground's snapshot/trace is JSON; a `bevy_egui` window can
    show frames, registers, environments, fibers and GC without an editor.
    *Now:* the playground's inspector exists (stepping, named registers, environments, catch
    tables, fibers, heap and GC). In SabiRuby Battle an egui editor shades the lines a robot's
    brain keeps returning to, and the scoreboard shows the instructions each spends a frame.
-   The inspector in a game window is still to do.
+   The crate itself now says what a frame came to (`ScriptWorld::last_frame() -> FrameStats`) and
+   where a script stopped, in the author's lines (`ScriptEnded::at`). The inspector in a game
+   window is still to do.
 10. **Text.** UTF-8 strings (feature `utf8`, default on) for `bevy_text`.
     *Now:* done in the VM.
 11. **Web.** Bevy's wasm build takes SabiRuby as is (no_std, wasm32 in CI); the compiler
     needs wasi-sdk, so on the web either ship `.mrb` or compile in a Worker.
-    *Now:* done. SabiRuby Battle builds for the browser from the same code as the PC version
-    (`web/build.sh`, published on GitHub Pages). Ruby is compiled in the page by the
+    *Now:* done. All three games of rubevy_games (SabiRuby Battle, Garden, Factory) build for the
+    browser from the same code as the PC version (`web/build.sh`, published on GitHub Pages). Ruby is compiled in the page by the
     playground's `wasm32-wasip1` compiler module loaded beside the game, called synchronously
     from the game (`window.sabibotsCompile`), not in a Worker (`rubevy_games/docs/web.md`).
 
@@ -180,8 +219,9 @@ and a `ScriptEnded` message. The game that uses all of it is SabiRuby Battle
   clock stayed within noise.
 * `Data` objects with a free hook — **done** (2026-09-15, `ObjKind::Data`, `set_on_free`); rubevy's `Rubevy::Entity` uses it.
 * A typed host state reachable from natives (instead of a `static`) — **done** (2026-09-15, `set_host_state`, `define_closure`).
-* `gc_step(work)` — to do.
-* A heap cap — to do (possibility 4).
+* Waiting inside the blocks a DSL takes — **done** (SabiRuby 0.7, 2026-09-27; see "Direction").
+* `gc_step(work)` — to do; waits in `docs/backlog.md`.
+* A heap cap — to do (possibility 4); waits in `docs/backlog.md`.
 
 ## How good is this, honestly
 
@@ -190,7 +230,8 @@ novelty**. Lua through `mlua`, and Rhai/Rune, are established Bevy scripting cho
 (`bevy_mod_scripting` — from memory, not re-checked here — already does
 reflection-based bindings, hot reload, and coroutines are native to Lua); Lua has an
 incremental GC and debug hooks, and a Lua VM is faster than mruby, which is itself faster
-than SabiRuby today (fib 3.5× slower than the reference). Items 1–9 bring rubevy to that
+than SabiRuby today (the 27 benchmarks of SabiRuby's README take 2.57× the reference's
+total time). Items 1–9 bring rubevy to that
 level; they do not pass it.
 
 What is genuinely distinctive is smaller and specific:
@@ -198,19 +239,20 @@ What is genuinely distinctive is smaller and specific:
 * **Ruby as the scripting language for Bevy.** Nothing offers it today; the audience is
   Rubyists and the mruby community (large in Japan), not Bevy users in general.
 * **mruby bytecode compatibility.** `mrbc`, PicoRuby's gems and the reference test suite
-  are reusable, and correctness is measurable (2344 of 2507 of mruby's own tests and the
-  ported gems' tests, the rest with reasons) rather than asserted — most scripting bindings
+  are reusable, and correctness is measurable (2344 of 2508 of mruby's own tests and the
+  ported gems' tests in the default build, the rest with reasons) rather than asserted — most scripting bindings
   cannot say that about their language.
 * **A VM designed for hosting.** Result-based unwinding, data-only state, budgeted
   runs and a VM that is an ordinary `Send + Sync` value make embedding simpler than mruby's C
   API (`mrb_state`, `setjmp`, arena) — this is an engineering quality argument, not a
-  feature. `rust-bridge.ja.md` walks through it point by point; the VM crate has one `unsafe`.
+  feature. `rust-bridge.ja.md` walks through it point by point; the VM crate has no `unsafe` (the last
+  one went on 2026-09-15, SabiRuby `354b6bb`).
 * **The book and the kit.** The VM is explained and verifiable end to end, which matters
   for people who want to understand or modify their scripting layer.
 
 Weak points to state plainly: performance (interpreter speed, and whole collections until
-`gc_step`; the time limits bound a frame, they do not make scripts faster), maturity (v1,
-one game), no Ruby ecosystem beyond mruby's gems, and one more language to learn for a Bevy
+`gc_step`; the time limits bound a frame, they do not make scripts faster), maturity (0.2,
+three sample games), no Ruby ecosystem beyond mruby's gems, and one more language to learn for a Bevy
 team. A fair summary: **rubevy is the right choice for someone who wants Ruby in Bevy, and a
 reasonable one for someone who wants a small, inspectable, verifiable scripting VM; it is not
 a reason to leave Lua.**
@@ -231,6 +273,19 @@ SabiRuby Battle is that direction in practice (2026-09-14): `robot "Scout" do �
 `match "Training", noise: 0.3 do … end` are DSLs built with `Class.new` and `class_eval`, the
 robot's brain decides and asks, and the physics, the damage and the rules are Rust systems.
 
+**Waiting inside a DSL's blocks (SabiRuby 0.7, 2026-09-27).** A DSL takes a block and runs it with
+`instance_exec`; until SabiRuby 0.6 that block ran in a nested run loop, and a task could not wait
+inside it — SabiRuby Battle had to turn each `on(:hit) { }` into a method of its own. SabiRuby 0.7
+does what mruby 4.1 does for `instance_exec`: `instance_exec`, `instance_eval`, `class_eval`,
+`Method#call`, `send`, `Class#new` (its `initialize`), `index { }`, `Array.new(n) { }`, `catch { }`
+and the like push the block as an ordinary frame, so a task waits inside them — `pop`, `sleep`,
+and rubevy's reads. What is still a boundary raises an error that names the place, such as
+`can't wait inside Array#join's call to #to_s (Task::Queue#pop)`: `sort { }` (the author chose
+speed there), `ObjectSpace.each_object { }`, the blocks of `sub` / `gsub` / `scan`, Ruby called
+back from a host function, and the callbacks a native makes on its own (`to_s`, `==`, `<=>` and
+the rest). SabiRuby's `docs/design/wait-anywhere.md` has the whole list. rubevy 0.2.0 moved to it,
+and its control layer is written the plain way — the handler's block through `instance_exec`.
+
 ## Possibilities (the ambitious version, 2026-09-12)
 
 Each of these follows from one property the VM already has or has planned; none is
@@ -243,7 +298,7 @@ free, but none needs a new kind of VM.
    eval, the debugger pane (planned).
    *Now (partly):* SabiRuby Battle edits a robot's brain in the game and applies it with F5,
    to that robot only and in memory; saving a file restarts the robots on it; the browser
-   build has the same editor. The pieces under it (`Host`, `eval`, `require`/`load`, compiling
+   build has the same editor, and Garden and Factory do the same for their own Ruby. The pieces under it (`Host`, `eval`, `require`/`load`, compiling
    in the game) are in. What restarts is the task, so its state is not kept; redefining a
    method while it keeps running, and a REPL, are still to do.
 2. **Snapshot the whole script state.** Registers, frames, heap, fibers are plain data,
@@ -263,9 +318,9 @@ free, but none needs a new kind of VM.
    console: write once, play on the desk, in a link, and in the hand. Needs: the
    embedded target of SabiRuby (thumbv7em builds in CI already), a small display API in
    `Host`.
-   *Now (two of three):* SabiRuby Battle is one codebase built for the PC and for the browser,
-   the difference kept in one module chosen by target (`sabibots/src/platform.rs`); the
-   browser build is public. The microcontroller side is still only the VM building for
+   *Now (two of three):* each of the three games of rubevy_games is one codebase built for the PC
+   and for the browser, the difference kept in one module chosen by target (each game's
+   `src/platform.rs`); all three browser builds are public. The microcontroller side is still only the VM building for
    `thumbv7em-none-eabi` in CI.
 4. **Safe user and AI content.** Instruction budgets, a heap the host can cap, no I/O
    except through `Host`: a mod or an LLM-written script cannot hang the frame, exhaust
@@ -277,10 +332,12 @@ free, but none needs a new kind of VM.
    endless loop; time limits stop what they cannot (`Array.new(1) { loop { } }` used to freeze
    SabiRuby Battle; now that robot gets `Task::Overrun`, which a plain `rescue` does not
    swallow, and the match goes on); a replaced or removed script's task is terminated; an
-   exception ends only its own script. Since 2026-09-17 a script that is not the game's own can
+   exception ends only its own script; a question the game drops unanswered raises
+   `Rubevy::Unanswered` in the task waiting on it rather than leaving it parked for the life of
+   the VM (0.2.0). Since 2026-09-17 a script that is not the game's own can
    also be given a VM of its own — its heap, globals, classes, subscriptions, budget and
    `require` path apart from the game's — which is the isolation half of this item
-   (`docs/host-api.md`, "Two VMs in one app"). Still to do: a heap cap, interrupting a single
+   (`docs/host-api.md`, "Two VMs in one app"). Still to do: a heap cap (the VM's; `docs/backlog.md`), interrupting a single
    native that takes long (it is noticed when it returns), and the host policy. A second VM is
    not a sandbox on its own: without a heap cap a mod can still take the memory, and what its
    VM may reach is whatever the game answers it.
@@ -289,8 +346,9 @@ free, but none needs a new kind of VM.
    faction or one per entity are both affordable. Needs: task (planned), `gc_step`.
    *Now (done, 2026-09-13):* rubevy v1 is this shape, and SabiRuby Battle runs a match script
    (priority 10) and four robot brains (priority 100) as tasks of one VM, each asking the game
-   and waiting at no cost. Several tasks inside one robot (a `reflex` block on a hit) is the
-   game's next step.
+   and waiting at no cost. Several tasks inside one robot came after: a robot's
+   `on(:hit) do |by, damage| … end` runs as a task of its own, and in Factory every inserter is a
+   script. rubevy 0.2.0 made that `on` general (the control layer).
 6. **Learning by seeing the machine.** The playground's visualizer in the game window:
    beginners write Ruby, see entities move, and can open the VM to see the registers and
    the frames. Ruby is a teaching language in Japan; a game engine with a transparent VM
