@@ -4,6 +4,15 @@ What changed in each release of `rubevy`. Every claim names the commit behind it
 the work came in on a branch) and the document under `docs/` that records it; measurements are the
 ones those documents carry, and nothing is estimated.
 
+## 0.3.0 — 2026-10-19
+
+Published: `rubevy` 0.3.0 and `rubevy-build` 0.3.0 (unchanged, moved with `rubevy` as the two go together at a minor release, as in 0.2.0). On SabiRuby 0.8.0 (`sabiruby` 0.8, `sabiruby-compiler` 0.5). The plan was `docs/plans/release-0.3-plan.md`; the record is `docs/worklog/2026-10-19-release-0.3.md`.
+
+### Changed — coming from 0.2
+
+- **Requires `sabiruby` 0.8** (with `sabiruby-compiler` 0.5 for `ruby-source`). rubevy's own code, API and behaviour are unchanged: the APIs SabiRuby 0.8.0 broke (`HashData`, `InstanceKind`, `HeapObject`, `CallInfo`, the argument spec; sabiruby `CHANGELOG.md`) are none that rubevy calls, and it builds and passes its tests against 0.8 as it stood. The minor moves because `sabiruby` is a public dependency: **an app that names `sabiruby` itself moves to 0.8 with it**, or the binary carries two VMs and a `Value` of one is not a `Value` of the other. What the scripts see is SabiRuby 0.8's own changes (mruby 4.1.0-rc2 as the reference; sabiruby `CHANGELOG.md`).
+- **The README's install section named `sabiruby` 0.6 and `sabiruby-compiler` 0.3**, left over from 0.1 through 0.2.x; it names 0.8 and 0.5 now.
+
 ## 0.2.1 — 2026-09-27
 
 Published: `rubevy` 0.2.1 (a fix and documentation, no public API change). `rubevy-build` stays at 0.2.0 (no change).

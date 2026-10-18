@@ -31,6 +31,7 @@ rubevy は crates.io に出ています（`cargo add rubevy`）。バージョ�
 | 0.1.0 | 2026-09-22 | 汎用のつなぎこみへ（`docs/plans/generalize-plan.md`、`held-requests-plan.md`）。`rubevy-build`（`.rb` をバイナリに埋め込むビルドスクリプト）もこのとき初めて公開 |
 | 0.2.0 | 2026-09-27 | SabiRuby 0.7.0 に上げた。下の 5 つを足した（`docs/plans/release-0.2-plan.md`）。`rubevy-build` も 0.2.0 |
 | 0.2.1 | 2026-09-27 | control 層の handler の例外を、作者の書いた行で出す修正（API の変更なし） |
+| 0.3.0 | 2026-10-19 | SabiRuby 0.8.0 に上げた（`docs/plans/release-0.3-plan.md`）。変えたのは依存のバージョンだけで、rubevy 自身の API と振る舞いは同じ。`rubevy-build` も 0.3.0（中身は同じ） |
 
 0.2.0 で足したもの:
 
