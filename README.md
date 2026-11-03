@@ -172,26 +172,26 @@ cargo add rubevy
 
 ```toml
 [dependencies]
-rubevy = "0.3"
+rubevy = "0.4"
 bevy = "0.19.1"
 ```
 
-The VM comes from crates.io with it: [`sabiruby`](https://crates.io/crates/sabiruby) 0.8.
+The VM comes from crates.io with it: [`sabiruby`](https://crates.io/crates/sabiruby) 0.9.
 Nothing else is required: a script that `require`s a `.mrb` works out of the box. An app that
-names `sabiruby` itself must name the same 0.8 — two different sources for the VM are two VMs in
+names `sabiruby` itself must name the same 0.9 — two different sources for the VM are two VMs in
 the binary, and a `Value` of one is not a `Value` of the other.
 
 `ruby-source` is the one feature. It lets a script `require` a `.rb` as well, by bringing
-[`sabiruby-compiler`](https://crates.io/crates/sabiruby-compiler) 0.5 (the reference mruby
+[`sabiruby-compiler`](https://crates.io/crates/sabiruby-compiler) 0.6 (the reference mruby
 compiler, built as C) along — so it wants a C toolchain, and it does not build for
 `wasm32-unknown-unknown`. Without it, compile the `.rb` ahead of time (`tools/compile_scripts.sh`)
 and ship the `.mrb`.
 
 ```toml
-rubevy = { version = "0.3", features = ["ruby-source"] }
+rubevy = { version = "0.4", features = ["ruby-source"] }
 ```
 
-The version is 0.3: the API is still moving, and what each release contains — including what to
+The version is 0.4: the API is still moving, and what each release contains — including what to
 change when coming from 0.0.1 — is
 [`CHANGELOG.md`](https://github.com/sabiruby/rubevy/blob/main/CHANGELOG.md).
 

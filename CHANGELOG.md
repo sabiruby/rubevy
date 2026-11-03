@@ -4,6 +4,14 @@ What changed in each release of `rubevy`. Every claim names the commit behind it
 the work came in on a branch) and the document under `docs/` that records it; measurements are the
 ones those documents carry, and nothing is estimated.
 
+## 0.4.0 — 2026-11-03
+
+Published: `rubevy` 0.4.0 and `rubevy-build` 0.4.0 (unchanged, moved with `rubevy` as at 0.2.0 and 0.3.0). On SabiRuby 0.9.0 (`sabiruby` 0.9, `sabiruby-compiler` 0.6). The plan was `docs/plans/release-0.4-plan.md`; the record is `docs/worklog/2026-11-03-release-0.4.md`.
+
+### Changed — coming from 0.3
+
+- **Requires `sabiruby` 0.9** (with `sabiruby-compiler` 0.6 for `ruby-source`). rubevy's own code, API and behaviour are unchanged. SabiRuby 0.9.0 only adds (the feature `checkpoint`, off by default, and `Vm::output_sink`; sabiruby `CHANGELOG.md`), and rubevy uses neither. The minor moves for the same reason as 0.3.0: `sabiruby` is a public dependency, so **an app that names `sabiruby` itself moves to 0.9 with it**, or the binary carries two VMs.
+
 ## 0.3.0 — 2026-10-19
 
 Published: `rubevy` 0.3.0 and `rubevy-build` 0.3.0 (unchanged, moved with `rubevy` as the two go together at a minor release, as in 0.2.0). On SabiRuby 0.8.0 (`sabiruby` 0.8, `sabiruby-compiler` 0.5). The plan was `docs/plans/release-0.3-plan.md`; the record is `docs/worklog/2026-10-19-release-0.3.md`.

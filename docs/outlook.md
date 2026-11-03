@@ -6,7 +6,7 @@ the `Host` trait, `gems.md` for mruby-task, `utf8-plan.md`, and
 2026-09-28. The Japanese companion is `outlook.ja.md`; how a script and the game actually meet,
 and what that gains over embedding the C mruby, is `rust-bridge.ja.md` (Japanese).
 
-**rubevy today (0.3.0 on crates.io, 2026-10-19; the shape below dates from v1, 2026-09-14, and the second VM from 2026-09-17):** one VM for the app by default
+**rubevy today (0.4.0 on crates.io, 2026-11-03; the shape below dates from v1, 2026-09-14, and the second VM from 2026-09-17):** one VM for the app by default
 (`ScriptWorld`, a plain Bevy resource — `Vm` is `Send + Sync`) and as many more as the app names,
 each behind a type marker (`RubevyPlugin::<Mods>::for_vm("assets/mods")`, `ScriptWorld<Mods>`),
 one mruby-task task per `Script` entity with a priority, `sleep` on
@@ -26,6 +26,7 @@ https://sabiruby.github.io/rubevy_games/ (`…/sabibots/`, `…/garden/`, `…/f
 | 0.2.0 | 2026-09-27 | on SabiRuby 0.7.0; the control layer, the pointer, `stop_script`, `Rubevy::Unanswered`, `unload_programs` (`docs/plans/release-0.2-plan.md`); `rubevy-build` 0.2.0 |
 | 0.2.1 | 2026-09-27 | a fix: the control layer logs a handler's exception at the author's line (no API change) |
 | 0.3.0 | 2026-10-19 | on SabiRuby 0.8.0 (`docs/plans/release-0.3-plan.md`): the dependencies only, no change to rubevy's own API or behaviour; `rubevy-build` 0.3.0 (unchanged) |
+| 0.4.0 | 2026-11-03 | on SabiRuby 0.9.0 (`docs/plans/release-0.4-plan.md`): the dependencies only, as 0.3.0; `rubevy-build` 0.4.0 (unchanged) |
 
 What 0.2.0 added: **the control layer** (`rubevy::layers::CONTROL`: `on(:event) { |payload| … }`
 in a script, one task per handler, the block run through `instance_exec`); **the pointer**
